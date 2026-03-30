@@ -9,27 +9,105 @@ from pathlib import Path
 import numpy as np
 
 
+def _axis_scores(vals: np.ndarray):
+    """根据数值范围粗略判断该坐标轴更像 RT 还是 m/z。"""
+    vals = np.asarray(vals, dtype=np.float64)
+    if vals.ndim != 1 or vals.size < 8:
+        return -1.0, -1.0
+
+    finite = np.isfinite(vals)
+    if not finite.any():
+        return -1.0, -1.0
+    vals = vals[finite]
+    vmin, vmax = float(np.min(vals)), float(np.max(vals))
+    span = vmax - vmin
+
+    rt_score = 0.0
+    mz_score = 0.0
+
+    if vmin >= 0:
+        rt_score += 0.5
+    if 0 <= vmax <= 240:
+        rt_score += 2.0
+    if 0.2 <= span <= 300:
+        rt_score += 1.0
+
+    if 20 <= vmin <= 80:
+        mz_score += 1.0
+    if 80 <= vmax <= 1500:
+        mz_score += 2.0
+    if 50 <= span <= 2000:
+        mz_score += 1.0
+
+    return rt_score, mz_score
+
+
 # ═══════════════════════════════════════════════════════════
 #  后端 1：rainbow-api（推荐）
 # ═══════════════════════════════════════════════════════════
 def _read_with_rainbow(d_path: Path):
-    """返回 (rts, mz_axis, intensity_matrix) 或 (rts, spectra_list)。"""
+    """从 .D 中挑选最像 GC-MS 全扫描矩阵的数据并标准化为 RT x m/z。"""
     import rainbow as rb
 
     d = rb.read(str(d_path))
-    ms = None
+
+    best = None
+    best_score = -1e9
+
+    # 仅作为弱优先级：根目录 data.ms 通常是主 MS 二进制
+    preferred = str((d_path / "data.ms").as_posix()).lower()
+
     for f in d.datafiles:
         name = getattr(f, "name", "")
-        if name.lower().endswith(".ms"):
-            ms = f
-            break
-    if ms is None:
-        raise ValueError(f"rainbow 未找到 MS 数据: {d_path}")
+        x = getattr(f, "xlabels", None)
+        y = getattr(f, "ylabels", None)
+        data = getattr(f, "data", None)
+        if x is None or y is None or data is None:
+            continue
 
-    rts = np.asarray(ms.ylabels, dtype=np.float64)
-    mzs = np.asarray(ms.xlabels, dtype=np.float64)
-    data = np.asarray(ms.data, dtype=np.float64)
-    return rts, mzs, data
+        x = np.asarray(x, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        arr = np.asarray(data, dtype=np.float64)
+        if arr.ndim != 2:
+            continue
+
+        # 规范到 arr.shape == (len(y), len(x))
+        if arr.shape == (len(y), len(x)):
+            mat_yx = arr
+        elif arr.shape == (len(x), len(y)):
+            mat_yx = arr.T
+        else:
+            continue
+
+        x_rt, x_mz = _axis_scores(x)
+        y_rt, y_mz = _axis_scores(y)
+
+        # 方案 A: y=RT, x=m/z（无需转置）
+        score_a = y_rt + x_mz - (x_rt + y_mz) * 0.25
+        # 方案 B: x=RT, y=m/z（需要转置到 RT x m/z）
+        score_b = x_rt + y_mz - (y_rt + x_mz) * 0.25
+
+        bonus = 0.5 if str(name).lower() == preferred else 0.0
+        if score_a + bonus >= score_b + bonus:
+            cand_score = score_a + bonus
+            cand_rts = y
+            cand_mzs = x
+            cand_mat = mat_yx
+        else:
+            cand_score = score_b + bonus
+            cand_rts = x
+            cand_mzs = y
+            cand_mat = mat_yx.T
+
+        if cand_score > best_score:
+            best_score = cand_score
+            best = (cand_rts, cand_mzs, cand_mat)
+
+    if best is None:
+        raise ValueError(f"rainbow 未找到可用二维 MS 数据: {d_path}")
+
+    rts, mzs, data = best
+    return np.asarray(rts, dtype=np.float64), np.asarray(mzs, dtype=np.float64), np.asarray(data, dtype=np.float64)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -144,12 +222,16 @@ def rasterize(
     mz_edges = np.linspace(mz_min, mz_max, mz_bins + 1)
 
     if mode == "matrix":
-        mz_axis = data_or_spectra  # 这里传进来的顺序需要注意
-        intensity_matrix = mz_axis_or_none
-        # 实际调用时: rasterize(mode, rts, mz_axis, intensity_matrix, ...)
-        # 重新理解参数
-        mz_vals = data_or_spectra
-        int_mat = mz_axis_or_none
+        mz_vals = np.asarray(data_or_spectra, dtype=np.float64)
+        int_mat = np.asarray(mz_axis_or_none, dtype=np.float64)
+        # 兜底：确保维度一致为 (len(rts), len(mz_vals))
+        if int_mat.shape == (len(mz_vals), len(rts)):
+            int_mat = int_mat.T
+        if int_mat.shape != (len(rts), len(mz_vals)):
+            raise ValueError(
+                f"矩阵维度与坐标不一致: int_mat={int_mat.shape}, "
+                f"len(rts)={len(rts)}, len(mz)={len(mz_vals)}"
+            )
         for i, rt in enumerate(rts):
             if rt < rt_min or rt > rt_max:
                 continue

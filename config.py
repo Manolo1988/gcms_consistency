@@ -24,6 +24,11 @@ class Config:
     rt_range: Optional[tuple] = None          # None = 自动检测
     mz_range: tuple = (35.0, 550.0)           # GC-MS 常用范围
     log_transform: bool = True
+    # 是否在 prepare 前扫描所有样本自动推断更合理的 RT/m/z 范围
+    infer_ranges_from_data: bool = True
+    # 用于稳健截断，避免极端值把范围拉得过大
+    rt_range_percentiles: tuple = (1.0, 99.5)
+    mz_range_percentiles: tuple = (1.0, 99.0)
 
     # ── 模型 ─────────────────────────────────────────────
     in_channels: int = 2                      # 绝对 + 相对通道
@@ -62,5 +67,13 @@ class Config:
     # ── 排除规则 ──────────────────────────────────────────
     exclude_blanks: bool = True
     exclude_special: bool = True              # 排除空白/清洗剂/环境样等非产品样本
+
+    # ── 数据准备可视化 ────────────────────────────────────
+    save_prepare_plots: bool = True
+    # None 表示全部保存；若设为整数则仅保存前 N 个样本图
+    prepare_plot_max_samples: Optional[int] = None
+    prepare_plot_dpi: int = 120
+    # 数据与图片文件名是否包含批次/产品标签
+    tag_output_with_batch_and_product: bool = True
 
     seed: int = 42
