@@ -18,7 +18,7 @@ def cmd_prepare(cfg):
     from data_prepare import scan_dataset, convert_all
     metadata = scan_dataset(cfg.dataset_root)
     print("\n产品分布:")
-    print(metadata["product_fine"].value_counts().to_string())
+    print(metadata["code"].value_counts().to_string())
     convert_all(metadata, cfg.prepared_dir, cfg)
 
 
@@ -127,9 +127,39 @@ def main():
     parser.add_argument("command", choices=["prepare", "train", "evaluate", "interpret"])
     parser.add_argument("--fold", type=int, default=0)
     parser.add_argument("--sample_idx", type=int, default=0)
+    parser.add_argument("--save_plot", dest="save_prepare_plots", action="store_true", default=False,
+                        help="数据准备阶段保存 plot 图")
+    parser.add_argument("--no-save_plot", dest="save_prepare_plots", action="store_false",
+                        help="数据准备阶段不保存 plot 图")
+    parser.add_argument("--save_table", dest="save_prepare_tables", action="store_true", default=False,
+                        help="数据准备阶段保存 table 表格")
+    parser.add_argument("--no-save_table", dest="save_prepare_tables", action="store_false",
+                        help="数据准备阶段不保存 table 表格")
+    parser.add_argument("--rt_min", type=float, default=3.17, help="手动设置 RT 最小值（min）")
+    parser.add_argument("--rt_max", type=float, default=36.91, help="手动设置 RT 最大值（min）")
+    parser.add_argument("--mz_min", type=float, default=0, help="手动设置 m/z 最小值")
+    parser.add_argument("--mz_max", type=float, default=200, help="手动设置 m/z 最大值")
     args = parser.parse_args()
 
     cfg = Config()
+
+    cfg.save_prepare_plots = bool(args.save_prepare_plots)
+    cfg.save_prepare_tables = bool(args.save_prepare_tables)
+
+    if (args.rt_min is not None) or (args.rt_max is not None):
+        rt_min = cfg.rt_range[0] if args.rt_min is None else args.rt_min
+        rt_max = cfg.rt_range[1] if args.rt_max is None else args.rt_max
+        if rt_max <= rt_min:
+            raise ValueError(f"RT 范围非法: rt_min={rt_min}, rt_max={rt_max}")
+        cfg.rt_range = (float(rt_min), float(rt_max))
+
+    if (args.mz_min is not None) or (args.mz_max is not None):
+        mz_min = cfg.mz_range[0] if args.mz_min is None else args.mz_min
+        mz_max = cfg.mz_range[1] if args.mz_max is None else args.mz_max
+        if mz_max <= mz_min:
+            raise ValueError(f"m/z 范围非法: mz_min={mz_min}, mz_max={mz_max}")
+        cfg.mz_range = (float(mz_min), float(mz_max))
+
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
 
     if args.command == "prepare":

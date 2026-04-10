@@ -297,11 +297,35 @@ def build_dual_channel(grid):
     return np.stack([ch0, ch1], axis=0).astype(np.float32)
 
 
+def _extract_observed_mz_range(mode, data_or_spectra):
+    """提取样本原始数据中的 m/z 观测范围（未按配置截断）。"""
+    if mode == "matrix":
+        mz_vals = np.asarray(data_or_spectra, dtype=np.float64)
+        if mz_vals.size == 0:
+            return None
+        return float(np.nanmin(mz_vals)), float(np.nanmax(mz_vals))
+
+    if mode == "spectra":
+        mz_min, mz_max = np.inf, -np.inf
+        for mzs, _ints in data_or_spectra:
+            mzs = np.asarray(mzs, dtype=np.float64)
+            if mzs.size == 0:
+                continue
+            mz_min = min(mz_min, float(np.nanmin(mzs)))
+            mz_max = max(mz_max, float(np.nanmax(mzs)))
+        if np.isfinite(mz_min) and np.isfinite(mz_max):
+            return mz_min, mz_max
+        return None
+
+    return None
+
+
 def d_folder_to_tensor(d_path, rt_bins=1024, mz_bins=256,
                        rt_range=None, mz_range=(35.0, 550.0),
-                       backend="auto"):
+                       backend="auto", return_mz_stats=False):
     """一步到位：.D → (2, rt_bins, mz_bins) 张量。"""
     mode, rts, a, b = read_gcms_data(d_path, backend=backend)
+    observed_mz_range = _extract_observed_mz_range(mode, a)
 
     if mode == "matrix":
         grid, actual_rt = rasterize(
@@ -323,4 +347,6 @@ def d_folder_to_tensor(d_path, rt_bins=1024, mz_bins=256,
         )
 
     tensor = build_dual_channel(grid)
+    if return_mz_stats:
+        return tensor, grid, actual_rt, observed_mz_range
     return tensor, grid, actual_rt

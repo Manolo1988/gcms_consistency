@@ -21,12 +21,10 @@ class Config:
     # ── RT × m/z 网格 ────────────────────────────────────
     rt_bins: int = 1024
     mz_bins: int = 256
-    rt_range: Optional[tuple] = None          # None = 自动检测
-    mz_range: tuple = (35.0, 550.0)           # GC-MS 常用范围
+    rt_range: Optional[tuple] = (0.0, 40.0)   # 固定保留时间范围 (min)
+    mz_range: tuple = (0.0, 200.0)            # 固定 m/z 范围
     log_transform: bool = True
-    # 是否在 prepare 前扫描所有样本自动推断更合理的 RT/m/z 范围
-    infer_ranges_from_data: bool = True
-    # 用于稳健截断，避免极端值把范围拉得过大
+    # 用于兼容旧流程，固定范围下不再自动推断
     rt_range_percentiles: tuple = (1.0, 99.5)
     mz_range_percentiles: tuple = (1.0, 99.0)
 
@@ -75,5 +73,8 @@ class Config:
     prepare_plot_dpi: int = 120
     # 数据与图片文件名是否包含批次/产品标签
     tag_output_with_batch_and_product: bool = True
+
+    # ── 数据准备表格导出 ─────────────────────────────────
+    save_prepare_tables: bool = True
 
     seed: int = 42

@@ -14,7 +14,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from config import Config
-from data_reader import d_folder_to_tensor, read_gcms_data
+from data_reader import d_folder_to_tensor
 
 cfg = Config()
 
@@ -35,16 +35,15 @@ SPEC_NAME_MAP = {
     "HMD": "牡丹（软）",
 }
 
-# # 后前三位作为产品分类，剩余部分作为测试信息
+# 后前三位作为产品分类，剩余部分作为测试信息
 _RE_STD = re.compile(r"^([A-Za-z][A-Za-z0-9]{2})(.*)$", re.IGNORECASE)
 
 
-def _special(fine_code: str, coarse_code: str, spec_name: str, stem: str) -> dict:
+def _special(code: str, spec_name: str, stem: str) -> dict:
     seq_match = re.match(r"^(\d+)#", stem)
     return {
         "seq_no": int(seq_match.group(1)) if seq_match else None,
-        "fine_code": fine_code,
-        "coarse_code": coarse_code,
+        "code": code,
         "spec_name": spec_name,
         "line_code": "",
         "lot_id": "",
@@ -60,7 +59,7 @@ def parse_d_name(folder_name: str) -> dict:
     stem_up = stem_nsp.upper()
 
     if any(k in stem_up for k in ("空白", "BLANK", "BALNK")):
-        return _special("BLANK", "BLANK", "空白样", stem)
+        return _special("BLANK", "空白样", stem)
 
     for keywords, code, name in (
         (("管道清洗剂",), "CLEANER", "管道清洗剂"),
@@ -69,17 +68,17 @@ def parse_d_name(folder_name: str) -> dict:
         (("内标",), "INSTD", "内标"),
     ):
         if any(k in stem for k in keywords):
-            return _special(code, code, name, stem)
+            return _special(code, name, stem)
 
     if any(k in stem for k in ("凝似被污染", "污染")):
-        return _special("CONTAM", "CONTAM", "疑似污染", stem)
+        return _special("CONTAM", "疑似污染", stem)
 
     no_seq = re.sub(r"^\d+#", "", stem_nsp)
     if no_seq.upper().startswith("WYZX"):
-        return _special("WYZX", "WYZ", "乌兰参照样", stem)
+        return _special("WYZX", "乌兰参照样", stem)
 
     if re.match(r"^\d+号取样点", no_seq):
-        return _special("ENV", "ENV", "环境取样", stem)
+        return _special("ENV", "环境取样", stem)
 
     seq_match = re.match(r"^(\d+)#", stem_nsp)
     seq_no = int(seq_match.group(1)) if seq_match else None
@@ -90,8 +89,7 @@ def parse_d_name(folder_name: str) -> dict:
 
     m = _RE_STD.match(body)
     if m:
-        coarse_code = m.group(1).upper()
-        fine_code = coarse_code
+        code = m.group(1).upper()
         tail = m.group(2).strip()
 
         line_code = ""
@@ -105,13 +103,12 @@ def parse_d_name(folder_name: str) -> dict:
             lot_id = lot_match.group(1) if lot_match else ""
 
         lot_id = re.sub(r"\(.*", "", lot_id).strip()
-        spec_name = SPEC_NAME_MAP.get(coarse_code, coarse_code)
-        is_special = coarse_code not in SPEC_NAME_MAP
+        spec_name = SPEC_NAME_MAP.get(code, code)
+        is_special = code not in SPEC_NAME_MAP
 
         return {
             "seq_no": seq_no,
-            "fine_code": fine_code,
-            "coarse_code": coarse_code,
+            "code": code,
             "spec_name": spec_name,
             "line_code": line_code,
             "lot_id": lot_id,
@@ -119,18 +116,17 @@ def parse_d_name(folder_name: str) -> dict:
             "is_special": is_special,
         }
 
-    for ch_kw, coarse_code in (
+    for ch_kw, code in (
         ("云烟（紫）", "HYZ"),
         ("云烟(紫)", "HYZ"),
         ("中支小重九", "XCJ"),
     ):
         if ch_kw in stem:
-            spec_name = SPEC_NAME_MAP.get(coarse_code, coarse_code)
+            spec_name = SPEC_NAME_MAP.get(code, code)
             is_ref = "对照" in stem or "参照" in stem
             return {
                 "seq_no": seq_no if seq_match else None,
-                "fine_code": coarse_code,
-                "coarse_code": coarse_code,
+                "code": code,
                 "spec_name": spec_name,
                 "line_code": "",
                 "lot_id": "",
@@ -138,7 +134,28 @@ def parse_d_name(folder_name: str) -> dict:
                 "is_special": is_ref,
             }
 
-    return _special("UNKNOWN", "UNKNOWN", "未知", stem)
+    return _special("UNKNOWN", "未知", stem)
+
+
+def _print_scan_summary_tables(df: pd.DataFrame):
+    """扫描完成后输出两张统计表：总体表 + 分批次表。"""
+    total_table = (
+        df.groupby(["code", "spec_name"], as_index=False)
+        .agg(sample_count=("sample_id", "count"))
+        .sort_values(["sample_count", "code"], ascending=[False, True])
+    )
+
+    batch_table = (
+        df.groupby(["batch_name", "code", "spec_name"], as_index=False)
+        .agg(sample_count=("sample_id", "count"))
+        .sort_values(["batch_name", "sample_count", "code"], ascending=[True, False, True])
+    )
+
+    print("\n统计表1（总信息）: code / 产品类型 / 产品数据数量")
+    print(total_table.rename(columns={"spec_name": "product_type"}).to_string(index=False))
+
+    print("\n统计表2（每个批次）: batch / code / 产品类型 / 产品数据数量")
+    print(batch_table.rename(columns={"spec_name": "product_type"}).to_string(index=False))
 
 
 def scan_dataset(root: str) -> pd.DataFrame:
@@ -163,14 +180,17 @@ def scan_dataset(root: str) -> pd.DataFrame:
                 "batch_idx": batch_idx,
                 "batch_name": batch_name,
                 "seq_no": info["seq_no"],
-                "fine_code": info["fine_code"],
-                "coarse_code": info["coarse_code"],
+                "code": info["code"],
                 "spec_name": info["spec_name"],
                 "line_code": info["line_code"],
                 "lot_id": info["lot_id"],
                 "test_case": info["test_case"],
-                "product_fine": info["fine_code"],
-                "product_coarse": info["coarse_code"],
+                # 向后兼容: 下游仍可能读取 fine/coarse 列
+                "fine_code": info["code"],
+                "coarse_code": info["code"],
+                "product_code": info["code"],
+                "product_fine": info["code"],
+                "product_coarse": info["code"],
                 "is_special": info["is_special"],
             })
 
@@ -178,9 +198,9 @@ def scan_dataset(root: str) -> pd.DataFrame:
     print(
         f"扫描完成: {len(df)} 个样本, "
         f"{df['batch_idx'].nunique()} 个批次, "
-        f"{df['fine_code'].nunique()} 种产品(fine), "
-        f"{df['coarse_code'].nunique()} 种产品(coarse)"
+        f"{df['code'].nunique()} 种产品(code)"
     )
+    _print_scan_summary_tables(df)
     return df
 
 
@@ -219,56 +239,24 @@ def _save_prepare_plot(
     plt.close(fig)
 
 
-def infer_ranges_from_all_files(metadata: pd.DataFrame, cfg: Config):
-    """读取所有样本，推断稳健 RT/m/z 范围。"""
-    rt_mins, rt_maxs = [], []
-    mz_mins, mz_maxs = [], []
+def _save_prepare_table(
+    table_path: Path,
+    grid: np.ndarray,
+    rt_range: tuple,
+    mz_range: tuple,
+):
+    """保存二维网格为长表，便于与仪器软件导出结果逐点比对。"""
+    h, w = grid.shape
+    rt_axis = np.linspace(float(rt_range[0]), float(rt_range[1]), h, endpoint=False)
+    mz_axis = np.linspace(float(mz_range[0]), float(mz_range[1]), w, endpoint=False)
 
-    for _, row in tqdm(metadata.iterrows(), total=len(metadata), desc="推断RT/mz范围"):
-        try:
-            mode, rts, a, _ = read_gcms_data(row["d_path"], backend="auto")
-            rts = np.asarray(rts, dtype=np.float64)
-            if rts.size > 0:
-                rt_mins.append(float(np.nanmin(rts)))
-                rt_maxs.append(float(np.nanmax(rts)))
-
-            if mode == "matrix":
-                mz_vals = np.asarray(a, dtype=np.float64)
-                if mz_vals.size > 0:
-                    mz_mins.append(float(np.nanmin(mz_vals)))
-                    mz_maxs.append(float(np.nanmax(mz_vals)))
-            elif mode == "spectra":
-                local_min, local_max = np.inf, -np.inf
-                for mzs, _ints in a:
-                    mzs = np.asarray(mzs, dtype=np.float64)
-                    if mzs.size == 0:
-                        continue
-                    local_min = min(local_min, float(np.nanmin(mzs)))
-                    local_max = max(local_max, float(np.nanmax(mzs)))
-                if np.isfinite(local_min) and np.isfinite(local_max):
-                    mz_mins.append(local_min)
-                    mz_maxs.append(local_max)
-        except Exception as e:
-            print(f"\n  ! 范围推断跳过 {row['d_name']}: {e}")
-
-    rt_range = cfg.rt_range
-    mz_range = cfg.mz_range
-
-    if rt_mins and rt_maxs:
-        lo, hi = cfg.rt_range_percentiles
-        rt_lo = float(np.percentile(rt_mins, lo))
-        rt_hi = float(np.percentile(rt_maxs, hi))
-        if rt_hi > rt_lo:
-            rt_range = (rt_lo, rt_hi)
-
-    if mz_mins and mz_maxs:
-        lo, hi = cfg.mz_range_percentiles
-        mz_lo = float(np.percentile(mz_mins, lo))
-        mz_hi = float(np.percentile(mz_maxs, hi))
-        if mz_hi > mz_lo:
-            mz_range = (mz_lo, mz_hi)
-
-    return rt_range, mz_range
+    rt_grid, mz_grid = np.meshgrid(rt_axis, mz_axis, indexing="ij")
+    table_df = pd.DataFrame({
+        "rt_min": rt_grid.reshape(-1),
+        "mz": mz_grid.reshape(-1),
+        "log_intensity": grid.reshape(-1),
+    })
+    table_df.to_csv(table_path, index=False, encoding="utf-8-sig")
 
 
 def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config):
@@ -276,21 +264,25 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config):
     out_dir = Path(out_dir)
     tensor_dir = out_dir / "tensors"
     tensor_dir.mkdir(parents=True, exist_ok=True)
+    table_dir = out_dir / "tables"
+    if cfg.save_prepare_tables:
+        table_dir.mkdir(parents=True, exist_ok=True)
     plot_dir = out_dir / "plots"
     if cfg.save_prepare_plots:
         plot_dir.mkdir(parents=True, exist_ok=True)
 
     success, fail = 0, 0
     tensor_paths = []
+    mz_global_min = np.inf
+    mz_global_max = -np.inf
+    mz_stat_samples = 0
 
     rt_range_use, mz_range_use = cfg.rt_range, cfg.mz_range
-    if cfg.infer_ranges_from_data:
-        rt_range_use, mz_range_use = infer_ranges_from_all_files(metadata, cfg)
-        print(f"\n推断范围: RT={rt_range_use}, m/z={mz_range_use}")
+    print(f"\n使用固定范围: RT={rt_range_use}, m/z={mz_range_use}")
 
     for idx, row in tqdm(metadata.iterrows(), total=len(metadata), desc="转换中"):
         batch_tag = _safe_tag(row["batch_name"])
-        product_tag = _safe_tag(row["fine_code"])
+        product_tag = _safe_tag(row["code"])
         sample_tag = _safe_tag(row["sample_id"])
 
         if cfg.tag_output_with_batch_and_product:
@@ -300,6 +292,16 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config):
         else:
             npz_path = tensor_dir / f"{idx:04d}.npz"
         tensor_paths.append(str(npz_path))
+
+        if cfg.save_prepare_tables:
+            if cfg.tag_output_with_batch_and_product:
+                table_subdir = table_dir / batch_tag / product_tag
+                table_subdir.mkdir(parents=True, exist_ok=True)
+                table_path = table_subdir / f"{idx:04d}_{sample_tag}.csv"
+            else:
+                table_path = table_dir / f"{idx:04d}.csv"
+        else:
+            table_path = None
 
         if cfg.save_prepare_plots:
             if cfg.tag_output_with_batch_and_product:
@@ -312,6 +314,21 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config):
             plot_path = None
 
         if npz_path.exists():
+            if cfg.save_prepare_tables and (table_path is not None) and (not table_path.exists()):
+                try:
+                    with np.load(npz_path) as npz:
+                        grid_cached = npz["grid"]
+                    if getattr(grid_cached, "ndim", 0) == 2:
+                        rt_for_table = rt_range_use if rt_range_use is not None else (0.0, float(grid_cached.shape[0]))
+                        _save_prepare_table(
+                            table_path=table_path,
+                            grid=grid_cached,
+                            rt_range=rt_for_table,
+                            mz_range=mz_range_use,
+                        )
+                except Exception as e:
+                    print(f"\n  ! {row['d_name']} 补保存表格失败: {e}")
+
             if cfg.save_prepare_plots and ((cfg.prepare_plot_max_samples is None) or (idx < cfg.prepare_plot_max_samples)):
                 if (plot_path is not None) and (not plot_path.exists()):
                     try:
@@ -325,7 +342,7 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config):
                                 sample_id=row["sample_id"],
                                 d_name=row["d_name"],
                                 batch_name=row["batch_name"],
-                                fine_code=row["fine_code"],
+                                fine_code=row["code"],
                                 rt_range=rt_for_plot,
                                 mz_range=mz_range_use,
                                 dpi=cfg.prepare_plot_dpi,
@@ -336,14 +353,29 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config):
             continue
 
         try:
-            tensor, grid, actual_rt = d_folder_to_tensor(
+            tensor, grid, actual_rt, observed_mz_range = d_folder_to_tensor(
                 row["d_path"],
                 rt_bins=cfg.rt_bins,
                 mz_bins=cfg.mz_bins,
                 rt_range=rt_range_use,
                 mz_range=mz_range_use,
+                return_mz_stats=True,
             )
+
+            if observed_mz_range is not None:
+                mz_global_min = min(mz_global_min, float(observed_mz_range[0]))
+                mz_global_max = max(mz_global_max, float(observed_mz_range[1]))
+                mz_stat_samples += 1
+
             np.savez_compressed(npz_path, tensor=tensor, grid=grid)
+
+            if cfg.save_prepare_tables and (table_path is not None):
+                _save_prepare_table(
+                    table_path=table_path,
+                    grid=grid,
+                    rt_range=actual_rt,
+                    mz_range=mz_range_use,
+                )
 
             if cfg.save_prepare_plots and ((cfg.prepare_plot_max_samples is None) or (idx < cfg.prepare_plot_max_samples)):
                 _save_prepare_plot(
@@ -352,7 +384,7 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config):
                     sample_id=row["sample_id"],
                     d_name=row["d_name"],
                     batch_name=row["batch_name"],
-                    fine_code=row["fine_code"],
+                    fine_code=row["code"],
                     rt_range=actual_rt,
                     mz_range=mz_range_use,
                     dpi=cfg.prepare_plot_dpi,
@@ -380,24 +412,33 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config):
         "fail": fail,
         "plots_saved": bool(cfg.save_prepare_plots),
         "plot_dir": str((out_dir / "plots").resolve()) if cfg.save_prepare_plots else "",
+        "tables_saved": bool(cfg.save_prepare_tables),
+        "table_dir": str((out_dir / "tables").resolve()) if cfg.save_prepare_tables else "",
     }
     (out_dir / "grid_info.json").write_text(json.dumps(info, indent=2))
     print(f"\n转换完成: 成功 {success}, 失败 {fail}")
+    if mz_stat_samples > 0 and np.isfinite(mz_global_min) and np.isfinite(mz_global_max):
+        print(
+            f"读取样本 m/z 统计: min={mz_global_min:.6f}, "
+            f"max={mz_global_max:.6f} (基于本次实际读取的 {mz_stat_samples} 个样本)"
+        )
+    else:
+        print("读取样本 m/z 统计: 无有效数据（本次可能全部命中缓存未重新读取）")
     print(f"元数据: {meta_path}")
     return metadata
 
 
 if __name__ == "__main__":
     metadata = scan_dataset(cfg.dataset_root)
-    print("\n产品分布（fine）:")
-    print(metadata[["fine_code", "spec_name"]].drop_duplicates().sort_values("fine_code").to_string(index=False))
+    print("\n产品分布（code）:")
+    print(metadata[["code", "spec_name"]].drop_duplicates().sort_values("code").to_string(index=False))
     print("\n各规格样本数:")
-    print(metadata["fine_code"].value_counts().to_string())
+    print(metadata["code"].value_counts().to_string())
     print("\n批次分布:")
     print(metadata.groupby("batch_name")["sample_id"].count().to_string())
-    print(f"\nUNKNOWN 样本数: {(metadata['fine_code'] == 'UNKNOWN').sum()}")
+    print(f"\nUNKNOWN 样本数: {(metadata['code'] == 'UNKNOWN').sum()}")
 
-    unknown_df = metadata[metadata["fine_code"] == "UNKNOWN"][["batch_name", "d_name"]]
+    unknown_df = metadata[metadata["code"] == "UNKNOWN"][["batch_name", "d_name"]]
     if len(unknown_df):
         print(unknown_df.to_string(index=False))
 
