@@ -341,9 +341,11 @@ def main():
     )
     parser.add_argument("command",
                         choices=["prepare", "train", "register",
-                                 "evaluate", "interpret"])
+                                 "evaluate", "interpret", "compare"])
     parser.add_argument("--fold", type=int, default=0)
     parser.add_argument("--sample_idx", type=int, default=0)
+    parser.add_argument("--methods", type=str, default=None,
+                        help="对比方法 (逗号分隔), 默认全部运行")
 
     # 实验模式
     parser.add_argument("--split_mode", type=str, default="closed",
@@ -401,6 +403,18 @@ def main():
         cmd_evaluate(cfg)
     elif args.command == "interpret":
         cmd_interpret(cfg, fold_idx=args.fold, sample_idx=args.sample_idx)
+    elif args.command == "compare":
+        cmd_compare(cfg, methods=args.methods)
+
+
+def cmd_compare(cfg, methods=None):
+    """运行对比实验: 传统方法 / DL基线 / 消融变体 / 本文方法。"""
+    from compare import run_comparison, ALL_METHODS
+    if methods:
+        method_list = [m.strip() for m in methods.split(",")]
+    else:
+        method_list = list(ALL_METHODS)
+    run_comparison(cfg, methods=method_list)
 
 
 if __name__ == "__main__":

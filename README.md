@@ -13,6 +13,14 @@ python main.py register --fold 0
 # Grad-CAM 解释 (自动使用嵌入距离模式)
 python main.py interpret --fold 0 --sample_idx
 
+# 运行全部 11 种方法对比
+python main.py compare
+
+# 仅运行指定方法
+python main.py compare --methods "PCA+Mahalanobis,SVM-RBF,ResNet-CE,Ours(Full)"
+
+# 仅运行消融实验
+python main.py compare --methods "Ours-noDualAxis,Ours-noBatchAdv,Ours-Softmax,Ours(Full)"
 
 更新说明：
 ## 一、创新点及其解决的实际问题
