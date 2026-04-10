@@ -1,3 +1,6 @@
+# 准备数据 (将 .D 文件夹转为张量)
+python main.py prepare --rt_min 3.17 --rt_max 36.91
+
 # 闭集跨批次训练 (默认)
 python main.py train --split_mode closed
 
