@@ -1,7 +1,8 @@
 """
-多任务批次不变深度网络：
-  2D CNN Stem → ResBlocks → Axial Attention → 共享特征
-  → 产品分类头 / 域对抗头 / 原型距离头 / 能量拒识头
+基于度量学习的批次不变深度网络：
+  Stem → [ResBlocks + 双轴注意力] × 3 → 嵌入空间
+  训练头: 投影头(SupCon) / 辅助分类头 / 批次对抗头 / 重建头
+  推理: 原型匹配 → 产品识别 + 一致性评分 + 拒识判定
 """
 import math
 import torch
@@ -76,7 +77,7 @@ class ResBlock2D(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════
-#  轴向注意力
+#  RT × m/z 双轴结构化注意力
 # ═══════════════════════════════════════════════════════════
 class AxialAttention(nn.Module):
     """沿指定轴做 multi-head self-attention。"""
@@ -104,12 +105,39 @@ class AxialAttention(nn.Module):
         return out
 
 
+class DualAxisAttention(nn.Module):
+    """RT 方向 + m/z 方向双轴注意力融合。"""
+
+    def __init__(self, dim, num_heads=4):
+        super().__init__()
+        self.rt_attn = AxialAttention(dim, num_heads, axis="height")
+        self.mz_attn = AxialAttention(dim, num_heads, axis="width")
+
+    def forward(self, x):
+        x = self.rt_attn(x)
+        x = self.mz_attn(x)
+        return x
+
+
 # ═══════════════════════════════════════════════════════════
-#  编码器
+#  编码器 (多级双轴注意力)
 # ═══════════════════════════════════════════════════════════
+def _make_stage(in_c, out_c, num_blocks=2, stride=2):
+    """构建一个包含 num_blocks 个 ResBlock 的阶段。"""
+    layers = [ResBlock2D(in_c, out_c, stride=stride)]
+    for _ in range(1, num_blocks):
+        layers.append(ResBlock2D(out_c, out_c, stride=1))
+    return nn.Sequential(*layers)
+
+
 class GCMSEncoder(nn.Module):
+    """
+    Stem → [ResBlocks×N + DualAxisAttention] × 3 → GlobalAvgPool → 嵌入
+    每阶段后施加 RT + m/z 双轴注意力。
+    """
+
     def __init__(self, in_channels=2, channels=(32, 64, 128, 256),
-                 num_heads=4, dropout=0.3):
+                 num_heads=4, dropout=0.3, blocks_per_stage=2):
         super().__init__()
         # Stem: 快速下采样
         self.stem = nn.Sequential(
@@ -118,14 +146,18 @@ class GCMSEncoder(nn.Module):
             nn.ReLU(inplace=True),
             nn.MaxPool2d(3, stride=2, padding=1),
         )
-        # 残差块
-        self.layer1 = ResBlock2D(channels[0], channels[1], stride=2)
-        self.layer2 = ResBlock2D(channels[1], channels[2], stride=2)
-        self.layer3 = ResBlock2D(channels[2], channels[3], stride=2)
 
-        # 轴向注意力（在最深层做，空间已经很小）
-        self.axial_rt = AxialAttention(channels[3], num_heads, axis="height")
-        self.axial_mz = AxialAttention(channels[3], num_heads, axis="width")
+        # Stage 1: 捕获小范围峰形
+        self.stage1 = _make_stage(channels[0], channels[1], blocks_per_stage, stride=2)
+        self.attn1 = DualAxisAttention(channels[1], num_heads)
+
+        # Stage 2: 中尺度色谱模式
+        self.stage2 = _make_stage(channels[1], channels[2], blocks_per_stage, stride=2)
+        self.attn2 = DualAxisAttention(channels[2], num_heads)
+
+        # Stage 3: 全局指纹
+        self.stage3 = _make_stage(channels[2], channels[3], blocks_per_stage, stride=2)
+        self.attn3 = DualAxisAttention(channels[3], num_heads)
 
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.drop = nn.Dropout(dropout)
@@ -133,21 +165,44 @@ class GCMSEncoder(nn.Module):
 
     def forward(self, x):
         x = self.stem(x)
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.axial_rt(x)
-        x = self.axial_mz(x)
+
+        x = self.stage1(x)
+        x = self.attn1(x)
+
+        x = self.stage2(x)
+        x = self.attn2(x)
+
+        x = self.stage3(x)
+        x = self.attn3(x)
+
         feat_map = x                              # 保留，用于 Grad-CAM
-        x = self.pool(x).flatten(1)
-        x = self.drop(x)
-        return x, feat_map
+        z = self.pool(x).flatten(1)
+        z = self.drop(z)
+        return z, feat_map
 
 
 # ═══════════════════════════════════════════════════════════
 #  任务头
 # ═══════════════════════════════════════════════════════════
+class ProjectionHead(nn.Module):
+    """对比学习投影头: z → p (仅训练时使用)。"""
+
+    def __init__(self, in_dim, proj_dim=128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, in_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_dim, proj_dim),
+        )
+
+    def forward(self, z):
+        p = self.net(z)
+        return F.normalize(p, dim=1)
+
+
 class ProductHead(nn.Module):
+    """辅助分类头 (训练辅助，推理可不用)。"""
+
     def __init__(self, in_dim, num_classes):
         super().__init__()
         self.fc = nn.Linear(in_dim, num_classes)
@@ -157,6 +212,8 @@ class ProductHead(nn.Module):
 
 
 class DomainHead(nn.Module):
+    """批次对抗头: 梯度反转消除批次信息。"""
+
     def __init__(self, in_dim, num_domains, alpha=1.0):
         super().__init__()
         self.grl = GradientReversal(alpha)
@@ -173,51 +230,17 @@ class DomainHead(nn.Module):
         self.grl.alpha = alpha
 
 
-class PrototypeHead(nn.Module):
-    """每个产品一个可学习原型中心。"""
-    def __init__(self, in_dim, num_classes):
-        super().__init__()
-        self.prototypes = nn.Parameter(torch.randn(num_classes, in_dim) * 0.1)
-
-    def forward(self, z, labels=None):
-        # z: (B, D),  prototypes: (K, D)
-        dists = torch.cdist(z.unsqueeze(0), self.prototypes.unsqueeze(0)).squeeze(0)
-        # dists: (B, K)
-        return dists
-
-    def consistency_score(self, z, pred_labels):
-        """返回每个样本到其预测产品原型的距离。"""
-        dists = torch.cdist(z.unsqueeze(0), self.prototypes.unsqueeze(0)).squeeze(0)
-        scores = dists[torch.arange(len(pred_labels)), pred_labels]
-        return scores
-
-
-class EnergyHead(nn.Module):
-    """基于能量的拒识。"""
-    def __init__(self, in_dim, temperature=1.0):
-        super().__init__()
-        self.T = temperature
-        self.fc = nn.Linear(in_dim, 1)
-
-    def forward(self, z, logits=None):
-        if logits is not None:
-            energy = -self.T * torch.logsumexp(logits / self.T, dim=1)
-        else:
-            energy = self.fc(z).squeeze(-1)
-        return energy
-
-
 # ═══════════════════════════════════════════════════════════
-#  MAE 预训练解码器
+#  重建解码器 (可选正则)
 # ═══════════════════════════════════════════════════════════
-class MAEDecoder(nn.Module):
-    """轻量卷积解码器，用于重构预训练。"""
+class ReconDecoder(nn.Module):
+    """轻量卷积解码器，从 feature map 重建输入。"""
+
     def __init__(self, in_channels=256, out_channels=2,
                  target_h=1024, target_w=256):
         super().__init__()
         self.target_h = target_h
         self.target_w = target_w
-        # 从 encoder 的 feature_map 上采样回原图大小
         self.up = nn.Sequential(
             nn.ConvTranspose2d(in_channels, 128, 4, stride=2, padding=1),
             nn.ReLU(inplace=True),
@@ -241,56 +264,65 @@ class MAEDecoder(nn.Module):
 #  完整模型
 # ═══════════════════════════════════════════════════════════
 class GCMSConsistencyNet(nn.Module):
+    """
+    训练时输出: z(嵌入), proj(对比投影), logits(辅助分类),
+               domain_logits(批次对抗), recon(重建)
+    推理时: 仅需 z，配合 PrototypeStore 实现产品识别+一致性评分+拒识
+    """
+
     def __init__(self, num_products, num_batches, cfg):
         super().__init__()
+        self.embed_normalize = cfg.embed_normalize
+
         self.encoder = GCMSEncoder(
             in_channels=cfg.in_channels,
             channels=cfg.encoder_channels,
             num_heads=cfg.num_axial_heads,
             dropout=cfg.dropout,
+            blocks_per_stage=cfg.blocks_per_stage,
         )
         dim = self.encoder.out_dim
+
+        # 对比学习投影头
+        self.proj_head = ProjectionHead(dim, cfg.proj_dim)
+        # 辅助分类头 (训练辅助)
         self.product_head = ProductHead(dim, num_products)
+        # 批次对抗头 (仅训练)
         self.domain_head = DomainHead(dim, num_batches)
-        self.proto_head = PrototypeHead(dim, num_products)
-        self.energy_head = EnergyHead(dim)
-        self.decoder = MAEDecoder(
+        # 重建解码器 (可选正则)
+        self.decoder = ReconDecoder(
             dim, cfg.in_channels, cfg.rt_bins, cfg.mz_bins
         )
 
     def forward(self, x, return_feat_map=False):
-        z, feat_map = self.encoder(x)
-        logits = self.product_head(z)
-        domain_logits = self.domain_head(z)
-        proto_dists = self.proto_head(z)
-        energy = self.energy_head(z, logits)
+        z_raw, feat_map = self.encoder(x)
+
+        # 归一化嵌入 (度量学习标准做法)
+        if self.embed_normalize:
+            z = F.normalize(z_raw, dim=1)
+        else:
+            z = z_raw
+
+        proj = self.proj_head(z_raw)
+        logits = self.product_head(z_raw)
+        domain_logits = self.domain_head(z_raw)
         recon = self.decoder(feat_map)
 
         out = {
             "z": z,
+            "z_raw": z_raw,
+            "proj": proj,
             "logits": logits,
             "domain_logits": domain_logits,
-            "proto_dists": proto_dists,
-            "energy": energy,
             "recon": recon,
         }
         if return_feat_map:
             out["feat_map"] = feat_map
         return out
 
-    def predict(self, x):
-        """推理：输出产品预测、一致性分数、拒识判定。"""
-        self.eval()
-        with torch.no_grad():
-            out = self.forward(x)
-            pred = out["logits"].argmax(dim=1)
-            confidence = F.softmax(out["logits"], dim=1).max(dim=1).values
-            consist_dist = self.proto_head.consistency_score(out["z"], pred)
-            energy = out["energy"]
-        return {
-            "pred_product": pred,
-            "confidence": confidence,
-            "consistency_dist": consist_dist,
-            "energy": energy,
-            "z": out["z"],
-        }
+    def encode(self, x):
+        """仅提取嵌入向量 (推理用)。"""
+        z_raw, _ = self.encoder(x)
+        if self.embed_normalize:
+            return F.normalize(z_raw, dim=1)
+        return z_raw

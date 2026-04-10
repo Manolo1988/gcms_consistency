@@ -1,6 +1,7 @@
 """
 Grad-CAM 解释:
   在 RT × m/z 张量上定位关键区域，映射回 RT 和 m/z 坐标。
+  支持基于分类 logits 和基于嵌入距离两种 CAM 模式。
 """
 import numpy as np
 import torch
@@ -13,15 +14,21 @@ from pathlib import Path
 
 
 class GradCAM:
-    """针对 GCMSConsistencyNet 的 Grad-CAM。"""
+    """
+    针对 GCMSConsistencyNet 的 Grad-CAM。
+    支持两种目标:
+      - "logits":    对辅助分类头的 logits 做 CAM (默认)
+      - "embedding": 对嵌入到目标原型距离做 CAM (更贴合度量学习)
+    """
 
-    def __init__(self, model, target_layer=None):
+    def __init__(self, model, target_layer=None, mode="logits"):
         self.model = model
+        self.mode = mode
         self.gradients = None
         self.activations = None
 
         if target_layer is None:
-            target_layer = model.encoder.layer3
+            target_layer = model.encoder.stage3
         self._hook(target_layer)
 
     def _hook(self, layer):
@@ -34,21 +41,30 @@ class GradCAM:
         layer.register_forward_hook(fwd_hook)
         layer.register_full_backward_hook(bwd_hook)
 
-    def __call__(self, x, target_class=None):
+    def __call__(self, x, target_class=None, target_proto=None):
         """
         x: (1, C, H, W) 单个样本
+        target_proto: (D,) 目标原型向量 (embedding 模式下使用)
         返回: (H, W) 的热力图
         """
         self.model.eval()
         x = x.requires_grad_(True)
-        out = self.model(x)
-        logits = out["logits"]
-
-        if target_class is None:
-            target_class = logits.argmax(dim=1).item()
+        out = self.model(x, return_feat_map=True)
 
         self.model.zero_grad()
-        logits[0, target_class].backward()
+
+        if self.mode == "embedding" and target_proto is not None:
+            # 基于嵌入距离: 最小化到目标原型的距离
+            z = out["z"]
+            target_proto = target_proto.to(z.device).unsqueeze(0)
+            neg_dist = -torch.norm(z - target_proto, dim=1)
+            neg_dist.backward()
+        else:
+            # 基于分类 logits
+            logits = out["logits"]
+            if target_class is None:
+                target_class = logits.argmax(dim=1).item()
+            logits[0, target_class].backward()
 
         weights = self.gradients.mean(dim=[2, 3], keepdim=True)
         cam = (weights * self.activations).sum(dim=1, keepdim=True)
@@ -94,7 +110,8 @@ def find_top_regions(cam, rt_range, mz_range, top_k=10, min_size=5):
 
 
 def plot_interpretation(x_np, cam, rt_range, mz_range,
-                        sample_id="", save_dir=None):
+                        sample_id="", consistency_score=None,
+                        pred_class=None, save_dir=None):
     """
     绘制: 原始二维图 + Grad-CAM 叠加 + RT/m/z 投影。
     """
@@ -138,7 +155,12 @@ def plot_interpretation(x_np, cam, rt_range, mz_range,
     ax.set_xlabel("m/z")
     ax.set_ylabel("Importance")
 
-    fig.suptitle(f"Interpretation: {sample_id}", fontsize=12)
+    title = f"Interpretation: {sample_id}"
+    if pred_class:
+        title += f" | Predicted: {pred_class}"
+    if consistency_score is not None:
+        title += f" | Score: {consistency_score:.3f}"
+    fig.suptitle(title, fontsize=12)
     plt.tight_layout()
 
     if save_dir:

@@ -1,8 +1,8 @@
 """
 三阶段训练引擎:
-  Phase 1: MAE 预训练
-  Phase 2: 多任务监督微调
-  Phase 3: 一致性阈值校准
+  Phase 1: 重建预训练 (可选)
+  Phase 2: 度量学习 (SupCon + 批次对抗 + 原型 + 辅助分类)
+  Phase 3: 原型注册 + 一致性阈值校准
 """
 import json, time
 from pathlib import Path
@@ -14,7 +14,8 @@ from tqdm import tqdm
 from config import Config
 from dataset import GCMSDataset, GCMSAugmentation, leave_one_batch_out_splits
 from models import GCMSConsistencyNet
-from losses import MultiTaskLoss
+from losses import MetricLearningLoss
+from register import register_from_loader
 
 
 def set_seed(seed):
@@ -53,7 +54,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, phase, epoch,
     model.train()
     running = {}
 
-    # 域对抗 alpha 渐进增大
+    # 域对抗 alpha 渐进增大 (DANN schedule)
     p = epoch / total_epochs
     alpha = 2.0 / (1.0 + np.exp(-10.0 * p)) - 1.0
     model.domain_head.set_alpha(alpha)
@@ -111,27 +112,6 @@ def validate(model, loader, criterion, device):
     return metrics
 
 
-def calibrate_thresholds(model, loader, device, percentile=95.0):
-    """在验证集上为每个产品校准一致性距离阈值。"""
-    model.eval()
-    dists_per_product = {}
-
-    with torch.no_grad():
-        for batch in loader:
-            x = batch["input"].to(device)
-            result = model.predict(x)
-            labels = batch["product"]
-            for i in range(len(labels)):
-                y = labels[i].item()
-                d = result["consistency_dist"][i].item()
-                dists_per_product.setdefault(y, []).append(d)
-
-    thresholds = {}
-    for y, ds in dists_per_product.items():
-        thresholds[y] = float(np.percentile(ds, percentile))
-    return thresholds
-
-
 def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
     """运行一个 leave-one-batch-out fold 的完整三阶段训练。"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -155,10 +135,10 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
     print(f"  产品数: {num_products}, 批次数(训练): {num_batches}")
 
     model = GCMSConsistencyNet(num_products, num_batches, cfg).to(device)
-    criterion = MultiTaskLoss(num_products, cfg.feature_dim, cfg).to(device)
+    criterion = MetricLearningLoss(cfg).to(device)
 
-    # ── Phase 1: 预训练 ──
-    print("\n[Phase 1] MAE 预训练")
+    # ── Phase 1: 重建预训练 ──
+    print("\n[Phase 1] 重建预训练")
     opt1 = torch.optim.AdamW(model.parameters(), lr=cfg.lr_pretrain,
                              weight_decay=cfg.weight_decay)
     for epoch in range(cfg.epochs_pretrain):
@@ -168,16 +148,14 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
             print(f"  Epoch {epoch+1}/{cfg.epochs_pretrain}  "
                   f"recon={m.get('recon', 0):.4f}")
 
-    # ── Phase 2: 监督微调 ──
-    print("\n[Phase 2] 多任务监督微调")
+    # ── Phase 2: 度量学习 ──
+    print("\n[Phase 2] 度量学习 (SupCon + 批次对抗 + 原型)")
     opt2 = torch.optim.AdamW(
         [{"params": model.encoder.parameters(), "lr": cfg.lr_finetune * 0.1},
+         {"params": model.proj_head.parameters()},
          {"params": model.product_head.parameters()},
          {"params": model.domain_head.parameters()},
-         {"params": model.proto_head.parameters()},
-         {"params": model.energy_head.parameters()},
-         {"params": model.decoder.parameters(), "lr": cfg.lr_finetune * 0.5},
-         {"params": criterion.center_loss.parameters()}],
+         {"params": model.decoder.parameters(), "lr": cfg.lr_finetune * 0.5}],
         lr=cfg.lr_finetune, weight_decay=cfg.weight_decay,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -199,30 +177,46 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
 
         if (epoch + 1) % 20 == 0:
             print(f"  Epoch {epoch+1}/{cfg.epochs_finetune}  "
-                  f"train_cls={m_train.get('cls',0):.3f} "
-                  f"val_acc={m_val['acc']:.3f}  "
-                  f"val_proto={m_val.get('proto',0):.3f}")
+                  f"train: supcon={m_train.get('supcon',0):.3f} "
+                  f"adv={m_train.get('adv',0):.3f} "
+                  f"proto={m_train.get('proto',0):.3f}  "
+                  f"val_acc={m_val['acc']:.3f}")
 
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    # ── Phase 3: 阈值校准 ──
-    print("\n[Phase 3] 一致性阈值校准")
-    thresholds = calibrate_thresholds(
-        model, loader_train, device, percentile=cfg.accept_percentile
+    # ── Phase 3: 原型注册 + 阈值校准 ──
+    print("\n[Phase 3] 原型注册 + 一致性阈值校准")
+    # 用训练集注册原型 (不需要增强)
+    ds_train_noaug = GCMSDataset(metadata_csv, product_col=product_col,
+                                 augmentation=None, indices=train_idx)
+    ds_train_noaug.product_enc = ds_train.product_enc
+    ds_train_noaug.batch_enc = ds_train.batch_enc
+    ds_train_noaug.df["product_label"] = ds_train.product_enc.transform(
+        ds_train_noaug.df[product_col]
     )
-    print(f"  阈值: {thresholds}")
+    ds_train_noaug.df["batch_label"] = ds_train.batch_enc.transform(
+        ds_train_noaug.df["batch_idx"]
+    )
+    loader_reg = DataLoader(ds_train_noaug, batch_size=cfg.batch_size,
+                            shuffle=False, num_workers=0)
+
+    label_names = ds_train.get_label_name_map()
+    proto_store, all_z, all_labels = register_from_loader(
+        model, loader_reg, label_names, device,
+        percentile=cfg.accept_percentile
+    )
+    proto_store.summary()
 
     # 保存
     fold_dir = Path(cfg.output_dir) / f"fold_{fold_idx}"
     fold_dir.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), fold_dir / "model.pt")
-    with open(fold_dir / "thresholds.json", "w") as f:
-        json.dump(thresholds, f, indent=2)
+    proto_store.save(fold_dir / "prototypes")
     with open(fold_dir / "product_classes.json", "w") as f:
         json.dump(list(ds_train.product_enc.classes_), f)
 
-    return model, thresholds, ds_train, ds_val, loader_val
+    return model, proto_store, ds_train, ds_val, loader_val
 
 
 def train_all_folds(cfg: Config):
@@ -233,12 +227,12 @@ def train_all_folds(cfg: Config):
 
     fold_results = []
     for i, (train_idx, val_idx, bname) in enumerate(splits):
-        model, thresholds, ds_train, ds_val, loader_val = run_fold(
+        model, proto_store, ds_train, ds_val, loader_val = run_fold(
             i, train_idx, val_idx, bname, metadata_csv, cfg
         )
         fold_results.append({
             "fold": i, "test_batch": bname,
-            "model": model, "thresholds": thresholds,
+            "model": model, "proto_store": proto_store,
             "ds_train": ds_train, "ds_val": ds_val,
             "loader_val": loader_val,
         })
