@@ -10,6 +10,8 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from sklearn.preprocessing import LabelEncoder
+
 from config import Config
 from dataset import GCMSDataset, GCMSAugmentation, unified_splits
 from models import GCMSConsistencyNet
@@ -31,15 +33,31 @@ def build_loaders(metadata_csv, train_idx, val_idx, cfg, product_col):
     ds_val = GCMSDataset(metadata_csv, product_col=product_col,
                          augmentation=None, indices=val_idx)
 
-    # 确保编码器一致
-    ds_val.product_enc = ds_train.product_enc
-    ds_val.batch_enc = ds_train.batch_enc
-    ds_val.df["product_label"] = ds_train.product_enc.transform(
-        ds_val.df[product_col]
+    # 统一编码器: 合并 train/val 所有可能的标签值，避免 LOBO 中
+    # 验证批次不在训练编码器中的问题
+    all_batch_vals = sorted(
+        set(ds_train.df["batch_idx"].unique())
+        | set(ds_val.df["batch_idx"].unique())
     )
-    ds_val.df["batch_label"] = ds_train.batch_enc.transform(
-        ds_val.df["batch_idx"]
+    all_product_vals = sorted(
+        set(ds_train.df[product_col].unique())
+        | set(ds_val.df[product_col].unique())
     )
+
+    shared_batch_enc = LabelEncoder().fit(all_batch_vals)
+    shared_product_enc = LabelEncoder().fit(all_product_vals)
+
+    for ds in (ds_train, ds_val):
+        ds.product_enc = shared_product_enc
+        ds.batch_enc = shared_batch_enc
+        ds.df["product_label"] = shared_product_enc.transform(
+            ds.df[product_col]
+        )
+        ds.df["batch_label"] = shared_batch_enc.transform(
+            ds.df["batch_idx"]
+        )
+        ds.num_products = len(shared_product_enc.classes_)
+        ds.num_batches = len(shared_batch_enc.classes_)
 
     loader_train = DataLoader(ds_train, batch_size=cfg.batch_size,
                               shuffle=True, drop_last=True, num_workers=0)
