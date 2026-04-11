@@ -1,7 +1,6 @@
 """
-度量学习多任务损失:
-  L = λ_supcon·L_supcon + λ_adv·L_adv + λ_proto·L_proto
-      + λ_recon·L_recon + λ_cls·L_cls
+统一度量学习损失 (单阶段, 无 softmax 分类):
+  L = L_supcon + λ₁·L_adv + λ₂·L_proto + λ_recon·L_recon
 """
 import torch
 import torch.nn as nn
@@ -111,18 +110,16 @@ class BatchPrototypeLoss(nn.Module):
         return (loss_pull + 0.5 * loss_push) / K
 
 
-class MetricLearningLoss(nn.Module):
+class UnifiedLoss(nn.Module):
     """
-    组合损失:
-      L = λ_supcon·L_supcon + λ_adv·L_adv + λ_proto·L_proto
-          + λ_recon·L_recon + λ_cls·L_cls
+    单阶段统一损失 (无 softmax 分类):
+      L = L_supcon + λ₁·L_adv + λ₂·L_proto + λ_recon·L_recon
     """
 
     def __init__(self, cfg):
         super().__init__()
         self.supcon_loss = SupConLoss(temperature=cfg.supcon_temperature)
         self.proto_loss = BatchPrototypeLoss(margin=cfg.proto_margin)
-        self.cls_loss = nn.CrossEntropyLoss()
         self.domain_loss = nn.CrossEntropyLoss()
         self.recon_loss = nn.MSELoss()
 
@@ -130,43 +127,30 @@ class MetricLearningLoss(nn.Module):
         self.lam_adv = cfg.lambda_adv
         self.lam_proto = cfg.lambda_proto
         self.lam_recon = cfg.lambda_recon
-        self.lam_cls = cfg.lambda_cls
 
-    def forward(self, model_out, batch, phase="finetune"):
-        losses = {}
-
-        if phase == "pretrain":
-            losses["recon"] = self.recon_loss(model_out["recon"], batch["input"])
-            losses["total"] = losses["recon"]
-            return losses
-
+    def forward(self, model_out, batch):
         labels = batch["product"]
         batch_labels = batch["batch"]
 
-        # 监督对比损失 (在投影空间)
+        # 监督对比损失 (在投影空间, 类间可分)
         l_supcon = self.supcon_loss(model_out["proj"], labels)
 
-        # 批次对抗损失
+        # 批次对抗损失 (GRL, 去批次)
         l_adv = self.domain_loss(model_out["domain_logits"], batch_labels)
 
-        # 原型距离损失 (在嵌入空间)
+        # 原型距离损失 (在嵌入空间, 类内紧凑)
         l_proto = self.proto_loss(model_out["z"], labels)
 
-        # 重建损失
+        # 重建损失 (防止表征退化)
         l_recon = self.recon_loss(model_out["recon"], batch["input"])
-
-        # 辅助分类损失
-        l_cls = self.cls_loss(model_out["logits"], labels)
 
         total = (self.lam_supcon * l_supcon
                  + self.lam_adv * l_adv
                  + self.lam_proto * l_proto
-                 + self.lam_recon * l_recon
-                 + self.lam_cls * l_cls)
+                 + self.lam_recon * l_recon)
 
-        losses.update({
+        return {
             "supcon": l_supcon, "adv": l_adv,
             "proto": l_proto, "recon": l_recon,
-            "cls": l_cls, "total": total,
-        })
-        return losses
+            "total": total,
+        }

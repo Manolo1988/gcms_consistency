@@ -36,21 +36,19 @@ class Config:
     dropout: float = 0.3
     embed_normalize: bool = True              # L2 归一化嵌入
 
-    # ── 训练 ─────────────────────────────────────────────
-    epochs_pretrain: int = 80
-    epochs_finetune: int = 120
+    # ── 训练 (单阶段) ──────────────────────────────────────
+    epochs: int = 200
     batch_size: int = 8
-    lr_pretrain: float = 1e-3
-    lr_finetune: float = 3e-4
+    lr: float = 3e-4
     weight_decay: float = 1e-4
 
     # ── 损失权重 ─────────────────────────────────────────
-    # L_total = L_supcon + λ_adv * L_adv + λ_proto * L_proto + λ_recon * L_recon
-    lambda_supcon: float = 1.0                # 监督对比损失权重
-    lambda_adv: float = 0.3                   # 批次对抗损失权重
-    lambda_proto: float = 1.0                 # 原型距离损失权重
-    lambda_recon: float = 0.2                 # 重建正则损失权重
-    lambda_cls: float = 0.5                   # 辅助分类损失权重 (训练辅助)
+    # L = L_supcon + λ₁·L_adv + λ₂·L_proto + λ_recon·L_recon
+    # 无 softmax 分类损失: 类别数不写入网络权重, 支持注册即用
+    lambda_supcon: float = 1.0                # 监督对比损失 (类间可分)
+    lambda_adv: float = 0.1                   # λ₁ 批次对抗 (去批次)
+    lambda_proto: float = 0.5                 # λ₂ 原型紧凑 (类内紧凑)
+    lambda_recon: float = 0.2                 # 重建正则
     supcon_temperature: float = 0.07          # SupCon 温度参数
     proto_margin: float = 1.0                 # 原型损失推斥间距
 
@@ -59,13 +57,12 @@ class Config:
     reject_threshold_factor: float = 2.0      # 拒识: dist > factor * radius
 
     # ── 实验设置 ─────────────────────────────────────────
-    # "closed": 闭集跨批次 (所有类参与训练, 按批次划分)
-    # "open":   开集 (留出部分类不参与训练)
-    # "fewshot": 少样本 (全类训练, 测试时模拟 N-shot 注册)
-    split_mode: str = "closed"
-    num_open_test_classes: int = 2            # 开集: 测试用类数
-    num_open_val_classes: int = 1             # 开集: 验证用类数
-    n_shot_values: tuple = (1, 3, 5, 10)     # 少样本: 注册样本数列表
+    # 训练一个模型, 三个 Setting 共用同一模型:
+    #   A: 闭集跨批次 (已知类性能 + 批次鲁棒性)
+    #   B: 开放集 (已知 vs 未知类判别)
+    #   C: 少样本注册 (N-shot 新品扩展)
+    num_open_test_classes: int = 3            # 留出的未知类数量
+    n_shot_values: tuple = (1, 3, 5, 10)     # 少样本注册样本数列表
 
     # ── 数据增强 ──────────────────────────────────────────
     aug_intensity_scale: tuple = (0.8, 1.2)

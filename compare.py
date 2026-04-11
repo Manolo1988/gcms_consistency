@@ -23,16 +23,17 @@ import matplotlib.pyplot as plt
 from math import pi
 
 from config import Config
-from dataset import GCMSDataset, leave_one_batch_out_splits
-from train import set_seed, build_loaders, run_fold, train_one_epoch, validate
+from dataset import GCMSDataset, unified_splits
+from train import set_seed, build_loaders, run_fold, train_one_epoch
 from models import GCMSConsistencyNet
-from losses import MetricLearningLoss
+from losses import UnifiedLoss
 from register import register_from_loader
 
 from baselines import (
     extract_features,
-    PCAMahalanobis, PLSDABaseline, SVMBaseline, RandomForestBaseline,
+    PCAMahalanobis, PLSDABaseline, SVMBaseline,
     PlainEncoder, BaselineCNN, BaselineLoss,
+    BaselineSupCon, SupConOnlyLoss,
     train_dl_baseline_fold,
 )
 
@@ -43,12 +44,11 @@ TRADITIONAL_METHODS = {
     "PCA+Mahalanobis": PCAMahalanobis,
     "PLS-DA": PLSDABaseline,
     "SVM-RBF": SVMBaseline,
-    "RandomForest": RandomForestBaseline,
 }
 
-DL_BASELINES = ["ResNet-CE", "ResNet-Triplet", "ResNet-Center"]
+DL_BASELINES = ["ResNet-CE", "ResNet-SupCon"]
 
-ABLATIONS = ["Ours-noDualAxis", "Ours-noBatchAdv", "Ours-Softmax"]
+ABLATIONS = ["Ours-noAxialAttn", "Ours-noBatchAdv", "Ours-noProtoLoss"]
 
 PROPOSED = "Ours(Full)"
 
@@ -68,7 +68,8 @@ def evaluate_unified(preds, true_labels, scores, embeddings, batch_labels):
     """
     统一指标计算, 返回 dict 包含:
       accuracy, macro_f1, balanced_acc,
-      consistency_auroc, silhouette_product, silhouette_batch,
+      consistency_auroc, cohens_d,
+      silhouette_product, silhouette_batch,
       batch_predictability
     """
     preds = np.asarray(preds)
@@ -86,11 +87,21 @@ def evaluate_unified(preds, true_labels, scores, embeddings, batch_labels):
         "balanced_acc": float(balanced_accuracy_score(true_labels, preds)),
     }
 
-    # 一致性 AUROC (分数能否区分正确/错误预测)
+    # 一致性 AUROC
     if len(np.unique(correct)) > 1:
         m["consistency_auroc"] = float(roc_auc_score(correct, scores))
+        # Cohen's d
+        s_correct = scores[correct == 1]
+        s_wrong = scores[correct == 0]
+        pooled_std = np.sqrt(
+            (s_correct.var() * max(len(s_correct)-1, 0) +
+             s_wrong.var() * max(len(s_wrong)-1, 0))
+            / max(len(s_correct) + len(s_wrong) - 2, 1))
+        m["cohens_d"] = float(
+            (s_correct.mean() - s_wrong.mean()) / max(pooled_std, 1e-8))
     else:
         m["consistency_auroc"] = float("nan")
+        m["cohens_d"] = float("nan")
 
     # 产品 Silhouette (嵌入按产品聚类质量, 越高越好)
     uniq_prod = np.unique(true_labels)
@@ -252,6 +263,7 @@ def _run_dl_baseline_fold(method_name, train_idx, val_idx, batch_name,
         preds, scores, zs, ys, bs = collect_softmax_results(
             model, loader_val, device)
     else:
+        # ResNet-SupCon: 原型推理
         proto_store = _build_proto_store(
             model, ds_train, train_idx, metadata_csv, cfg, device)
         preds, scores, zs, ys, bs = collect_proto_results(
@@ -264,9 +276,10 @@ def _run_dl_baseline_fold(method_name, train_idx, val_idx, batch_name,
 #  方法运行器: 消融变体
 # ═══════════════════════════════════════════════════════════
 
-def _train_no_dualaxis_fold(fold_idx, train_idx, val_idx, batch_name,
-                            metadata_csv, cfg):
-    """消融: 完整度量学习管道 + PlainEncoder (无双轴注意力)。"""
+def _train_no_axialattn_fold(fold_idx, train_idx, val_idx, batch_name,
+                             metadata_csv, cfg):
+    """消融: 完整损失 + PlainEncoder (无双轴注意力), 单阶段训练。"""
+    from train import validate_with_prototypes
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     product_col = ("product_fine" if cfg.product_granularity == "fine"
                    else "product_coarse")
@@ -274,12 +287,11 @@ def _train_no_dualaxis_fold(fold_idx, train_idx, val_idx, batch_name,
     ds_train, ds_val, loader_train, loader_val = build_loaders(
         metadata_csv, train_idx, val_idx, cfg, product_col)
 
-    num_products = ds_train.num_products
     num_batches = ds_train.num_batches
-    print(f"    [noDualAxis] 产品={num_products}, 批次={num_batches}")
+    print(f"    [noAxialAttn] 产品={ds_train.num_products}, 批次={num_batches}")
 
-    # 创建标准模型后替换编码器
-    model = GCMSConsistencyNet(num_products, num_batches, cfg).to(device)
+    # 创建模型后替换编码器为 PlainEncoder
+    model = GCMSConsistencyNet(num_batches, cfg).to(device)
     model.encoder = PlainEncoder(
         in_channels=cfg.in_channels,
         channels=cfg.encoder_channels,
@@ -287,48 +299,49 @@ def _train_no_dualaxis_fold(fold_idx, train_idx, val_idx, batch_name,
         blocks_per_stage=cfg.blocks_per_stage,
     ).to(device)
 
-    criterion = MetricLearningLoss(cfg).to(device)
+    criterion = UnifiedLoss(cfg).to(device)
 
-    # Phase 1: 重建预训练
-    opt1 = torch.optim.AdamW(model.parameters(), lr=cfg.lr_pretrain,
-                             weight_decay=cfg.weight_decay)
-    for epoch in range(cfg.epochs_pretrain):
-        train_one_epoch(model, loader_train, criterion, opt1, device,
-                        "pretrain", epoch, cfg.epochs_pretrain)
-        if (epoch + 1) % 40 == 0:
-            print(f"      Pretrain {epoch+1}/{cfg.epochs_pretrain}")
+    # 无增强训练集
+    ds_train_noaug = GCMSDataset(metadata_csv, product_col=product_col,
+                                 augmentation=None, indices=train_idx)
+    ds_train_noaug.product_enc = ds_train.product_enc
+    ds_train_noaug.batch_enc = ds_train.batch_enc
+    ds_train_noaug.df["product_label"] = ds_train.product_enc.transform(
+        ds_train_noaug.df[product_col])
+    ds_train_noaug.df["batch_label"] = ds_train.batch_enc.transform(
+        ds_train_noaug.df["batch_idx"])
+    loader_train_noaug = DataLoader(ds_train_noaug, batch_size=cfg.batch_size,
+                                    shuffle=False, num_workers=0)
+    label_names = ds_train.get_label_name_map()
 
-    # Phase 2: 度量学习
-    opt2 = torch.optim.AdamW(
-        [{"params": model.encoder.parameters(), "lr": cfg.lr_finetune * 0.1},
-         {"params": model.proj_head.parameters()},
-         {"params": model.product_head.parameters()},
-         {"params": model.domain_head.parameters()},
-         {"params": model.decoder.parameters(), "lr": cfg.lr_finetune * 0.5}],
-        lr=cfg.lr_finetune, weight_decay=cfg.weight_decay,
-    )
+    # 单阶段训练
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
+                                  weight_decay=cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        opt2, T_max=cfg.epochs_finetune)
+        optimizer, T_max=cfg.epochs)
 
-    best_acc = 0
-    best_state = None
-    for epoch in range(cfg.epochs_finetune):
-        train_one_epoch(model, loader_train, criterion, opt2, device,
-                        "finetune", epoch, cfg.epochs_finetune)
-        m_val = validate(model, loader_val, criterion, device)
+    best_acc, best_state = 0, None
+    for epoch in range(cfg.epochs):
+        import numpy as _np
+        train_one_epoch(model, loader_train, criterion, optimizer, device,
+                        epoch, cfg.epochs)
         scheduler.step()
-        if m_val["acc"] > best_acc:
-            best_acc = m_val["acc"]
-            best_state = {k: v.cpu().clone()
-                          for k, v in model.state_dict().items()}
-        if (epoch + 1) % 40 == 0:
-            print(f"      Finetune {epoch+1}/{cfg.epochs_finetune} "
-                  f"val_acc={m_val['acc']:.3f}")
+
+        if (epoch + 1) % 10 == 0 or epoch == cfg.epochs - 1:
+            val_acc, _ = validate_with_prototypes(
+                model, loader_train_noaug, loader_val,
+                label_names, device, cfg)
+            if val_acc > best_acc:
+                best_acc = val_acc
+                best_state = {k: v.cpu().clone()
+                              for k, v in model.state_dict().items()}
+            if (epoch + 1) % 40 == 0:
+                print(f"      Epoch {epoch+1}/{cfg.epochs} "
+                      f"val_acc={val_acc:.3f}")
 
     if best_state:
         model.load_state_dict(best_state)
 
-    # Phase 3: 原型注册
     proto_store = _build_proto_store(
         model, ds_train, train_idx, metadata_csv, cfg, device)
 
@@ -348,19 +361,21 @@ def _run_ablation_fold(ablation_name, fold_idx, train_idx, val_idx,
         preds, scores, zs, ys, bs = collect_proto_results(
             model, loader_val, proto_store, device)
 
-    elif ablation_name == "Ours-noDualAxis":
+    elif ablation_name == "Ours-noAxialAttn":
         model, proto_store, ds_train, ds_val, loader_val = \
-            _train_no_dualaxis_fold(
+            _train_no_axialattn_fold(
                 fold_idx, train_idx, val_idx, batch_name,
                 metadata_csv, cfg)
         preds, scores, zs, ys, bs = collect_proto_results(
             model, loader_val, proto_store, device)
 
-    elif ablation_name == "Ours-Softmax":
+    elif ablation_name == "Ours-noProtoLoss":
+        ab_cfg = copy.deepcopy(cfg)
+        ab_cfg.lambda_proto = 0.0
         model, proto_store, ds_train, ds_val, loader_val = run_fold(
-            fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg)
-        preds, scores, zs, ys, bs = collect_softmax_results(
-            model, loader_val, device)
+            fold_idx, train_idx, val_idx, batch_name, metadata_csv, ab_cfg)
+        preds, scores, zs, ys, bs = collect_proto_results(
+            model, loader_val, proto_store, device)
 
     else:
         raise ValueError(f"未知消融: {ablation_name}")
@@ -412,6 +427,7 @@ METRICS_DISPLAY = [
     ("accuracy",           "Accuracy↑",      True),
     ("macro_f1",           "Macro-F1↑",      True),
     ("consistency_auroc",  "Con.AUROC↑",     True),
+    ("cohens_d",           "Cohen's d↑",     True),
     ("silhouette_product", "Sil(Prod)↑",     True),
     ("silhouette_batch",   "Sil(Batch)↓",    False),
     ("batch_predictability", "BatchPred↓",   False),
@@ -684,7 +700,14 @@ def run_comparison(cfg, methods=None):
         methods = list(ALL_METHODS)
 
     metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
-    splits = leave_one_batch_out_splits(metadata_csv)
+    product_col = ("product_fine" if cfg.product_granularity == "fine"
+                   else "product_coarse")
+    split_info = unified_splits(
+        metadata_csv, product_col=product_col,
+        num_open_classes=cfg.num_open_test_classes,
+        seed=cfg.seed)
+    splits = [(f["train_idx"], f["val_idx"], f["test_batch"])
+              for f in split_info["folds"]]
 
     results = {}
     timing = {}

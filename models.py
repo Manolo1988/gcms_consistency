@@ -200,17 +200,6 @@ class ProjectionHead(nn.Module):
         return F.normalize(p, dim=1)
 
 
-class ProductHead(nn.Module):
-    """辅助分类头 (训练辅助，推理可不用)。"""
-
-    def __init__(self, in_dim, num_classes):
-        super().__init__()
-        self.fc = nn.Linear(in_dim, num_classes)
-
-    def forward(self, z):
-        return self.fc(z)
-
-
 class DomainHead(nn.Module):
     """批次对抗头: 梯度反转消除批次信息。"""
 
@@ -265,12 +254,13 @@ class ReconDecoder(nn.Module):
 # ═══════════════════════════════════════════════════════════
 class GCMSConsistencyNet(nn.Module):
     """
-    训练时输出: z(嵌入), proj(对比投影), logits(辅助分类),
-               domain_logits(批次对抗), recon(重建)
-    推理时: 仅需 z，配合 PrototypeStore 实现产品识别+一致性评分+拒识
+    统一度量学习模型:
+      训练: z(嵌入), proj(对比投影), domain_logits(批次对抗), recon(重建)
+      推理: 仅需 z，配合 PrototypeStore 实现产品识别+一致性评分+拒识
+      无 softmax 分类头: 类别数不写入网络权重, 支持注册即用
     """
 
-    def __init__(self, num_products, num_batches, cfg):
+    def __init__(self, num_batches, cfg):
         super().__init__()
         self.embed_normalize = cfg.embed_normalize
 
@@ -283,13 +273,11 @@ class GCMSConsistencyNet(nn.Module):
         )
         dim = self.encoder.out_dim
 
-        # 对比学习投影头
+        # 对比学习投影头 (仅训练)
         self.proj_head = ProjectionHead(dim, cfg.proj_dim)
-        # 辅助分类头 (训练辅助)
-        self.product_head = ProductHead(dim, num_products)
-        # 批次对抗头 (仅训练)
+        # 批次对抗头: 梯度反转消除批次信息 (训练后丢弃)
         self.domain_head = DomainHead(dim, num_batches)
-        # 重建解码器 (可选正则)
+        # 重建解码器 (正则项)
         self.decoder = ReconDecoder(
             dim, cfg.in_channels, cfg.rt_bins, cfg.mz_bins
         )
@@ -304,7 +292,6 @@ class GCMSConsistencyNet(nn.Module):
             z = z_raw
 
         proj = self.proj_head(z_raw)
-        logits = self.product_head(z_raw)
         domain_logits = self.domain_head(z_raw)
         recon = self.decoder(feat_map)
 
@@ -312,7 +299,6 @@ class GCMSConsistencyNet(nn.Module):
             "z": z,
             "z_raw": z_raw,
             "proj": proj,
-            "logits": logits,
             "domain_logits": domain_logits,
             "recon": recon,
         }

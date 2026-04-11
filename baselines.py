@@ -1,7 +1,7 @@
 """
 对比算法实现:
-  传统方法:   PCA+Mahalanobis, PLS-DA, SVM-RBF, RandomForest
-  深度学习:   ResNet-CE, ResNet-Triplet, ResNet-CenterLoss
+  传统方法:   PCA+Mahalanobis, PLS-DA, SVM-RBF
+  深度学习:   ResNet-CE (Softmax), ResNet-SupCon (度量学习)
   (消融变体在 compare.py 中通过配置控制)
 """
 import numpy as np
@@ -11,7 +11,6 @@ import torch.nn.functional as F
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
-from sklearn.ensemble import RandomForestClassifier
 from torch.utils.data import DataLoader
 
 from models import ResBlock2D, _make_stage
@@ -198,43 +197,6 @@ class SVMBaseline(TraditionalBaseline):
         return self.pca.transform(X_s)
 
 
-# ─────────────────────────────────────────────────────────
-#  Random Forest
-# ─────────────────────────────────────────────────────────
-
-class RandomForestBaseline(TraditionalBaseline):
-    """PCA + Random Forest。"""
-
-    def __init__(self, n_components=50, n_estimators=200):
-        self.n_components = n_components
-        self.n_estimators = n_estimators
-        self.scaler = StandardScaler()
-        self.pca = None
-        self.rf = None
-
-    def fit(self, X, y):
-        n_comp = min(self.n_components, X.shape[0] - 1, X.shape[1])
-        self.pca = PCA(n_components=n_comp)
-        X_s = self.scaler.fit_transform(X)
-        X_pca = self.pca.fit_transform(X_s)
-        self.rf = RandomForestClassifier(
-            n_estimators=self.n_estimators, random_state=42, n_jobs=-1
-        )
-        self.rf.fit(X_pca, y)
-
-    def predict(self, X):
-        X_s = self.scaler.transform(X)
-        X_pca = self.pca.transform(X_s)
-        preds = self.rf.predict(X_pca)
-        probs = self.rf.predict_proba(X_pca)
-        scores = probs.max(axis=1)
-        return preds, scores
-
-    def get_embeddings(self, X):
-        X_s = self.scaler.transform(X)
-        return self.pca.transform(X_s)
-
-
 # ═══════════════════════════════════════════════════════════
 #  深度学习对比: 无双轴注意力编码器
 # ═══════════════════════════════════════════════════════════
@@ -304,86 +266,81 @@ class BaselineCNN(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════
+#  DL 基线: ResNet-SupCon (度量学习, 无分类头)
+# ═══════════════════════════════════════════════════════════
+
+class BaselineSupCon(nn.Module):
+    """PlainEncoder + ProjectionHead, 仅用 SupCon 损失训练。
+    推理时通过原型匹配做分类。"""
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.encoder = PlainEncoder(
+            in_channels=cfg.in_channels,
+            channels=cfg.encoder_channels,
+            dropout=cfg.dropout,
+            blocks_per_stage=cfg.blocks_per_stage,
+        )
+        from models import ProjectionHead
+        dim = self.encoder.out_dim
+        self.proj_head = ProjectionHead(dim, cfg.proj_dim)
+
+    def forward(self, x):
+        z_raw, feat_map = self.encoder(x)
+        z = F.normalize(z_raw, dim=1)
+        proj = self.proj_head(z_raw)
+        return {"z": z, "z_raw": z_raw, "proj": proj}
+
+    def encode(self, x):
+        z_raw, _ = self.encoder(x)
+        return F.normalize(z_raw, dim=1)
+
+
+class SupConOnlyLoss(nn.Module):
+    """仅 SupCon 损失 (用于 ResNet-SupCon 基线)。"""
+
+    def __init__(self, temperature=0.07):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, model_out, batch):
+        proj = F.normalize(model_out["proj"], dim=1)
+        labels = batch["product"]
+        B = proj.size(0)
+        if B < 2:
+            return {"total": torch.tensor(0.0, device=proj.device,
+                                          requires_grad=True)}
+        sim = torch.mm(proj, proj.T) / self.temperature
+        mask_pos = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
+        mask_pos.fill_diagonal_(0)
+        if mask_pos.sum() == 0:
+            return {"total": torch.tensor(0.0, device=proj.device,
+                                          requires_grad=True)}
+        logits_max = sim.max(dim=1, keepdim=True)[0].detach()
+        logits = sim - logits_max
+        exp_logits = torch.exp(logits)
+        mask_self = 1.0 - torch.eye(B, device=proj.device)
+        log_prob = logits - torch.log(
+            (exp_logits * mask_self).sum(dim=1, keepdim=True) + 1e-8)
+        mean_log_prob = (mask_pos * log_prob).sum(dim=1) / mask_pos.sum(dim=1).clamp(min=1)
+        loss = -mean_log_prob.mean()
+        return {"supcon": loss, "total": loss}
+
+
+# ═══════════════════════════════════════════════════════════
 #  DL 基线损失函数
 # ═══════════════════════════════════════════════════════════
 
-class TripletLoss(nn.Module):
-    """在线难样本挖掘三元组损失。"""
-
-    def __init__(self, margin=0.5):
-        super().__init__()
-        self.margin = margin
-
-    def forward(self, embeddings, labels):
-        device = embeddings.device
-        B = len(embeddings)
-        if B < 2:
-            return torch.tensor(0.0, device=device, requires_grad=True)
-
-        dists = torch.cdist(embeddings.unsqueeze(0),
-                            embeddings.unsqueeze(0)).squeeze(0)  # (B, B)
-
-        loss = torch.tensor(0.0, device=device)
-        count = 0
-        for i in range(B):
-            pos_mask = (labels == labels[i])
-            pos_mask[i] = False
-            neg_mask = (labels != labels[i])
-
-            if not pos_mask.any() or not neg_mask.any():
-                continue
-
-            hardest_pos = dists[i][pos_mask].max()
-            hardest_neg = dists[i][neg_mask].min()
-
-            loss = loss + F.relu(hardest_pos - hardest_neg + self.margin)
-            count += 1
-
-        return loss / max(count, 1)
-
-
-class CenterLoss(nn.Module):
-    """中心损失 (Wen et al. 2016): 拉近样本到其类中心。"""
-
-    def __init__(self, num_classes, feat_dim):
-        super().__init__()
-        self.centers = nn.Parameter(torch.randn(num_classes, feat_dim))
-
-    def forward(self, x, labels):
-        centers_batch = self.centers[labels]
-        return ((x - centers_batch) ** 2).sum(dim=1).mean()
-
-
 class BaselineLoss(nn.Module):
-    """DL 基线组合损失: ce / triplet+ce / center+ce。"""
+    """ResNet-CE 基线: 仅交叉熵。"""
 
-    def __init__(self, method, num_classes=None, feat_dim=None):
+    def __init__(self):
         super().__init__()
-        self.method = method
         self.ce = nn.CrossEntropyLoss()
 
-        if method == "triplet":
-            self.triplet = TripletLoss(margin=0.5)
-            self.lam_triplet = 1.0
-        elif method == "center":
-            assert num_classes is not None and feat_dim is not None
-            self.center = CenterLoss(num_classes, feat_dim)
-            self.lam_center = 0.01
-
     def forward(self, model_out, batch):
-        losses = {}
-        losses["cls"] = self.ce(model_out["logits"], batch["product"])
-
-        if self.method == "triplet":
-            losses["triplet"] = self.triplet(model_out["z"], batch["product"])
-            losses["total"] = losses["cls"] + self.lam_triplet * losses["triplet"]
-        elif self.method == "center":
-            losses["center"] = self.center(model_out["z_raw"], batch["product"])
-            losses["total"] = losses["cls"] + self.lam_center * losses["center"]
-        else:
-            losses["total"] = losses["cls"]
-
-        return losses
+        loss = self.ce(model_out["logits"], batch["product"])
+        return {"cls": loss, "total": loss}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -443,6 +400,7 @@ def train_dl_baseline_fold(method_name, train_idx, val_idx, batch_name,
                            metadata_csv, cfg):
     """训练一个 DL 基线方法的单 fold, 返回 (model, ds_train, ds_val, loader_val)。"""
     from train import build_loaders
+    from register import register_from_loader
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     product_col = ("product_fine" if cfg.product_granularity == "fine"
@@ -453,43 +411,65 @@ def train_dl_baseline_fold(method_name, train_idx, val_idx, batch_name,
     )
 
     num_classes = ds_train.num_products
-    method_map = {
-        "ResNet-CE": "ce",
-        "ResNet-Triplet": "triplet",
-        "ResNet-Center": "center",
-    }
-    method = method_map[method_name]
-    embed_norm = method in ("triplet", "center")
 
-    model = BaselineCNN(num_classes, cfg, embed_normalize=embed_norm).to(device)
-    feat_dim = model.encoder.out_dim
-    criterion = BaselineLoss(method, num_classes, feat_dim).to(device)
+    if method_name == "ResNet-CE":
+        model = BaselineCNN(num_classes, cfg, embed_normalize=False).to(device)
+        criterion = BaselineLoss().to(device)
+        use_softmax_val = True
+    elif method_name == "ResNet-SupCon":
+        model = BaselineSupCon(cfg).to(device)
+        criterion = SupConOnlyLoss(cfg.supcon_temperature).to(device)
+        use_softmax_val = False
+    else:
+        raise ValueError(f"未知 DL 基线: {method_name}")
 
-    # 训练总 epoch = pretrain + finetune (公平比较)
-    total_epochs = cfg.epochs_pretrain + cfg.epochs_finetune
-    all_params = list(model.parameters()) + list(criterion.parameters())
     optimizer = torch.optim.AdamW(
-        all_params, lr=cfg.lr_finetune, weight_decay=cfg.weight_decay
+        model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=total_epochs
+        optimizer, T_max=cfg.epochs
     )
 
     best_acc = 0
     best_state = None
 
-    for epoch in range(total_epochs):
+    # 构建无增强训练 loader (用于 SupCon 原型验证)
+    from dataset import GCMSDataset
+    ds_train_noaug = GCMSDataset(metadata_csv, product_col=product_col,
+                                 augmentation=None, indices=train_idx)
+    ds_train_noaug.product_enc = ds_train.product_enc
+    ds_train_noaug.batch_enc = ds_train.batch_enc
+    ds_train_noaug.df["product_label"] = ds_train.product_enc.transform(
+        ds_train_noaug.df[product_col])
+    ds_train_noaug.df["batch_label"] = ds_train.batch_enc.transform(
+        ds_train_noaug.df["batch_idx"])
+    loader_train_noaug = DataLoader(ds_train_noaug, batch_size=cfg.batch_size,
+                                    shuffle=False, num_workers=0)
+    label_names = ds_train.get_label_name_map()
+
+    for epoch in range(cfg.epochs):
         train_baseline_epoch(model, loader_train, criterion, optimizer, device)
-        m_val = validate_baseline(model, loader_val, criterion, device)
         scheduler.step()
 
-        if m_val["acc"] > best_acc:
-            best_acc = m_val["acc"]
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        if (epoch + 1) % 10 == 0 or epoch == cfg.epochs - 1:
+            if use_softmax_val:
+                m_val = validate_baseline(model, loader_val, criterion, device)
+                val_acc = m_val["acc"]
+            else:
+                # 原型匹配验证
+                from train import validate_with_prototypes
+                val_acc, _ = validate_with_prototypes(
+                    model, loader_train_noaug, loader_val,
+                    label_names, device, cfg)
 
-        if (epoch + 1) % 40 == 0:
-            print(f"    Epoch {epoch+1}/{total_epochs} "
-                  f"val_acc={m_val['acc']:.3f}")
+            if val_acc > best_acc:
+                best_acc = val_acc
+                best_state = {k: v.cpu().clone()
+                              for k, v in model.state_dict().items()}
+
+            if (epoch + 1) % 40 == 0:
+                print(f"    Epoch {epoch+1}/{cfg.epochs} "
+                      f"val_acc={val_acc:.3f}")
 
     if best_state is not None:
         model.load_state_dict(best_state)

@@ -1,7 +1,7 @@
 """
 Grad-CAM 解释:
   在 RT × m/z 张量上定位关键区域，映射回 RT 和 m/z 坐标。
-  支持基于分类 logits 和基于嵌入距离两种 CAM 模式。
+  基于嵌入距离的 CAM 模式 (贴合度量学习框架)。
 """
 import numpy as np
 import torch
@@ -16,12 +16,10 @@ from pathlib import Path
 class GradCAM:
     """
     针对 GCMSConsistencyNet 的 Grad-CAM。
-    支持两种目标:
-      - "logits":    对辅助分类头的 logits 做 CAM (默认)
-      - "embedding": 对嵌入到目标原型距离做 CAM (更贴合度量学习)
+    基于嵌入到目标原型距离的 CAM (度量学习框架)。
     """
 
-    def __init__(self, model, target_layer=None, mode="logits"):
+    def __init__(self, model, target_layer=None, mode="embedding"):
         self.model = model
         self.mode = mode
         self.gradients = None
@@ -60,11 +58,9 @@ class GradCAM:
             neg_dist = -torch.norm(z - target_proto, dim=1)
             neg_dist.backward()
         else:
-            # 基于分类 logits
-            logits = out["logits"]
-            if target_class is None:
-                target_class = logits.argmax(dim=1).item()
-            logits[0, target_class].backward()
+            # 默认: 对嵌入向量的 L2 范数反向传播
+            z = out["z"]
+            z.norm(dim=1).backward()
 
         weights = self.gradients.mean(dim=[2, 3], keepdim=True)
         cam = (weights * self.activations).sum(dim=1, keepdim=True)
