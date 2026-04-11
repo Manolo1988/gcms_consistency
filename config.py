@@ -92,13 +92,22 @@ class Config:
     accept_percentile: float = 95.0           # 一致性径阈值百分位
     reject_threshold_factor: float = 2.0      # 拒识: dist > factor * radius
 
+    # ── 增量注册微调 ─────────────────────────────────────
+    finetune_epochs: int = 20                 # 微调轮数
+    finetune_lr: float = 1e-4                 # 微调学习率 (低于初始 lr)
+    finetune_freeze_encoder_stages: int = 3   # 冻结编码器前 N 个 stage
+    finetune_replay_ratio: float = 0.3        # 旧类经验回放样本比例
+
     # ── 实验设置 ─────────────────────────────────────────
     # 训练一个模型, 三个 Setting 共用同一模型:
     #   A: 闭集跨批次 (已知类性能 + 批次鲁棒性)
     #   B: 开放集 (已知 vs 未知类判别)
     #   C: 少样本注册 (N-shot 新品扩展)
-    num_open_test_classes: int = 3            # 留出的未知类数量
+    num_open_test_classes: int = 2            # 留出的未知类数量
     n_shot_values: tuple = (1, 3, 5, 10)     # 少样本注册样本数列表
+    holdout_batch_ratio: float = 0.1          # 留出批次比例 (Setting A)
+    min_samples_per_product: int = 10         # 产品最低样本数量, 低于此排除
+    val_ratio: float = 0.1                    # 训练集中验证子集比例
 
     # ── 数据增强 ──────────────────────────────────────────
     aug_intensity_scale: tuple = (0.8, 1.2)
@@ -106,6 +115,13 @@ class Config:
     aug_mask_ratio: float = 0.15
     aug_rt_shift_max: int = 8
     aug_mz_shift_max: int = 2
+    # GC-MS 专用增强
+    aug_baseline_wander_amp: float = 0.03     # 基线漂移幅度
+    aug_baseline_wander_freq: int = 3         # 基线漂移正弦周期数
+    aug_peak_broaden_sigma: float = 1.5       # 峰展宽高斯 sigma 上限
+    aug_rt_warp_strength: float = 0.02        # RT 非线性扭曲幅度
+    aug_mz_channel_drop: float = 0.05         # m/z 通道随机丢弃比例
+    aug_tic_jitter: float = 0.1               # TIC 归一化抖动幅度
 
     # ── 产品标签粒度 ─────────────────────────────────────
     product_granularity: str = "fine"

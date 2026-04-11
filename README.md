@@ -1,4 +1,72 @@
 更新说明：
+
+# 启动命令：
+
+1. **数据准备**：
+   ```bash
+   PYTORCH_ENABLE_MPS_FALLBACK=1 .venv/bin/python main.py prepare
+   ```
+   - 功能：准备数据集，生成训练、验证和测试数据划分。
+
+2. **训练模型**：
+   ```bash
+   PYTORCH_ENABLE_MPS_FALLBACK=1 .venv/bin/python main.py train
+   ```
+   - 功能：训练模型，使用配置文件中的参数。
+
+3. **评估模型**：
+   ```bash
+   PYTORCH_ENABLE_MPS_FALLBACK=1 .venv/bin/python main.py evaluate
+   ```
+   - 功能：评估模型性能，生成不同设置下的评估指标。
+
+4. **注册新产品**：
+   ```bash
+   PYTORCH_ENABLE_MPS_FALLBACK=1 .venv/bin/python main.py register --product_name "新产品名称" --data_path "数据路径"
+   ```
+   - 功能：注册新产品并进行增量微调。
+
+5. **单次训练和评估（调试用）**：
+   ```bash
+   cd /Users/slong/Documents/project/gcms_consistency && PYTORCH_ENABLE_MPS_FALLBACK=1 .venv/bin/python -c "
+   from config import Config
+   cfg = Config()
+   cfg.epochs = 1  # 仅 1 epoch 验证正确性
+
+   from train import train_all_folds
+   from evaluate import evaluate_all_settings
+
+   fold_results, split_info = train_all_folds(cfg)
+   evaluate_all_settings(fold_results, split_info, cfg)
+   print('\n=== 1-epoch train + evaluate 完成 ===')
+   "
+   ```
+   - 功能：快速验证训练和评估流程是否正常。
+
+6. **测试 PrototypeStore 和 SphericalPrototypeAdjuster**：
+   ```bash
+   cd /Users/slong/Documents/project/gcms_consistency && .venv/bin/python -c "
+   import torch
+   from register import SphericalPrototypeAdjuster, PrototypeStore
+
+   # 测试球面调整
+   proto = torch.randn(9, 128)
+   adjusted = SphericalPrototypeAdjuster.adjust(proto, max_iters=2000)
+   print('球面调整完成')
+
+   # 测试 PrototypeStore
+   store = PrototypeStore()
+   for i in range(9):
+       emb = torch.randn(10, 128)
+       store.register(f'product_{i}', emb)
+   store.redistribute_on_sphere()
+   store.summary()
+   "
+   ```
+   - 功能：测试球面重分布和原型存储功能。
+
+
+# 代码思路
 ## 一、创新点及其解决的实际问题
 
 ### 创新点 1：基于度量学习的开放式产品识别与一致性评估

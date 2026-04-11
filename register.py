@@ -3,6 +3,7 @@
   - 冻结 Backbone，从参考样本计算类原型和半径
   - 基于原型距离的产品识别、一致性评分、拒识判定
   - SAIM 风格球面原型调整：增量注册时保持超球面均匀分布
+  - 增量微调：新产品注册时微调编码器末层，保持旧类性能
 """
 import json
 import random
@@ -353,3 +354,198 @@ def register_from_loader(model, dataloader, label_names, device,
     store.redistribute_on_sphere()
 
     return store, all_z, all_labels
+
+
+# ═══════════════════════════════════════════════════════════
+#  增量微调: 新产品注册时微调编码器 + 重新注册所有原型
+# ═══════════════════════════════════════════════════════════
+def finetune_for_new_product(model, old_store, new_loader, old_loader,
+                             cfg, device, new_label_names=None,
+                             old_label_names=None):
+    """
+    检测到新产品后，微调编码器末层使新旧类特征均匀分布在球面上，
+    同时保持对旧产品的一致性检测能力不下降。
+
+    策略:
+      1. 冻结编码器前几个 stage，只微调最后 stage + 投影头
+      2. 使用旧类经验回放 (从 old_loader 采样) + 新类数据混合训练
+      3. 加入原型蒸馏损失: 旧类嵌入向旧原型方向对齐，防止遗忘
+      4. 微调后重新计算所有原型并做球面调整
+
+    Args:
+        model:           GCMSConsistencyNet (已加载旧权重)
+        old_store:       PrototypeStore (旧类原型)
+        new_loader:      DataLoader 新产品数据
+        old_loader:      DataLoader 旧产品数据 (经验回放)
+        cfg:             Config
+        device:          torch.device
+        new_label_names: dict[int -> str] 新类标签映射
+        old_label_names: dict[int -> str] 旧类标签映射
+
+    Returns:
+        model:      微调后的模型
+        new_store:  包含新旧所有类的 PrototypeStore
+    """
+    import torch.nn.functional as F
+    from losses import SupConLoss, BatchPrototypeLoss
+
+    # ── 1. 冻结编码器前几个 stage ──
+    freeze_stages = cfg.finetune_freeze_encoder_stages
+    frozen_modules = []
+    encoder = model.encoder
+    stage_map = [
+        ("stem", encoder.stem),
+        ("stage1", encoder.stage1), ("attn1", encoder.attn1),
+        ("stage2", encoder.stage2), ("attn2", encoder.attn2),
+        ("stage3", encoder.stage3), ("attn3", encoder.attn3),
+    ]
+    # stem 算 stage 0, stage1+attn1 = stage 1, ...
+    n_frozen = 0
+    n_frozen += 1  # stem
+    frozen_modules.append(stage_map[0][1])
+    for i in range(1, min(freeze_stages, 3) + 1):
+        idx_stage = 2 * i - 1
+        idx_attn = 2 * i
+        if idx_stage < len(stage_map):
+            frozen_modules.append(stage_map[idx_stage][1])
+        if idx_attn < len(stage_map):
+            frozen_modules.append(stage_map[idx_attn][1])
+
+    for mod in frozen_modules:
+        for param in mod.parameters():
+            param.requires_grad_(False)
+
+    # 不训练 domain_head 和 decoder
+    for param in model.domain_head.parameters():
+        param.requires_grad_(False)
+    for param in model.decoder.parameters():
+        param.requires_grad_(False)
+
+    # ── 2. 保存旧类原型用于蒸馏 ──
+    old_protos = {}
+    for c in old_store.class_names:
+        old_protos[c] = old_store.prototypes[c].to(device)
+
+    # ── 3. 准备损失和优化器 ──
+    supcon = SupConLoss(temperature=cfg.supcon_temperature).to(device)
+    proto_loss_fn = BatchPrototypeLoss(margin=cfg.proto_margin).to(device)
+
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable_params, lr=cfg.finetune_lr,
+                                  weight_decay=cfg.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=cfg.finetune_epochs)
+
+    # ── 4. 经验回放: 预提取旧类数据 ──
+    old_data_cache = []
+    for batch in old_loader:
+        old_data_cache.append(batch)
+    n_replay = max(1, int(len(old_data_cache) * cfg.finetune_replay_ratio))
+
+    # ── 5. 微调循环 ──
+    model.train()
+    for epoch in range(cfg.finetune_epochs):
+        total_loss = 0.0
+        n_batches = 0
+
+        # 随机选择经验回放批次
+        replay_batches = random.sample(
+            old_data_cache, min(n_replay, len(old_data_cache))
+        )
+
+        for new_batch in new_loader:
+            x_new = new_batch["input"].to(device)
+            y_new = new_batch["product"].to(device)
+            z_new = model.encode(x_new)
+
+            # 混合新旧数据
+            if replay_batches:
+                old_batch = replay_batches[n_batches % len(replay_batches)]
+                x_old = old_batch["input"].to(device)
+                y_old = old_batch["product"].to(device)
+                z_old = model.encode(x_old)
+
+                # 拼接
+                z_all = torch.cat([z_new, z_old], dim=0)
+                y_all = torch.cat([y_new, y_old], dim=0)
+            else:
+                z_all = z_new
+                y_all = y_new
+
+            # SupCon + Proto 损失
+            proj_all = model.proj_head(z_all)
+            proj_all = F.normalize(proj_all, dim=1)
+            l_supcon = supcon(proj_all, y_all)
+            l_proto = proto_loss_fn(z_all, y_all)
+
+            # 原型蒸馏损失: 旧类嵌入保持接近旧原型
+            l_distill = torch.tensor(0.0, device=device)
+            if replay_batches and old_label_names:
+                z_old_part = z_all[len(z_new):]
+                y_old_part = y_all[len(z_new):]
+                for c_name, old_proto in old_protos.items():
+                    # 找旧类标签值
+                    for lbl_idx, name in old_label_names.items():
+                        if name == c_name:
+                            mask = y_old_part == lbl_idx
+                            if mask.any():
+                                z_cls = z_old_part[mask]
+                                # cosine距离: 保持方向对齐
+                                cos_sim = F.cosine_similarity(
+                                    z_cls, old_proto.unsqueeze(0), dim=1)
+                                l_distill = l_distill + (1.0 - cos_sim).mean()
+                            break
+                n_old = max(len(old_protos), 1)
+                l_distill = l_distill / n_old
+
+            loss = (cfg.lambda_supcon * l_supcon
+                    + cfg.lambda_proto * l_proto
+                    + 0.5 * l_distill)
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(trainable_params, 5.0)
+            optimizer.step()
+
+            total_loss += loss.item()
+            n_batches += 1
+
+        scheduler.step()
+        avg_loss = total_loss / max(n_batches, 1)
+        if (epoch + 1) % 5 == 0 or epoch == 0:
+            print(f"  微调 Epoch {epoch+1}/{cfg.finetune_epochs}  "
+                  f"loss={avg_loss:.4f}")
+
+    # ── 6. 解冻所有参数 (恢复正常状态) ──
+    for param in model.parameters():
+        param.requires_grad_(True)
+
+    # ── 7. 重新注册所有原型 (新+旧) ──
+    model.eval()
+    new_store = PrototypeStore()
+
+    # 注册旧类
+    if old_loader is not None and old_label_names:
+        old_z, old_labels, old_uniq, _ = compute_prototypes(
+            model, old_loader, device, cfg.accept_percentile)
+        for lbl in old_uniq:
+            mask = old_labels == lbl
+            name = old_label_names.get(lbl, str(lbl))
+            new_store.register(name, old_z[mask],
+                               percentile=cfg.accept_percentile)
+
+    # 注册新类
+    if new_label_names:
+        new_z, new_labels, new_uniq, _ = compute_prototypes(
+            model, new_loader, device, cfg.accept_percentile)
+        for lbl in new_uniq:
+            mask = new_labels == lbl
+            name = new_label_names.get(lbl, str(lbl))
+            new_store.register(name, new_z[mask],
+                               percentile=cfg.accept_percentile)
+
+    # 球面调整
+    new_store.redistribute_on_sphere()
+    new_store.summary()
+
+    return model, new_store

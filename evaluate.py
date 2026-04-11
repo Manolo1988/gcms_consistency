@@ -391,8 +391,245 @@ def evaluate_setting_c(model, unknown_dataset, unknown_idx_splits,
     return {"few_shot": results}
 
 
+# ═══════════════════════════════════════════════════════════
+#  单模型评估 (使用 prepared_data/split.json 划分)
+# ═══════════════════════════════════════════════════════════
+
+def evaluate_single_model(cfg):
+    """
+    评估单一模型在三个 Setting 上的表现。
+
+    Setting A: 已知产品 × 留出批次 → 批次一致性
+    Setting B: 已知类 vs 留出产品类 → 开集检测
+    Setting C: 留出产品类 N-shot 注册 → 少样本识别
+    """
+    from config import get_device
+    from dataset import GCMSDataset, load_data_split, few_shot_from_unknown
+    from models import GCMSConsistencyNet
+    from register import PrototypeStore
+
+    device = get_device()
+    split = load_data_split(cfg)
+    metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
+    product_col = ("product_fine" if cfg.product_granularity == "fine"
+                   else "product_coarse")
+    out_dir = Path(cfg.output_dir)
+    viz_dir = out_dir / "visualizations"
+
+    # ── 加载模型 ──
+    model_dir = out_dir / "final_model"
+    if not (model_dir / "model.pt").exists():
+        print("未找到 final_model/model.pt, 请先运行 python main.py train")
+        return
+
+    # ── 全局编码器: 覆盖所有产品和批次 ──
+    from sklearn.preprocessing import LabelEncoder
+    import pandas as pd
+    full_df = pd.read_csv(metadata_csv)
+    full_df = full_df[(full_df["product_fine"] != "BLANK")
+                      & (~full_df["is_special"])].reset_index(drop=True)
+    global_product_enc = LabelEncoder().fit(
+        sorted(full_df[product_col].unique()))
+    global_batch_enc = LabelEncoder().fit(
+        sorted(full_df["batch_idx"].unique()))
+
+    # 构建模型: domain_head 大小须与训练时一致
+    meta_path = model_dir / "train_meta.json"
+    if meta_path.exists():
+        with open(meta_path) as f:
+            train_meta = json.load(f)
+        num_batches_model = train_meta["num_batches"]
+    else:
+        # 回退: 从 state_dict 推断
+        sd = torch.load(model_dir / "model.pt", map_location="cpu",
+                        weights_only=True)
+        num_batches_model = sd["domain_head.fc.2.weight"].shape[0]
+
+    model = GCMSConsistencyNet(num_batches_model, cfg).to(device)
+    model.load_state_dict(torch.load(
+        model_dir / "model.pt", map_location=device, weights_only=True))
+
+    proto_store = PrototypeStore()
+    proto_dir = model_dir / "prototypes"
+    if proto_dir.exists():
+        proto_store.load(proto_dir)
+
+    def _make_loader(indices):
+        ds = GCMSDataset(metadata_csv, product_col=product_col,
+                         augmentation=None, indices=indices)
+        ds.product_enc = global_product_enc
+        ds.batch_enc = global_batch_enc
+        ds.df["product_label"] = global_product_enc.transform(
+            ds.df[product_col])
+        ds.df["batch_label"] = global_batch_enc.transform(
+            ds.df["batch_idx"])
+        ds.num_products = len(global_product_enc.classes_)
+        ds.num_batches = len(global_batch_enc.classes_)
+        loader = torch.utils.data.DataLoader(
+            ds, batch_size=cfg.batch_size, shuffle=False)
+        return ds, loader
+
+    # 训练集 loader (Setting A 计算 cross-batch gap)
+    _, loader_train = _make_loader(split["train_idx"])
+
+    print(f"\n{'='*60}")
+    print("单模型评估")
+    print(f"{'='*60}")
+
+    # ═══ Setting A: 批次一致性 ═══
+    if split["test_batch_idx"]:
+        ds_test_batch, loader_test_batch = _make_loader(
+            split["test_batch_idx"])
+        result_a = evaluate_setting_a(
+            model, loader_train, loader_test_batch, proto_store,
+            device, cfg, f"留出批次 {split['holdout_batches']}")
+
+        if result_a.get("records"):
+            plot_embedding_tsne(
+                result_a["records"],
+                viz_dir / "tsne_product_settingA.png", color_by="product")
+            plot_embedding_tsne(
+                result_a["records"],
+                viz_dir / "tsne_batch_settingA.png", color_by="batch")
+            plot_score_distribution(
+                result_a["records"],
+                viz_dir / "score_dist_settingA.png")
+    else:
+        result_a = None
+        print("\n── Setting A: 无留出批次测试数据 ──")
+
+    # ═══ Setting B: 开集检测 ═══
+    if split["test_unknown_idx"]:
+        _, loader_known = _make_loader(
+            split["test_batch_idx"] or split["val_idx"])
+        ds_unknown, loader_unknown = _make_loader(split["test_unknown_idx"])
+        result_b = evaluate_setting_b(
+            model, proto_store, loader_known, loader_unknown,
+            device, cfg, f"留出产品 {split['holdout_products']}")
+    else:
+        result_b = None
+        print("\n── Setting B: 无留出产品测试数据 ──")
+
+    # ═══ Setting C: 少样本 ═══
+    if split["test_unknown_idx"]:
+        unknown_idx = split["test_unknown_idx"]
+        ds_unknown_full = GCMSDataset(
+            metadata_csv, product_col=product_col,
+            augmentation=None, indices=unknown_idx)
+        unknown_label_names = ds_unknown_full.get_label_name_map()
+
+        fs_splits = few_shot_from_unknown(
+            unknown_idx, metadata_csv, product_col=product_col,
+            n_shot_values=cfg.n_shot_values, seed=cfg.seed)
+        result_c = evaluate_setting_c(
+            model, ds_unknown_full, fs_splits, unknown_label_names,
+            device, cfg, f"留出产品 {split['holdout_products']}")
+    else:
+        result_c = None
+        print("\n── Setting C: 无留出产品测试数据 ──")
+
+    # ═══ 汇总打印 ═══
+    _print_single_summary(result_a, result_b, result_c, cfg)
+    _save_single_summary(result_a, result_b, result_c, split, out_dir)
+
+    return result_a, result_b, result_c
+
+
+def _print_single_summary(result_a, result_b, result_c, cfg):
+    """打印单模型评估汇总。"""
+    print(f"\n{'='*60}")
+    print("单模型评估汇总")
+    print(f"{'='*60}")
+
+    if result_a:
+        pid = result_a["product_identification"]
+        con = result_a["consistency_scoring"]
+        rob = result_a["batch_robustness"]
+        print("\nSetting A (批次一致性 — 已知产品 × 留出批次):")
+        print(f"  Accuracy:          {pid['accuracy']:.4f}")
+        print(f"  Macro-F1:          {pid['macro_f1']:.4f}")
+        if "cross_batch_gap" in pid:
+            print(f"  Cross-batch Δ:     {pid['cross_batch_gap']:.4f}")
+        print(f"  Score AUROC:       {con['AUROC_correct']:.4f}")
+        print(f"  Cohen's d:         {con['cohens_d']:.4f}")
+        print(f"  Sil(product):      {rob['silhouette_product']:.4f}")
+        print(f"  Sil(batch):        {rob['silhouette_batch']:.4f}")
+        print(f"  Batch pred:        {rob['batch_predictability']:.4f}")
+
+    if result_b:
+        osm = result_b["open_set"]
+        print("\nSetting B (开集检测 — 已知类 vs 留出产品类):")
+        print(f"  Open-set AUROC:    {osm['open_set_AUROC']:.4f}")
+        print(f"  FPR@95TPR:         {osm['FPR_at_95TPR']:.4f}")
+        print(f"  Known score mean:  {osm['known_score_mean']:.4f}")
+        print(f"  Unknown score mean:{osm['unknown_score_mean']:.4f}")
+
+    if result_c:
+        print("\nSetting C (少样本 — 留出产品类 N-shot 注册):")
+        for n_shot in cfg.n_shot_values:
+            m = result_c["few_shot"].get(n_shot, {})
+            acc = m.get("accuracy", float("nan"))
+            f1 = m.get("macro_f1", float("nan"))
+            print(f"  {n_shot:2d}-shot: acc={acc:.4f}, f1={f1:.4f}")
+
+
+def _save_single_summary(result_a, result_b, result_c, split, out_dir):
+    """保存单模型评估结果到 JSON。"""
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _s(obj):
+        if isinstance(obj, (np.floating, float)):
+            return float(obj)
+        if isinstance(obj, (np.integer, int)):
+            return int(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return obj
+
+    summary = {
+        "split": {
+            "known_products": split["known_products"],
+            "holdout_products": split["holdout_products"],
+            "holdout_batches": split["holdout_batches"],
+            "stats": split["stats"],
+        },
+    }
+
+    if result_a:
+        pid = result_a["product_identification"]
+        summary["setting_a"] = {
+            k: _s(v) for k, v in pid.items()
+            if k not in ("confusion", "report")
+        }
+        summary["setting_a_consistency"] = {
+            k: _s(v) for k, v in result_a["consistency_scoring"].items()
+        }
+        summary["setting_a_robustness"] = {
+            k: _s(v) for k, v in result_a["batch_robustness"].items()
+        }
+
+    if result_b:
+        summary["setting_b"] = {
+            k: _s(v) for k, v in result_b["open_set"].items()
+        }
+
+    if result_c:
+        summary["setting_c"] = {
+            str(k): {kk: _s(vv) for kk, vv in v.items()}
+            for k, v in result_c["few_shot"].items()
+        }
+
+    with open(out_dir / "evaluation_summary.json", "w") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False, default=_s)
+    print(f"\n评估结果已保存到 {out_dir / 'evaluation_summary.json'}")
+
+
+# ═══════════════════════════════════════════════════════════
+#  旧版: LOBO 多 fold 评估 (保留用于交叉验证)
+# ═══════════════════════════════════════════════════════════
+
 def evaluate_all_settings(fold_results, split_info, cfg):
-    """汇总所有 fold 的 Setting A/B/C 评估。"""
+    """汇总所有 fold 的 Setting A/B/C 评估 (LOBO 模式)。"""
     from config import get_device
     device = get_device()
     out_dir = Path(cfg.output_dir)

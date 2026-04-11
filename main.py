@@ -17,118 +17,108 @@ from config import Config
 
 def cmd_prepare(cfg):
     from data_prepare import scan_dataset, convert_all
+    from dataset import create_data_split
     metadata = scan_dataset(cfg.dataset_root)
     print("\n产品分布:")
     print(metadata["code"].value_counts().to_string())
     convert_all(metadata, cfg.prepared_dir, cfg)
 
+    # 创建固定数据划分
+    metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
+    product_col = ("product_fine" if cfg.product_granularity == "fine"
+                   else "product_coarse")
+    create_data_split(metadata_csv, cfg, product_col=product_col)
+
 
 def cmd_train(cfg):
-    """单阶段统一训练 (留出类 + leave-one-batch-out)。"""
-    from train import train_all_folds
-    from evaluate import evaluate_all_settings
-
-    fold_results, split_info = train_all_folds(cfg)
-    evaluate_all_settings(fold_results, split_info, cfg)
+    """训练单一最终模型。"""
+    from train import train_single_model
+    train_single_model(cfg)
 
 
 def cmd_evaluate(cfg):
     """加载已保存模型, 运行 Setting A/B/C 评估。"""
-    from dataset import GCMSDataset, unified_splits
+    from evaluate import evaluate_single_model
+    evaluate_single_model(cfg)
+
+
+def cmd_register(cfg, new_data_dir):
+    """增量注册新产品: 微调编码器 + 球面重分布。
+
+    new_data_dir 下应包含已 prepare 好的 .npz 张量文件,
+    以及 metadata.csv (同 prepared_data 格式)。
+    """
+    from dataset import GCMSDataset, GCMSAugmentation, load_data_split
     from models import GCMSConsistencyNet
-    from evaluate import evaluate_all_settings
-    from register import PrototypeStore
+    from register import PrototypeStore, finetune_for_new_product
+    from config import get_device
     from torch.utils.data import DataLoader
 
-    from config import get_device
     device = get_device()
+    model_dir = Path(cfg.output_dir) / "final_model"
+
+    # 加载已训练模型
+    with open(model_dir / "train_meta.json") as f:
+        meta = json.load(f)
+    model = GCMSConsistencyNet(meta["num_batches"], cfg).to(device)
+    model.load_state_dict(torch.load(model_dir / "model.pt",
+                                     map_location=device,
+                                     weights_only=True))
+
+    # 加载旧原型
+    old_store = PrototypeStore()
+    old_store.load(model_dir / "prototypes")
+    print(f"已加载旧模型, {old_store.num_classes} 个已知产品: "
+          f"{old_store.class_names}")
+
+    # 加载旧训练数据 (经验回放)
+    split = load_data_split(cfg)
     metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
     product_col = ("product_fine" if cfg.product_granularity == "fine"
                    else "product_coarse")
+    ds_old = GCMSDataset(metadata_csv, product_col=product_col,
+                         augmentation=GCMSAugmentation(cfg),
+                         indices=split["train_idx"])
+    old_label_names = ds_old.get_label_name_map()
+    loader_old = DataLoader(ds_old, batch_size=cfg.batch_size,
+                            shuffle=True, num_workers=0)
 
-    # 读取保存的切分信息
-    split_file = Path(cfg.output_dir) / "split_info.json"
-    if not split_file.exists():
-        print("未找到 split_info.json, 请先运行 train")
-        return
-    with open(split_file) as f:
-        saved_split = json.load(f)
+    # 加载新产品数据
+    new_metadata_csv = str(Path(new_data_dir) / "metadata.csv")
+    ds_new = GCMSDataset(new_metadata_csv, product_col=product_col,
+                         augmentation=GCMSAugmentation(cfg))
+    # 重新编码: 新类标签偏移, 避免与旧类冲突
+    max_old_label = max(old_label_names.keys()) + 1
+    new_product_names = ds_new.get_product_names()
+    new_label_names = {i + max_old_label: name
+                       for i, name in enumerate(new_product_names)}
+    ds_new.df["product_label"] = ds_new.df["product_label"] + max_old_label
+    loader_new = DataLoader(ds_new, batch_size=cfg.batch_size,
+                            shuffle=True, num_workers=0)
 
-    # 重新构建 unified_splits
-    split_info = unified_splits(
-        metadata_csv, product_col=product_col,
-        num_open_classes=cfg.num_open_test_classes,
-        seed=cfg.seed)
+    print(f"新产品: {new_product_names}")
+    print(f"新数据: {len(ds_new)} 样本")
 
-    fold_results = []
-    for fold in split_info["folds"]:
-        fold_dir = Path(cfg.output_dir) / f"fold_{fold['fold_idx']}"
-        if not (fold_dir / "model.pt").exists():
-            print(f"Fold {fold['fold_idx']} 模型不存在, 跳过")
-            continue
+    # 微调
+    model, new_store = finetune_for_new_product(
+        model, old_store, loader_new, loader_old,
+        cfg, device,
+        new_label_names=new_label_names,
+        old_label_names=old_label_names,
+    )
 
-        with open(fold_dir / "product_classes.json") as f:
-            classes = json.load(f)
-
-        ds_train = GCMSDataset(metadata_csv, product_col=product_col,
-                               augmentation=None, indices=fold["train_idx"])
-        ds_val = GCMSDataset(metadata_csv, product_col=product_col,
-                             augmentation=None, indices=fold["val_idx"])
-
-        # 统一编码器: 合并 train/val 所有可能的标签值
-        from sklearn.preprocessing import LabelEncoder
-        all_batch_vals = sorted(
-            set(ds_train.df["batch_idx"].unique())
-            | set(ds_val.df["batch_idx"].unique())
-        )
-        all_product_vals = sorted(
-            set(ds_train.df[product_col].unique())
-            | set(ds_val.df[product_col].unique())
-        )
-        shared_batch_enc = LabelEncoder().fit(all_batch_vals)
-        shared_product_enc = LabelEncoder().fit(all_product_vals)
-        for ds in (ds_train, ds_val):
-            ds.product_enc = shared_product_enc
-            ds.batch_enc = shared_batch_enc
-            ds.df["product_label"] = shared_product_enc.transform(
-                ds.df[product_col])
-            ds.df["batch_label"] = shared_batch_enc.transform(
-                ds.df["batch_idx"])
-            ds.num_products = len(shared_product_enc.classes_)
-            ds.num_batches = len(shared_batch_enc.classes_)
-
-        loader_val = DataLoader(ds_val, batch_size=cfg.batch_size,
-                                shuffle=False)
-
-        model = GCMSConsistencyNet(
-            ds_train.num_batches, cfg
-        ).to(device)
-        model.load_state_dict(torch.load(
-            fold_dir / "model.pt", map_location=device, weights_only=True))
-
-        proto_store = PrototypeStore()
-        proto_dir = fold_dir / "prototypes"
-        if proto_dir.exists():
-            proto_store.load(proto_dir)
-
-        fold_results.append({
-            "fold": fold["fold_idx"],
-            "test_batch": fold["test_batch"],
-            "model": model,
-            "proto_store": proto_store,
-            "ds_train": ds_train,
-            "ds_val": ds_val,
-            "loader_val": loader_val,
-            "train_idx": fold["train_idx"],
-        })
-
-    if fold_results:
-        evaluate_all_settings(fold_results, split_info, cfg)
+    # 保存更新后的模型和原型
+    torch.save(model.state_dict(), model_dir / "model.pt")
+    new_store.save(model_dir / "prototypes")
+    with open(model_dir / "product_classes.json", "w") as f:
+        all_names = list(new_store.class_names)
+        json.dump(all_names, f)
+    print(f"\n注册完成, 共 {new_store.num_classes} 个产品")
 
 
 def cmd_interpret(cfg, fold_idx=0, sample_idx=0):
     """对指定样本做 Grad-CAM 解释 (基于嵌入距离)。"""
-    from dataset import GCMSDataset, unified_splits
+    from dataset import GCMSDataset, load_data_split
     from models import GCMSConsistencyNet
     from interpret import GradCAM, find_top_regions, plot_interpretation
     from register import PrototypeStore
@@ -139,31 +129,25 @@ def cmd_interpret(cfg, fold_idx=0, sample_idx=0):
     product_col = ("product_fine" if cfg.product_granularity == "fine"
                    else "product_coarse")
 
-    split_info = unified_splits(
-        metadata_csv, product_col=product_col,
-        num_open_classes=cfg.num_open_test_classes, seed=cfg.seed)
-    fold = split_info["folds"][fold_idx]
+    split = load_data_split(cfg)
 
-    ds_val = GCMSDataset(metadata_csv, product_col=product_col,
-                         augmentation=None, indices=fold["val_idx"])
+    # 使用 Setting A 测试集 (留出批次) 作为解释对象
+    test_idx = split["test_batch_idx"] or split["val_idx"]
+    ds_test = GCMSDataset(metadata_csv, product_col=product_col,
+                          augmentation=None, indices=test_idx)
 
-    fold_dir = Path(cfg.output_dir) / f"fold_{fold_idx}"
-    with open(fold_dir / "product_classes.json") as f:
-        classes = json.load(f)
-
-    model = GCMSConsistencyNet(
-        len(ds_val.batch_enc.classes_), cfg
-    ).to(device)
-    model.load_state_dict(torch.load(fold_dir / "model.pt",
+    model_dir = Path(cfg.output_dir) / "final_model"
+    model = GCMSConsistencyNet(ds_test.num_batches, cfg).to(device)
+    model.load_state_dict(torch.load(model_dir / "model.pt",
                                      map_location=device,
                                      weights_only=True))
 
     proto_store = PrototypeStore()
-    proto_dir = fold_dir / "prototypes"
+    proto_dir = model_dir / "prototypes"
     if proto_dir.exists():
         proto_store.load(proto_dir)
 
-    sample = ds_val[sample_idx]
+    sample = ds_test[sample_idx]
     x = sample["input"].unsqueeze(0).to(device)
 
     z = model.encode(x)
@@ -213,9 +197,11 @@ def main():
     )
     parser.add_argument("command",
                         choices=["prepare", "train", "evaluate",
-                                 "interpret", "compare"])
+                                 "interpret", "compare", "register"])
     parser.add_argument("--fold", type=int, default=0)
     parser.add_argument("--sample_idx", type=int, default=0)
+    parser.add_argument("--new_data_dir", type=str, default=None,
+                        help="新产品数据目录 (register 命令使用)")
     parser.add_argument("--methods", type=str, default=None,
                         help="对比方法 (逗号分隔), 默认全部运行")
 
@@ -268,6 +254,11 @@ def main():
         cmd_interpret(cfg, fold_idx=args.fold, sample_idx=args.sample_idx)
     elif args.command == "compare":
         cmd_compare(cfg, methods=args.methods)
+    elif args.command == "register":
+        if not args.new_data_dir:
+            print("错误: register 命令需要 --new_data_dir 参数")
+            sys.exit(1)
+        cmd_register(cfg, new_data_dir=args.new_data_dir)
 
 
 def cmd_compare(cfg, methods=None):

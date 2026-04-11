@@ -1,6 +1,7 @@
 """
 PyTorch Dataset + 数据增强 + 批次/开集/少样本切分。
 """
+import json
 import numpy as np
 import pandas as pd
 import torch
@@ -10,7 +11,7 @@ from pathlib import Path
 
 
 class GCMSAugmentation:
-    """RT × m/z 二维张量数据增强。"""
+    """RT × m/z 二维张量数据增强 (含 GC-MS 专用变换)。"""
 
     def __init__(self, cfg):
         self.intensity_lo, self.intensity_hi = cfg.aug_intensity_scale
@@ -18,6 +19,13 @@ class GCMSAugmentation:
         self.mask_ratio = cfg.aug_mask_ratio
         self.rt_shift = cfg.aug_rt_shift_max
         self.mz_shift = cfg.aug_mz_shift_max
+        # GC-MS 专用
+        self.baseline_amp = cfg.aug_baseline_wander_amp
+        self.baseline_freq = cfg.aug_baseline_wander_freq
+        self.peak_broaden_sigma = cfg.aug_peak_broaden_sigma
+        self.rt_warp_strength = cfg.aug_rt_warp_strength
+        self.mz_channel_drop = cfg.aug_mz_channel_drop
+        self.tic_jitter = cfg.aug_tic_jitter
 
     def __call__(self, x: np.ndarray) -> np.ndarray:
         """x: (C, H, W) float32"""
@@ -48,6 +56,50 @@ class GCMSAugmentation:
             dx = np.random.randint(-self.mz_shift, self.mz_shift + 1)
             x = np.roll(x, dy, axis=1)
             x = np.roll(x, dx, axis=2)
+
+        # 5. 基线漂移 (低频正弦叠加, 模拟色谱基线漂移)
+        if self.baseline_amp > 0 and np.random.rand() < 0.5:
+            n_freq = np.random.randint(1, self.baseline_freq + 1)
+            t = np.linspace(0, 2 * np.pi * n_freq, H, dtype=np.float32)
+            phase = np.random.uniform(0, 2 * np.pi)
+            amp = np.random.uniform(0, self.baseline_amp)
+            baseline = amp * np.sin(t + phase)  # (H,)
+            x += baseline[np.newaxis, :, np.newaxis]
+
+        # 6. 峰展宽/收窄 (沿 RT 轴高斯卷积, 模拟色谱柱效率变化)
+        if self.peak_broaden_sigma > 0 and np.random.rand() < 0.3:
+            from scipy.ndimage import gaussian_filter1d
+            sigma = np.random.uniform(0.5, self.peak_broaden_sigma)
+            for c in range(C):
+                x[c] = gaussian_filter1d(x[c], sigma=sigma, axis=0)
+
+        # 7. RT 非线性扭曲 (保留时间漂移的真实模拟)
+        if self.rt_warp_strength > 0 and np.random.rand() < 0.5:
+            # 生成随机控制点构造单调映射
+            n_ctrl = np.random.randint(3, 6)
+            ctrl_x = np.linspace(0, 1, n_ctrl)
+            ctrl_y = ctrl_x + np.random.randn(n_ctrl).astype(np.float32) \
+                     * self.rt_warp_strength
+            ctrl_y = np.sort(ctrl_y)  # 保持单调
+            ctrl_y = (ctrl_y - ctrl_y[0]) / (ctrl_y[-1] - ctrl_y[0] + 1e-8)
+            # 插值到完整 RT 轴
+            warp_map = np.interp(
+                np.linspace(0, 1, H), ctrl_x, ctrl_y
+            )
+            idx_map = np.clip(warp_map * (H - 1), 0, H - 1).astype(np.int64)
+            x = x[:, idx_map, :]
+
+        # 8. m/z 通道随机丢弃 (模拟检测器噪声/离子抑制)
+        if self.mz_channel_drop > 0 and np.random.rand() < 0.3:
+            n_drop = max(1, int(W * self.mz_channel_drop))
+            drop_idx = np.random.choice(W, n_drop, replace=False)
+            x[:, :, drop_idx] = 0.0
+
+        # 9. TIC 归一化抖动 (模拟进样量波动)
+        if self.tic_jitter > 0 and np.random.rand() < 0.5:
+            jitter = 1.0 + np.random.uniform(-self.tic_jitter,
+                                              self.tic_jitter)
+            x *= jitter
 
         return x
 
@@ -244,3 +296,197 @@ def few_shot_from_unknown(unknown_idx, metadata_csv, product_col="product_fine",
                 [orig_to_local[cls_indices[j]] for j in perm[n_shot:]])
         results[n_shot] = {"ref_idx": ref_idx_list, "test_idx": test_idx_list}
     return results
+
+
+# ─────────────────────────────────────────────────────────
+#  固定切分: 单模型训练 + 三 Setting 测试
+# ─────────────────────────────────────────────────────────
+def create_data_split(metadata_csv, cfg, product_col="product_fine"):
+    """
+    创建确定性的数据划分并保存到 JSON 文件。
+
+    划分逻辑:
+      1. 排除样本数过少的产品 (< min_samples_per_product)
+      2. 留出 num_open_test_classes 个产品类型 → Setting B/C 测试
+      3. 留出约 holdout_batch_ratio 比例的批次 → Setting A 测试
+      4. 从训练数据中按 val_ratio 划出验证子集 (训练监控用)
+
+    结果:
+      train_idx:        已知产品 × 训练批次 (实际训练)
+      val_idx:          已知产品 × 训练批次的验证子集
+      test_batch_idx:   已知产品 × 留出批次 → Setting A
+      test_unknown_idx: 留出产品 × 全部批次 → Setting B/C
+    """
+    rng = np.random.RandomState(cfg.seed)
+    df = _load_and_filter(metadata_csv)
+
+    # ── 1. 排除样本过少的产品 ──
+    product_counts = df[product_col].value_counts()
+    all_products = sorted(df[product_col].unique())
+    excluded_products = sorted(
+        [p for p in all_products
+         if product_counts[p] < cfg.min_samples_per_product]
+    )
+    viable_products = sorted(
+        [p for p in all_products if p not in excluded_products]
+    )
+
+    # ── 2. 留出产品类型 (Setting B/C) ──
+    # 优先选择中等规模的产品作为留出类:
+    # 保留最大的类用于训练, 从较小的可用产品中选取留出类
+    n_holdout = cfg.num_open_test_classes
+    if n_holdout >= len(viable_products):
+        raise ValueError(
+            f"可用产品 {len(viable_products)} 不够留出 {n_holdout} 类"
+        )
+    # 按样本数升序排列, 取最小的 n_holdout 个作为留出
+    viable_by_count = sorted(viable_products,
+                             key=lambda p: product_counts[p])
+    holdout_products = sorted(viable_by_count[:n_holdout])
+    known_products = sorted(
+        [p for p in viable_products if p not in holdout_products]
+    )
+
+    # ── 3. 留出批次 (Setting A) ──
+    all_batches = sorted(df["batch_name"].unique().tolist())
+    all_batches = [str(b) for b in all_batches]  # 确保是 str
+    n_holdout_batches = max(1, int(len(all_batches) * cfg.holdout_batch_ratio))
+    batch_perm = rng.permutation(len(all_batches))
+    holdout_batches = sorted(
+        [all_batches[i] for i in batch_perm[:n_holdout_batches]]
+    )
+    train_batches = sorted(
+        [b for b in all_batches if b not in holdout_batches]
+    )
+
+    # ── 4. 构建索引数组 ──
+    # 排除过少产品后的 DataFrame
+    df_viable = df[df[product_col].isin(viable_products)]
+    # 确保 batch_name 比较用 str
+    df_viable = df_viable.copy()
+    df_viable["batch_name"] = df_viable["batch_name"].astype(str)
+
+    # 训练候选: 已知产品 × 训练批次
+    train_mask = (
+        df_viable[product_col].isin(known_products)
+        & df_viable["batch_name"].isin(train_batches)
+    )
+    train_all_idx = df_viable[train_mask].index.tolist()
+
+    # 从训练候选中分出验证集 (分层采样)
+    train_idx, val_idx = _stratified_split(
+        df_viable.loc[train_all_idx], product_col,
+        val_ratio=cfg.val_ratio, rng=rng
+    )
+
+    # Setting A 测试: 已知产品 × 留出批次
+    test_batch_mask = (
+        df_viable[product_col].isin(known_products)
+        & df_viable["batch_name"].isin(holdout_batches)
+    )
+    test_batch_idx = df_viable[test_batch_mask].index.tolist()
+
+    # Setting B/C 测试: 留出产品 × 全部批次
+    test_unknown_mask = df_viable[product_col].isin(holdout_products)
+    test_unknown_idx = df_viable[test_unknown_mask].index.tolist()
+
+    # 确保所有索引为 Python int (JSON 序列化)
+    train_idx = [int(i) for i in train_idx]
+    val_idx = [int(i) for i in val_idx]
+    test_batch_idx = [int(i) for i in test_batch_idx]
+    test_unknown_idx = [int(i) for i in test_unknown_idx]
+
+    # ── 5. 保存 ──
+    split = {
+        "known_products": known_products,
+        "holdout_products": holdout_products,
+        "excluded_products": excluded_products,
+        "train_batches": train_batches,
+        "holdout_batches": holdout_batches,
+        "train_idx": train_idx,
+        "val_idx": val_idx,
+        "test_batch_idx": test_batch_idx,
+        "test_unknown_idx": test_unknown_idx,
+        "seed": cfg.seed,
+        "stats": {
+            "n_train": len(train_idx),
+            "n_val": len(val_idx),
+            "n_test_batch": len(test_batch_idx),
+            "n_test_unknown": len(test_unknown_idx),
+            "n_excluded": int(
+                df[df[product_col].isin(excluded_products)].shape[0]
+            ),
+        },
+    }
+
+    split_path = Path(cfg.prepared_dir) / "split.json"
+    split_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _json_default(obj):
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+    with open(split_path, "w") as f:
+        json.dump(split, f, indent=2, ensure_ascii=False, default=_json_default)
+
+    _print_split_summary(split, df, product_col)
+    return split
+
+
+def _stratified_split(df_subset, product_col, val_ratio, rng):
+    """分层抽样: 按产品类别分层划出验证集。"""
+    train_idx = []
+    val_idx = []
+    for cls in df_subset[product_col].unique():
+        cls_idx = df_subset[
+            df_subset[product_col] == cls
+        ].index.tolist()
+        n_val = max(1, int(len(cls_idx) * val_ratio))
+        perm = rng.permutation(len(cls_idx))
+        val_idx.extend([cls_idx[i] for i in perm[:n_val]])
+        train_idx.extend([cls_idx[i] for i in perm[n_val:]])
+    return train_idx, val_idx
+
+
+def _print_split_summary(split, df, product_col):
+    """打印划分摘要。"""
+    print(f"\n{'='*60}")
+    print("数据划分摘要")
+    print(f"{'='*60}")
+    print(f"  已知产品 ({len(split['known_products'])}): "
+          f"{split['known_products']}")
+    print(f"  留出产品 ({len(split['holdout_products'])}): "
+          f"{split['holdout_products']}  → Setting B/C")
+    print(f"  排除产品 ({len(split['excluded_products'])}): "
+          f"{split['excluded_products']}  (样本不足)")
+    print(f"  训练批次 ({len(split['train_batches'])}): "
+          f"{split['train_batches']}")
+    print(f"  留出批次 ({len(split['holdout_batches'])}): "
+          f"{split['holdout_batches']}  → Setting A")
+    s = split["stats"]
+    print(f"\n  训练集: {s['n_train']} 样本")
+    print(f"  验证集: {s['n_val']} 样本  (训练监控)")
+    print(f"  Setting A 测试: {s['n_test_batch']} 样本  "
+          f"(已知产品 × 留出批次)")
+    print(f"  Setting B/C 测试: {s['n_test_unknown']} 样本  "
+          f"(留出产品 × 全部批次)")
+    print(f"  排除样本: {s['n_excluded']} (产品样本不足)")
+    total = (s['n_train'] + s['n_val'] + s['n_test_batch']
+             + s['n_test_unknown'] + s['n_excluded'])
+    print(f"  总计: {total}")
+
+
+def load_data_split(cfg):
+    """加载已保存的数据划分。"""
+    split_path = Path(cfg.prepared_dir) / "split.json"
+    if not split_path.exists():
+        raise FileNotFoundError(
+            f"未找到 {split_path}, 请先运行 python main.py prepare"
+        )
+    with open(split_path) as f:
+        return json.load(f)

@@ -2,6 +2,8 @@
 单阶段统一训练引擎:
   L = L_supcon + λ₁·L_adv + λ₂·L_proto + λ_recon·L_recon
   验证使用原型匹配准确率；训练结束后注册最终原型。
+
+训练单一模型 (非 LOBO), 数据划分由 prepared_data/split.json 决定。
 """
 import json, time
 from pathlib import Path
@@ -13,7 +15,7 @@ from tqdm import tqdm
 from sklearn.preprocessing import LabelEncoder
 
 from config import Config
-from dataset import GCMSDataset, GCMSAugmentation, unified_splits
+from dataset import GCMSDataset, GCMSAugmentation, load_data_split
 from models import GCMSConsistencyNet
 from losses import UnifiedLoss
 from register import register_from_loader
@@ -147,7 +149,7 @@ def validate_with_prototypes(model, train_loader_noaug, val_loader,
 
 
 def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
-    """运行一个 fold 的单阶段统一训练。"""
+    """运行一个 fold 的单阶段统一训练。(保留用于 LOBO 交叉验证)"""
     from config import get_device
     device = get_device()
     print(f"\n{'='*60}")
@@ -234,8 +236,119 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
     return model, proto_store, ds_train, ds_val, loader_val
 
 
+# ═════════════════════════════════════════════════════════
+#  单模型训练 (使用 prepared_data/split.json 划分)
+# ═════════════════════════════════════════════════════════
+def train_single_model(cfg: Config):
+    """
+    训练一个最终模型 (非交叉验证)。
+
+    从 split.json 读取固定划分:
+      train_idx → 训练
+      val_idx   → 验证 (模型选择)
+    训练结束后注册原型并保存。
+    """
+    from config import get_device
+    set_seed(cfg.seed)
+
+    split = load_data_split(cfg)
+    device = get_device()
+    metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
+    product_col = ("product_fine" if cfg.product_granularity == "fine"
+                   else "product_coarse")
+
+    print(f"\n{'='*60}")
+    print(f"训练单一模型, device = {device}")
+    print(f"{'='*60}")
+    print(f"  已知产品: {split['known_products']}")
+    print(f"  留出产品: {split['holdout_products']}  (Setting B/C)")
+    print(f"  留出批次: {split['holdout_batches']}  (Setting A)")
+
+    # ── 构建数据集 ──
+    ds_train, ds_val, loader_train, loader_val = build_loaders(
+        metadata_csv, split["train_idx"], split["val_idx"], cfg, product_col
+    )
+
+    num_batches = ds_train.num_batches
+    print(f"  训练: {len(ds_train)} 样本, 验证: {len(ds_val)} 样本")
+    print(f"  产品数: {ds_train.num_products}, 批次数: {num_batches}")
+
+    model = GCMSConsistencyNet(num_batches, cfg).to(device)
+    criterion = UnifiedLoss(cfg).to(device)
+
+    # 无增强训练集 (原型计算用)
+    ds_train_noaug = GCMSDataset(metadata_csv, product_col=product_col,
+                                 augmentation=None,
+                                 indices=split["train_idx"])
+    ds_train_noaug.product_enc = ds_train.product_enc
+    ds_train_noaug.batch_enc = ds_train.batch_enc
+    ds_train_noaug.df["product_label"] = ds_train.product_enc.transform(
+        ds_train_noaug.df[product_col])
+    ds_train_noaug.df["batch_label"] = ds_train.batch_enc.transform(
+        ds_train_noaug.df["batch_idx"])
+    loader_train_noaug = DataLoader(ds_train_noaug, batch_size=cfg.batch_size,
+                                    shuffle=False, num_workers=0)
+    label_names = ds_train.get_label_name_map()
+
+    # ── 训练 ──
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
+                                  weight_decay=cfg.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=cfg.epochs)
+
+    best_acc = 0
+    best_state = None
+
+    for epoch in range(cfg.epochs):
+        m_train = train_one_epoch(model, loader_train, criterion, optimizer,
+                                  device, epoch, cfg.epochs)
+        scheduler.step()
+
+        if (epoch + 1) % 10 == 0 or epoch == cfg.epochs - 1:
+            val_acc, _ = validate_with_prototypes(
+                model, loader_train_noaug, loader_val,
+                label_names, device, cfg)
+            if val_acc > best_acc:
+                best_acc = val_acc
+                best_state = {k: v.cpu().clone()
+                              for k, v in model.state_dict().items()}
+            print(f"  Epoch {epoch+1}/{cfg.epochs}  "
+                  f"supcon={m_train.get('supcon',0):.3f} "
+                  f"adv={m_train.get('adv',0):.3f} "
+                  f"proto={m_train.get('proto',0):.3f}  "
+                  f"val_acc={val_acc:.3f}")
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    # ── 注册最终原型 ──
+    proto_store, all_z, all_labels = register_from_loader(
+        model, loader_train_noaug, label_names, device,
+        percentile=cfg.accept_percentile)
+    proto_store.summary()
+
+    # ── 保存 ──
+    model_dir = Path(cfg.output_dir) / "final_model"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), model_dir / "model.pt")
+    proto_store.save(model_dir / "prototypes")
+    with open(model_dir / "product_classes.json", "w") as f:
+        json.dump(list(ds_train.product_enc.classes_), f)
+    with open(model_dir / "train_meta.json", "w") as f:
+        json.dump({
+            "num_batches": int(num_batches),
+            "num_products": int(ds_train.num_products),
+        }, f, indent=2)
+
+    print(f"\n模型已保存到 {model_dir}")
+    print(f"  最佳验证准确率: {best_acc:.4f}")
+
+    return model, proto_store, ds_train, ds_val
+
+
 def train_all_folds(cfg: Config):
-    """Leave-one-batch-out 全部 fold 训练 (仅在已知类上)。"""
+    """Leave-one-batch-out 全部 fold 训练 (保留用于交叉验证)。"""
+    from dataset import unified_splits
     set_seed(cfg.seed)
     metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
 
