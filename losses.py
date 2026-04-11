@@ -33,15 +33,16 @@ class SupConLoss(nn.Module):
         # 正样本掩码: 同一类别 (排除自身)
         labels_col = labels.unsqueeze(1)
         mask_pos = (labels_col == labels_col.T).float()
-        mask_pos.fill_diagonal_(0)
+        diag_mask = torch.eye(B, dtype=torch.float32, device=device)
+        mask_pos = mask_pos * (1.0 - diag_mask)
 
-        # 数值稳定性
-        logits_max, _ = sim.max(dim=1, keepdim=True)
+        # 数值稳定性: 对角设为极小值后取 max
+        sim_for_max = sim - diag_mask * 1e9
+        logits_max = sim_for_max.max(dim=1, keepdim=True).values
         logits = sim - logits_max.detach()
 
-        # 排除自身
-        mask_self = torch.eye(B, device=device)
-        logits = logits - mask_self * 1e9
+        # 排除自身: 对角设为极小值 (不用 in-place)
+        logits = logits - diag_mask * 1e9
 
         # Log-softmax
         exp_logits = torch.exp(logits)
@@ -90,8 +91,12 @@ class BatchPrototypeLoss(nn.Module):
             proto_labels.append(lbl)
         prototypes = torch.stack(prototypes)  # (K, D)
 
-        # 每个样本到所有原型的距离
-        dists = torch.cdist(z, prototypes)  # (B, K)
+        # 每个样本到所有原型的距离 (避免 cdist, 兼容 MPS)
+        # ||a - b||^2 = ||a||^2 + ||b||^2 - 2*a·b
+        z_sq = (z * z).sum(dim=1, keepdim=True)       # (B, 1)
+        p_sq = (prototypes * prototypes).sum(dim=1)    # (K,)
+        cross = z @ prototypes.T                        # (B, K)
+        dists = (z_sq + p_sq.unsqueeze(0) - 2 * cross).clamp(min=1e-12).sqrt()  # (B, K)
 
         # 拉近同类原型 + 推远异类原型
         loss_pull = torch.tensor(0.0, device=device)

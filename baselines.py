@@ -401,8 +401,9 @@ def train_dl_baseline_fold(method_name, train_idx, val_idx, batch_name,
     """训练一个 DL 基线方法的单 fold, 返回 (model, ds_train, ds_val, loader_val)。"""
     from train import build_loaders
     from register import register_from_loader
+    from config import get_device
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
     product_col = ("product_fine" if cfg.product_granularity == "fine"
                    else "product_coarse")
 

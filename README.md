@@ -1,30 +1,3 @@
-# 准备数据 (将 .D 文件夹转为张量)
-python main.py prepare --rt_min 3.17 --rt_max 36.91
-
-# 闭集跨批次训练 (默认)
-python main.py train --split_mode closed
-
-# 开集识别实验
-python main.py train --split_mode open
-
-# 少样本评估 (1/3/5/10-shot)
-python main.py train --split_mode fewshot
-
-# 注册新产品原型
-python main.py register --fold 0
-
-# Grad-CAM 解释 (自动使用嵌入距离模式)
-python main.py interpret --fold 0 --sample_idx
-
-# 运行全部 11 种方法对比
-python main.py compare
-
-# 仅运行指定方法
-python main.py compare --methods "PCA+Mahalanobis,SVM-RBF,ResNet-CE,Ours(Full)"
-
-# 仅运行消融实验
-python main.py compare --methods "Ours-noDualAxis,Ours-noBatchAdv,Ours-Softmax,Ours(Full)"
-
 更新说明：
 ## 一、创新点及其解决的实际问题
 

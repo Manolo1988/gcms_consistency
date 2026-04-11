@@ -1,7 +1,43 @@
 """全局配置：路径、网格参数、模型参数、训练超参数。"""
+import os
+import sys
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, List
+
+# MPS fallback: 某些算子在 MPS 上未实现时回退到 CPU
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+
+def get_device():
+    """自动选择最佳可用设备: CUDA > MPS > CPU。
+    
+    MPS 上的部分算子 (ConvTranspose2d backward 等) 存在兼容问题，
+    通过试运行检测实际可用性。
+    """
+    import torch
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        try:
+            # 快速试运行: 模拟 AxialAttention 中 permute+reshape 的前向/反向
+            x = torch.randn(1, 4, 8, 8, device="mps", requires_grad=True)
+            xt = x.permute(0, 3, 2, 1).contiguous().reshape(8, 8, 4)
+            out = xt.sum()
+            out.backward()
+            # 测试 ConvTranspose2d (ReconDecoder 使用)
+            ct = torch.nn.ConvTranspose2d(4, 2, 4, stride=2, padding=1).to("mps")
+            y = torch.randn(1, 4, 8, 8, device="mps")
+            ct(y).sum().backward()
+            # 测试 MultiheadAttention
+            mha = torch.nn.MultiheadAttention(4, 1, batch_first=True).to("mps")
+            q = torch.randn(2, 4, 4, device="mps")
+            mha(q, q, q)[0].sum().backward()
+            del x, xt, out, ct, y, mha, q
+            return torch.device("mps")
+        except Exception:
+            pass
+    return torch.device("cpu")
 
 
 @dataclass

@@ -91,17 +91,17 @@ class AxialAttention(nn.Module):
     def forward(self, x):
         B, C, H, W = x.shape
         if self.axis == "height":         # 沿 RT 轴
-            x_t = x.permute(0, 3, 2, 1).reshape(B * W, H, C)
+            x_t = x.permute(0, 3, 2, 1).contiguous().reshape(B * W, H, C)
         else:                             # 沿 m/z 轴
-            x_t = x.permute(0, 2, 3, 1).reshape(B * H, W, C)
+            x_t = x.permute(0, 2, 3, 1).contiguous().reshape(B * H, W, C)
 
         out, _ = self.attn(x_t, x_t, x_t)
         out = self.norm(out + x_t)
 
         if self.axis == "height":
-            out = out.reshape(B, W, H, C).permute(0, 3, 2, 1)
+            out = out.reshape(B, W, H, C).permute(0, 3, 2, 1).contiguous()
         else:
-            out = out.reshape(B, H, W, C).permute(0, 3, 1, 2)
+            out = out.reshape(B, H, W, C).permute(0, 3, 1, 2).contiguous()
         return out
 
 

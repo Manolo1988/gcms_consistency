@@ -40,7 +40,8 @@ def cmd_evaluate(cfg):
     from register import PrototypeStore
     from torch.utils.data import DataLoader
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from config import get_device
+    device = get_device()
     metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
     product_col = ("product_fine" if cfg.product_granularity == "fine"
                    else "product_coarse")
@@ -73,12 +74,28 @@ def cmd_evaluate(cfg):
                                augmentation=None, indices=fold["train_idx"])
         ds_val = GCMSDataset(metadata_csv, product_col=product_col,
                              augmentation=None, indices=fold["val_idx"])
-        ds_val.product_enc = ds_train.product_enc
-        ds_val.batch_enc = ds_train.batch_enc
-        ds_val.df["product_label"] = ds_train.product_enc.transform(
-            ds_val.df[product_col])
-        ds_val.df["batch_label"] = ds_train.batch_enc.transform(
-            ds_val.df["batch_idx"])
+
+        # 统一编码器: 合并 train/val 所有可能的标签值
+        from sklearn.preprocessing import LabelEncoder
+        all_batch_vals = sorted(
+            set(ds_train.df["batch_idx"].unique())
+            | set(ds_val.df["batch_idx"].unique())
+        )
+        all_product_vals = sorted(
+            set(ds_train.df[product_col].unique())
+            | set(ds_val.df[product_col].unique())
+        )
+        shared_batch_enc = LabelEncoder().fit(all_batch_vals)
+        shared_product_enc = LabelEncoder().fit(all_product_vals)
+        for ds in (ds_train, ds_val):
+            ds.product_enc = shared_product_enc
+            ds.batch_enc = shared_batch_enc
+            ds.df["product_label"] = shared_product_enc.transform(
+                ds.df[product_col])
+            ds.df["batch_label"] = shared_batch_enc.transform(
+                ds.df["batch_idx"])
+            ds.num_products = len(shared_product_enc.classes_)
+            ds.num_batches = len(shared_batch_enc.classes_)
 
         loader_val = DataLoader(ds_val, batch_size=cfg.batch_size,
                                 shuffle=False)
@@ -102,6 +119,7 @@ def cmd_evaluate(cfg):
             "ds_train": ds_train,
             "ds_val": ds_val,
             "loader_val": loader_val,
+            "train_idx": fold["train_idx"],
         })
 
     if fold_results:
@@ -115,7 +133,8 @@ def cmd_interpret(cfg, fold_idx=0, sample_idx=0):
     from interpret import GradCAM, find_top_regions, plot_interpretation
     from register import PrototypeStore
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from config import get_device
+    device = get_device()
     metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
     product_col = ("product_fine" if cfg.product_granularity == "fine"
                    else "product_coarse")

@@ -221,6 +221,10 @@ def few_shot_from_unknown(unknown_idx, metadata_csv, product_col="product_fine",
     df = _load_and_filter(metadata_csv, exclude_blanks, exclude_special)
     unknown_df = df.iloc[unknown_idx]
 
+    # 建立原始行号 → unknown_ds 内部位置的映射，
+    # 因为 GCMSDataset(indices=unknown_idx) 会 reset_index 到 0..N-1
+    orig_to_local = {orig: local for local, orig in enumerate(unknown_idx)}
+
     results = {}
     for n_shot in n_shot_values:
         ref_idx_list = []
@@ -230,10 +234,13 @@ def few_shot_from_unknown(unknown_idx, metadata_csv, product_col="product_fine",
                 unknown_df[product_col] == cls
             ].index.tolist()
             if len(cls_indices) <= n_shot:
-                ref_idx_list.extend(cls_indices)
+                ref_idx_list.extend(
+                    [orig_to_local[i] for i in cls_indices])
                 continue
             perm = rng.permutation(len(cls_indices))
-            ref_idx_list.extend([cls_indices[j] for j in perm[:n_shot]])
-            test_idx_list.extend([cls_indices[j] for j in perm[n_shot:]])
+            ref_idx_list.extend(
+                [orig_to_local[cls_indices[j]] for j in perm[:n_shot]])
+            test_idx_list.extend(
+                [orig_to_local[cls_indices[j]] for j in perm[n_shot:]])
         results[n_shot] = {"ref_idx": ref_idx_list, "test_idx": test_idx_list}
     return results

@@ -7,6 +7,7 @@
 """
 import numpy as np
 import torch
+from tqdm import tqdm
 from sklearn.metrics import (
     accuracy_score, f1_score, balanced_accuracy_score,
     roc_auc_score, average_precision_score,
@@ -33,7 +34,7 @@ def collect_embeddings(model, loader, device):
     model.eval()
     records = []
 
-    for batch in loader:
+    for batch in tqdm(loader, desc="收集嵌入", leave=False, ncols=80):
         x = batch["input"].to(device)
         z = model.encode(x)
 
@@ -53,7 +54,7 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
     model.eval()
     records = []
 
-    for batch in loader:
+    for batch in tqdm(loader, desc="收集预测", leave=False, ncols=80):
         x = batch["input"].to(device)
         z = model.encode(x)
         result = proto_store.predict(z)
@@ -254,7 +255,7 @@ def few_shot_evaluate(model, dataset, ref_idx, test_idx, label_names,
     if not records:
         return {"accuracy": np.nan, "macro_f1": np.nan}
 
-    cls_m = classification_metrics(records)
+    cls_m = product_identification_metrics(records)
     return {
         "accuracy": cls_m["accuracy"],
         "macro_f1": cls_m["macro_f1"],
@@ -392,7 +393,8 @@ def evaluate_setting_c(model, unknown_dataset, unknown_idx_splits,
 
 def evaluate_all_settings(fold_results, split_info, cfg):
     """汇总所有 fold 的 Setting A/B/C 评估。"""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from config import get_device
+    device = get_device()
     out_dir = Path(cfg.output_dir)
     viz_dir = out_dir / "visualizations"
 
@@ -419,16 +421,22 @@ def evaluate_all_settings(fold_results, split_info, cfg):
 
     all_a, all_b, all_c = [], [], []
 
-    for fr in fold_results:
+    for fi, fr in enumerate(tqdm(fold_results, desc="评估 folds", ncols=80)):
         model = fr["model"].to(device)
         proto_store = fr["proto_store"]
         fold_name = fr["test_batch"]
         ds_train = fr["ds_train"]
+        train_idx = fr.get("train_idx")
 
         # 无增强训练 loader (Setting A cross-batch gap)
-        train_noaug = GCMSDataset(
-            metadata_csv, product_col=product_col,
-            augmentation=None, indices=ds_train.df.index.tolist())
+        if train_idx is not None:
+            train_noaug = GCMSDataset(
+                metadata_csv, product_col=product_col,
+                augmentation=None, indices=train_idx)
+        else:
+            train_noaug = GCMSDataset(
+                metadata_csv, product_col=product_col,
+                augmentation=None, indices=ds_train.df.index.tolist())
         train_noaug.product_enc = ds_train.product_enc
         train_noaug.batch_enc = ds_train.batch_enc
         train_noaug.df["product_label"] = ds_train.product_enc.transform(
@@ -546,8 +554,8 @@ def _save_summary(all_a, all_b, all_c, fold_results, out_dir):
     summary = {"folds": []}
     for i, (a, b, c) in enumerate(zip(all_a, all_b, all_c)):
         fold_data = {
-            "fold": fold_results[i]["fold"],
-            "test_batch": fold_results[i]["test_batch"],
+            "fold": _s(fold_results[i]["fold"]),
+            "test_batch": str(fold_results[i]["test_batch"]),
             "setting_a": {
                 k: _s(v) for k, v in a["product_identification"].items()
                 if k not in ("confusion", "report")
@@ -567,4 +575,4 @@ def _save_summary(all_a, all_b, all_c, fold_results, out_dir):
         summary["folds"].append(fold_data)
 
     with open(out_dir / "evaluation_summary.json", "w") as f:
-        json.dump(summary, f, indent=2, ensure_ascii=False)
+        json.dump(summary, f, indent=2, ensure_ascii=False, default=_s)

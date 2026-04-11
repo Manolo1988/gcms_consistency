@@ -7,7 +7,7 @@ import json, time
 from pathlib import Path
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 from sklearn.preprocessing import LabelEncoder
@@ -60,10 +60,34 @@ def build_loaders(metadata_csv, train_idx, val_idx, cfg, product_col):
         ds.num_batches = len(shared_batch_enc.classes_)
 
     loader_train = DataLoader(ds_train, batch_size=cfg.batch_size,
-                              shuffle=True, drop_last=True, num_workers=0)
+                              sampler=_build_balanced_sampler(ds_train),
+                              drop_last=True, num_workers=0)
     loader_val = DataLoader(ds_val, batch_size=cfg.batch_size,
                             shuffle=False, num_workers=0)
     return ds_train, ds_val, loader_train, loader_val
+
+
+def _build_balanced_sampler(dataset):
+    """
+    SAIM 风格类别均衡采样器。
+
+    参考 gyfseer/SAIM base_dataset.py 的 prob_based_sample:
+    每个类采样等量样本, 类内按 softmax(score) 概率分布采样。
+    此处初始 score 均为 1.0 (等概率), 保证少数类不被淹没。
+
+    原理: 先计算每个样本的采样权重 = 1 / (该类的样本数),
+    使得总体采样时各类期望出现次数相等。
+    """
+    labels = dataset.df["product_label"].values
+    class_counts = np.bincount(labels)
+    # 权重 = 1 / class_count (每个样本)
+    weights = 1.0 / class_counts[labels]
+    sampler = WeightedRandomSampler(
+        weights=weights.tolist(),
+        num_samples=len(dataset),
+        replacement=True,
+    )
+    return sampler
 
 
 def train_one_epoch(model, loader, criterion, optimizer, device, epoch,
@@ -76,7 +100,9 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch,
     alpha = 2.0 / (1.0 + np.exp(-10.0 * p)) - 1.0
     model.domain_head.set_alpha(alpha)
 
-    for batch in loader:
+    pbar = tqdm(loader, desc=f"Epoch {epoch+1}/{total_epochs}",
+                 leave=False, ncols=100)
+    for batch in pbar:
         x = batch["input"].to(device)
         batch_dev = {k: v.to(device) if torch.is_tensor(v) else v
                      for k, v in batch.items()}
@@ -94,6 +120,8 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch,
         for k, v in losses.items():
             running[k] = running.get(k, 0.0) + v.item()
 
+        pbar.set_postfix(loss=f"{loss.item():.3f}")
+
     n = max(len(loader), 1)
     return {k: v / n for k, v in running.items()}
 
@@ -108,7 +136,7 @@ def validate_with_prototypes(model, train_loader_noaug, val_loader,
         percentile=cfg.accept_percentile)
 
     correct, total = 0, 0
-    for batch in val_loader:
+    for batch in tqdm(val_loader, desc="验证", leave=False, ncols=80):
         x = batch["input"].to(device)
         z = model.encode(x)
         result = proto_store.predict(z)
@@ -120,7 +148,8 @@ def validate_with_prototypes(model, train_loader_noaug, val_loader,
 
 def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
     """运行一个 fold 的单阶段统一训练。"""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from config import get_device
+    device = get_device()
     print(f"\n{'='*60}")
     print(f"Fold {fold_idx}: 测试批次 = {batch_name}, device = {device}")
     print(f"{'='*60}")
@@ -234,7 +263,9 @@ def train_all_folds(cfg: Config):
         }, f, indent=2)
 
     fold_results = []
-    for fold in split_info["folds"]:
+    num_folds = len(split_info["folds"])
+    for fi, fold in enumerate(split_info["folds"]):
+        print(f"\n━━ Fold {fi+1}/{num_folds} ━━")
         model, proto_store, ds_train, ds_val, loader_val = run_fold(
             fold["fold_idx"], fold["train_idx"], fold["val_idx"],
             fold["test_batch"], metadata_csv, cfg
@@ -242,6 +273,7 @@ def train_all_folds(cfg: Config):
         fold_results.append({
             "fold": fold["fold_idx"],
             "test_batch": fold["test_batch"],
+            "train_idx": fold["train_idx"],
             "model": model,
             "proto_store": proto_store,
             "ds_train": ds_train,

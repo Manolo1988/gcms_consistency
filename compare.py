@@ -253,7 +253,8 @@ def _build_proto_store(model, ds_train, train_idx, metadata_csv,
 def _run_dl_baseline_fold(method_name, train_idx, val_idx, batch_name,
                           metadata_csv, cfg):
     """DL 基线单 fold: 训练 → 推理 → 评估。"""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from config import get_device
+    device = get_device()
 
     model, ds_train, ds_val, loader_val = train_dl_baseline_fold(
         method_name, train_idx, val_idx, batch_name, metadata_csv, cfg
@@ -280,7 +281,8 @@ def _train_no_axialattn_fold(fold_idx, train_idx, val_idx, batch_name,
                              metadata_csv, cfg):
     """消融: 完整损失 + PlainEncoder (无双轴注意力), 单阶段训练。"""
     from train import validate_with_prototypes
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from config import get_device
+    device = get_device()
     product_col = ("product_fine" if cfg.product_granularity == "fine"
                    else "product_coarse")
 
@@ -351,7 +353,8 @@ def _train_no_axialattn_fold(fold_idx, train_idx, val_idx, batch_name,
 def _run_ablation_fold(ablation_name, fold_idx, train_idx, val_idx,
                        batch_name, metadata_csv, cfg):
     """消融变体单 fold。"""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from config import get_device
+    device = get_device()
 
     if ablation_name == "Ours-noBatchAdv":
         ab_cfg = copy.deepcopy(cfg)
@@ -390,7 +393,8 @@ def _run_ablation_fold(ablation_name, fold_idx, train_idx, val_idx,
 def _run_proposed_fold(fold_idx, train_idx, val_idx, batch_name,
                        metadata_csv, cfg):
     """本文完整方法单 fold。"""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from config import get_device
+    device = get_device()
     model, proto_store, ds_train, ds_val, loader_val = run_fold(
         fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg)
     preds, scores, zs, ys, bs = collect_proto_results(

@@ -206,7 +206,11 @@ class PrototypeStore:
                 [self.prototypes[c] for c in self.class_names]
             )
             proto_mat = proto_mat.to(z.device)
-            all_dists = torch.cdist(z, proto_mat)  # (B, K)
+            # 欧式距离 (避免 cdist, 兼容 MPS)
+            z_sq = (z * z).sum(dim=1, keepdim=True)
+            p_sq = (proto_mat * proto_mat).sum(dim=1)
+            cross = z @ proto_mat.T
+            all_dists = (z_sq + p_sq.unsqueeze(0) - 2 * cross).clamp(min=1e-12).sqrt()
 
         # 最近原型
         min_dists, pred_idx = all_dists.min(dim=1)  # (B,), (B,)
@@ -268,12 +272,12 @@ class PrototypeStore:
         self.class_names = meta["class_names"]
         self.radii = {k: float(v) for k, v in meta["radii"].items()}
         self.prototypes = torch.load(path / "prototypes.pt",
-                                     map_location="cpu", weights_only=True)
+                                     map_location="cpu", weights_only=False)
 
         sph_path = path / "spherical_prototypes.pt"
         if sph_path.exists():
             self.spherical_prototypes = torch.load(
-                sph_path, map_location="cpu", weights_only=True
+                sph_path, map_location="cpu", weights_only=False
             )
         else:
             self.spherical_prototypes = {}
