@@ -5,6 +5,7 @@
   4. 批次鲁棒性 (Setting A): 批次可预测性, Silhouette
   5. 可解释性: Grad-CAM (定性)
 """
+import os
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -24,6 +25,23 @@ import matplotlib.pyplot as plt
 from register import PrototypeStore, register_from_loader
 
 
+def _progress_enabled():
+    """控制是否显示 tqdm 进度条。默认关闭，避免污染日志。"""
+    return os.environ.get("GCMS_SHOW_PROGRESS", "0") == "1"
+
+
+def _resolve_product_label_name_map(loader):
+    """从 DataLoader/Subset 链路解析 product_label -> class_name 映射。"""
+    ds = getattr(loader, "dataset", None)
+    while ds is not None:
+        enc = getattr(ds, "product_enc", None)
+        if enc is not None and hasattr(enc, "classes_"):
+            classes = list(enc.classes_)
+            return {int(i): str(name) for i, name in enumerate(classes)}
+        ds = getattr(ds, "dataset", None)
+    return {}
+
+
 # ═══════════════════════════════════════════════════════════
 #  核心收集函数
 # ═══════════════════════════════════════════════════════════
@@ -34,7 +52,13 @@ def collect_embeddings(model, loader, device):
     model.eval()
     records = []
 
-    for batch in tqdm(loader, desc="收集嵌入", leave=False, ncols=80):
+    for batch in tqdm(
+        loader,
+        desc="收集嵌入",
+        leave=False,
+        ncols=80,
+        disable=not _progress_enabled(),
+    ):
         x = batch["input"].to(device)
         z = model.encode(x)
 
@@ -53,8 +77,15 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
     """收集所有样本的预测结果 (基于原型匹配)。"""
     model.eval()
     records = []
+    label_name_map = _resolve_product_label_name_map(loader)
 
-    for batch in tqdm(loader, desc="收集预测", leave=False, ncols=80):
+    for batch in tqdm(
+        loader,
+        desc="收集预测",
+        leave=False,
+        ncols=80,
+        disable=not _progress_enabled(),
+    ):
         x = batch["input"].to(device)
         z = model.encode(x)
         result = proto_store.predict(z)
@@ -64,21 +95,29 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
             score = result["scores"][i].item()
             min_dist = result["min_dists"][i].item()
             true_label = batch["product"][i].item()
+            true_class_name = label_name_map.get(int(true_label), str(int(true_label)))
+            pred_class_name = str(result["pred_class"][i])
 
             # 拒识判定
             is_known = proto_store.is_known(
-                result["min_dists"][i:i+1], factor=reject_factor
+                result["min_dists"][i:i+1],
+                factor=reject_factor,
+                pred_idx=result["pred_idx"][i:i+1],
+                use_spherical=bool(result.get("use_spherical", True)),
             )[0]
 
             records.append({
                 "sample_id": batch["sample_id"][i] if isinstance(batch["sample_id"], list) else batch["sample_id"],
                 "true_product": true_label,
+                "true_class": true_class_name,
                 "pred_product": pred_idx,
-                "pred_class": result["pred_class"][i],
+                "pred_class": pred_class_name,
                 "consistency_score": score,
+                "open_set_score": result["scores"][i].item(),
+                "margin_score": result["margin_scores"][i].item(),
                 "min_dist": min_dist,
                 "is_known": bool(is_known),
-                "correct": pred_idx == true_label,
+                "correct": pred_class_name == true_class_name,
                 "z": z[i].cpu().numpy(),
                 "batch_label": batch["batch"][i].item(),
             })
@@ -94,8 +133,16 @@ def product_identification_metrics(records, train_records=None):
     Macro-F1, Accuracy, 跨批次准确率差 Δ。
     train_records: 训练集预测 (用于计算同批次准确率)。
     """
-    y_true = [r["true_product"] for r in records]
-    y_pred = [r["pred_product"] for r in records]
+    use_class_names = all(
+        ("true_class" in r and "pred_class" in r)
+        for r in records
+    )
+    if use_class_names:
+        y_true = [str(r["true_class"]) for r in records]
+        y_pred = [str(r["pred_class"]) for r in records]
+    else:
+        y_true = [r["true_product"] for r in records]
+        y_pred = [r["pred_product"] for r in records]
 
     metrics = {
         "accuracy": accuracy_score(y_true, y_pred),
@@ -106,9 +153,17 @@ def product_identification_metrics(records, train_records=None):
     }
 
     if train_records is not None:
-        acc_same = accuracy_score(
-            [r["true_product"] for r in train_records],
-            [r["pred_product"] for r in train_records])
+        train_use_class_names = all(
+            ("true_class" in r and "pred_class" in r)
+            for r in train_records
+        )
+        if train_use_class_names:
+            y_true_train = [str(r["true_class"]) for r in train_records]
+            y_pred_train = [str(r["pred_class"]) for r in train_records]
+        else:
+            y_true_train = [r["true_product"] for r in train_records]
+            y_pred_train = [r["pred_product"] for r in train_records]
+        acc_same = accuracy_score(y_true_train, y_pred_train)
         metrics["cross_batch_gap"] = acc_same - metrics["accuracy"]
 
     return metrics
@@ -180,7 +235,7 @@ def batch_robustness_metrics(records):
     # 批次可预测性 (用嵌入预测批次标签的准确率 — 越低越好)
     if len(np.unique(batch_labels)) > 1 and len(zs) > 10:
         clf = LogisticRegression(max_iter=500, solver="lbfgs",
-                                 multi_class="auto", random_state=42)
+                                 random_state=42)
         clf.fit(zs, batch_labels)
         batch_pred_acc = clf.score(zs, batch_labels)
         result["batch_predictability"] = float(batch_pred_acc)
@@ -199,8 +254,14 @@ def open_set_metrics(known_records, unknown_records):
     开集评估: 已知类 vs 未知类的分离度。
     返回 AUROC 和 FPR@95TPR。
     """
-    known_scores = np.array([r["consistency_score"] for r in known_records])
-    unknown_scores = np.array([r["consistency_score"] for r in unknown_records])
+    known_scores = np.array([
+        r.get("open_set_score", r.get("consistency_score", 0.0))
+        for r in known_records
+    ])
+    unknown_scores = np.array([
+        r.get("open_set_score", r.get("consistency_score", 0.0))
+        for r in unknown_records
+    ])
 
     # 标签: 1=已知, 0=未知
     labels = np.concatenate([np.ones(len(known_scores)),
@@ -222,6 +283,423 @@ def open_set_metrics(known_records, unknown_records):
     result["known_score_mean"] = float(known_scores.mean()) if len(known_scores) else float(np.nan)
     result["unknown_score_mean"] = float(unknown_scores.mean()) if len(unknown_scores) else float(np.nan)
     return result
+
+
+def _records_from_arrays(preds, scores, embeddings, true_labels, batch_labels,
+                         is_known=True):
+    """将数组结果组装成统一 records 结构。"""
+    records = []
+    n = len(true_labels)
+    for i in range(n):
+        pred_i = int(preds[i]) if len(preds) > i else -1
+        true_i = int(true_labels[i])
+        score_i = float(scores[i]) if len(scores) > i else 0.0
+        z_i = embeddings[i] if len(embeddings) > i else np.zeros(1, dtype=np.float32)
+        batch_i = int(batch_labels[i]) if len(batch_labels) > i else -1
+
+        records.append({
+            "sample_id": f"baseline_{i}",
+            "true_product": true_i,
+            "pred_product": pred_i,
+            "pred_class": str(pred_i),
+            "consistency_score": score_i,
+            "open_set_score": score_i,
+            "margin_score": score_i,
+            "min_dist": float(1.0 - score_i),
+            "is_known": bool(is_known),
+            "correct": pred_i == true_i,
+            "z": np.asarray(z_i),
+            "batch_label": batch_i,
+        })
+    return records
+
+
+README_BASELINE_ORDER = [
+    "pca_mahalanobis",
+    "pls_da",
+    "svm_rbf",
+    "tic_pca_mlp",
+]
+
+README_BASELINE_SPECS = [
+    {
+        "key": "pca_mahalanobis",
+        "name": "PCA+Mahalanobis",
+        "feature_mode": "raw",
+    },
+    {
+        "key": "pls_da",
+        "name": "PLS-DA",
+        "feature_mode": "raw",
+    },
+    {
+        "key": "svm_rbf",
+        "name": "SVM-RBF",
+        "feature_mode": "raw",
+    },
+    {
+        "key": "tic_pca_mlp",
+        "name": "TIC+PCA+MLP",
+        "feature_mode": "tic",
+    },
+]
+
+
+def _resolve_feature_mode_label(feature_mode, cfg):
+    if feature_mode == "raw":
+        return "raw"
+    if feature_mode in ("pretrained", "pretrained_raw"):
+        arch = str(getattr(cfg, "pretrained_feature_arch", "auto") or "auto")
+        layers = str(getattr(cfg, "pretrained_feature_layers", "layer4") or "layer4")
+        fuse = str(getattr(cfg, "pretrained_feature_fuse", "concat") or "concat")
+        return f"pretrained:{arch}:{layers}:{fuse}"
+    return feature_mode
+
+
+def _extract_with_mode(loader, feature_mode, cfg):
+    from baselines import (
+        extract_features,
+        extract_tic_features,
+        extract_pretrained_resnet_features,
+    )
+
+    if feature_mode == "tic":
+        return extract_tic_features(loader)
+
+    if feature_mode == "raw":
+        return extract_features(loader)
+
+    if feature_mode not in ("pretrained", "pretrained_raw"):
+        raise ValueError(f"未知特征模式: {feature_mode}")
+
+    model_path = str(getattr(cfg, "pretrained_feature_model", "") or "").strip()
+    if not model_path:
+        raise ValueError(
+            f"feature_mode={feature_mode} 需要配置 pretrained_feature_model"
+        )
+    arch = str(getattr(cfg, "pretrained_feature_arch", "auto") or "auto")
+    layers = str(getattr(cfg, "pretrained_feature_layers", "layer4") or "layer4")
+    fuse = str(getattr(cfg, "pretrained_feature_fuse", "concat") or "concat")
+    return extract_pretrained_resnet_features(
+        loader,
+        weight_path=model_path,
+        arch=arch,
+        layers=layers,
+        fuse=fuse,
+    )
+
+
+def _build_baseline_feature_cache(split, cfg, make_loader,
+                                  metadata_csv, product_col, feature_modes):
+    from torch.utils.data import DataLoader, Subset
+    from dataset import GCMSDataset, few_shot_from_unknown
+
+    cache = {
+        "train": {},
+        "setting_a": {},
+        "setting_b": {},
+        "setting_c": {},
+    }
+
+    _, loader_train = make_loader(split["train_idx"])
+    for mode in feature_modes:
+        cache["train"][mode] = _extract_with_mode(loader_train, mode, cfg)
+
+    if split.get("test_batch_idx"):
+        _, loader_test = make_loader(split["test_batch_idx"])
+        for mode in feature_modes:
+            cache["setting_a"][mode] = {
+                "train": cache["train"][mode],
+                "test": _extract_with_mode(loader_test, mode, cfg),
+            }
+
+    if split.get("test_unknown_idx"):
+        known_idx = sorted(set(split.get("val_idx", []))
+                           | set(split.get("test_batch_idx", [])))
+        _, loader_known = make_loader(known_idx)
+        _, loader_unknown = make_loader(split["test_unknown_idx"])
+        for mode in feature_modes:
+            cache["setting_b"][mode] = {
+                "known": _extract_with_mode(loader_known, mode, cfg),
+                "unknown": _extract_with_mode(loader_unknown, mode, cfg),
+            }
+
+        unknown_idx = split["test_unknown_idx"]
+        ds_unknown = GCMSDataset(
+            metadata_csv,
+            product_col=product_col,
+            augmentation=None,
+            indices=unknown_idx,
+        )
+        fs_splits = few_shot_from_unknown(
+            unknown_idx,
+            metadata_csv,
+            product_col=product_col,
+            n_shot_values=cfg.n_shot_values,
+            seed=cfg.seed,
+        )
+        for n_shot, fs in fs_splits.items():
+            ref_idx = fs.get("ref_idx", [])
+            test_idx = fs.get("test_idx", [])
+            cache["setting_c"][str(n_shot)] = {
+                "n_ref": int(len(ref_idx)),
+                "n_test": int(len(test_idx)),
+                "modes": {},
+            }
+            if not ref_idx or not test_idx:
+                continue
+
+            ref_loader = DataLoader(
+                Subset(ds_unknown, ref_idx),
+                batch_size=cfg.batch_size,
+                shuffle=False,
+            )
+            test_loader = DataLoader(
+                Subset(ds_unknown, test_idx),
+                batch_size=cfg.batch_size,
+                shuffle=False,
+            )
+            for mode in feature_modes:
+                cache["setting_c"][str(n_shot)]["modes"][mode] = {
+                    "ref": _extract_with_mode(ref_loader, mode, cfg),
+                    "test": _extract_with_mode(test_loader, mode, cfg),
+                }
+
+    return cache
+
+
+def _build_main_vs_baseline(result_a, result_b, result_c, baseline_result):
+    """构建主模型相对 baseline 的差值(main - baseline)。"""
+
+    def _delta(main_v, base_v):
+        if main_v is None or base_v is None:
+            return None
+        try:
+            return float(main_v) - float(base_v)
+        except Exception:
+            return None
+
+    out = {}
+
+    if result_a and baseline_result and baseline_result.get("setting_a"):
+        pid = result_a.get("product_identification", {})
+        ba = baseline_result.get("setting_a", {})
+        out["setting_a"] = {
+            "accuracy": _delta(pid.get("accuracy"), ba.get("accuracy")),
+            "macro_f1": _delta(pid.get("macro_f1"), ba.get("macro_f1")),
+        }
+
+    if result_b and baseline_result and baseline_result.get("setting_b"):
+        sb = result_b.get("open_set", {})
+        bb = baseline_result.get("setting_b", {})
+        out["setting_b"] = {
+            "open_set_AUROC": _delta(sb.get("open_set_AUROC"),
+                                       bb.get("open_set_AUROC")),
+            "FPR_at_95TPR": _delta(sb.get("FPR_at_95TPR"),
+                                    bb.get("FPR_at_95TPR")),
+        }
+
+    if result_c and baseline_result and baseline_result.get("setting_c"):
+        out_c = {}
+        main_c = result_c.get("few_shot", {})
+        base_c = baseline_result.get("setting_c", {})
+        n_values = sorted(
+            set([str(k) for k in main_c.keys()]) | set([str(k) for k in base_c.keys()]),
+            key=lambda x: int(x),
+        )
+        for n_str in n_values:
+            main_m = main_c.get(int(n_str), {}) if n_str.isdigit() else {}
+            base_m = base_c.get(n_str, {})
+            out_c[n_str] = {
+                "accuracy": _delta(main_m.get("accuracy"), base_m.get("accuracy")),
+                "macro_f1": _delta(main_m.get("macro_f1"), base_m.get("macro_f1")),
+            }
+        out["setting_c"] = out_c
+
+    return out
+
+
+def _build_main_vs_readme_baselines(result_a, result_b, result_c,
+                                    baselines_readme):
+    out = {}
+    for key in README_BASELINE_ORDER:
+        baseline_result = baselines_readme.get(key)
+        if not baseline_result:
+            continue
+        out[key] = _build_main_vs_baseline(
+            result_a,
+            result_b,
+            result_c,
+            baseline_result,
+        )
+    return out
+
+
+def _evaluate_baseline_with_cache(model_cls, feature_mode, cache):
+    result = {
+        "setting_a": None,
+        "setting_b": None,
+        "setting_c": {},
+    }
+
+    train_pack = cache.get("train", {}).get(feature_mode)
+    if train_pack is None:
+        return result
+
+    x_train, y_train, b_train = train_pack
+    model_ab = None
+
+    if cache.get("setting_a", {}).get(feature_mode):
+        x_test, y_test, b_test = cache["setting_a"][feature_mode]["test"]
+
+        model_ab = model_cls()
+        model_ab.fit(x_train, y_train)
+
+        pred_train, score_train = model_ab.predict(x_train)
+        z_train = model_ab.get_embeddings(x_train)
+        train_records = _records_from_arrays(
+            pred_train, score_train, z_train, y_train, b_train,
+            is_known=True,
+        )
+
+        pred_test, score_test = model_ab.predict(x_test)
+        z_test = model_ab.get_embeddings(x_test)
+        test_records = _records_from_arrays(
+            pred_test, score_test, z_test, y_test, b_test,
+            is_known=True,
+        )
+
+        pid = product_identification_metrics(test_records, train_records)
+        con = consistency_scoring_metrics(test_records)
+        rob = batch_robustness_metrics(test_records)
+
+        result["setting_a"] = {
+            "accuracy": float(pid.get("accuracy", np.nan)),
+            "macro_f1": float(pid.get("macro_f1", np.nan)),
+            "balanced_acc": float(pid.get("balanced_acc", np.nan)),
+            "cross_batch_gap": float(pid.get("cross_batch_gap", np.nan)),
+            "AUROC_correct": float(con.get("AUROC_correct", np.nan)),
+            "cohens_d": float(con.get("cohens_d", np.nan)),
+            "silhouette_product": float(rob.get("silhouette_product", np.nan)),
+            "silhouette_batch": float(rob.get("silhouette_batch", np.nan)),
+            "batch_predictability": float(rob.get("batch_predictability", np.nan)),
+        }
+
+    if cache.get("setting_b", {}).get(feature_mode):
+        if model_ab is None:
+            model_ab = model_cls()
+            model_ab.fit(x_train, y_train)
+
+        x_known, y_known, b_known = cache["setting_b"][feature_mode]["known"]
+        x_unknown, y_unknown, b_unknown = cache["setting_b"][feature_mode]["unknown"]
+
+        pred_k, score_k = model_ab.predict(x_known)
+        z_k = model_ab.get_embeddings(x_known)
+        known_records = _records_from_arrays(
+            pred_k, score_k, z_k, y_known, b_known, is_known=True
+        )
+
+        pred_u, score_u = model_ab.predict(x_unknown)
+        z_u = model_ab.get_embeddings(x_unknown)
+        unknown_records = _records_from_arrays(
+            pred_u, score_u, z_u, y_unknown, b_unknown, is_known=False
+        )
+
+        result["setting_b"] = open_set_metrics(known_records, unknown_records)
+
+    for n_str, block in cache.get("setting_c", {}).items():
+        n_ref = int(block.get("n_ref", 0))
+        n_test = int(block.get("n_test", 0))
+        mode_block = block.get("modes", {}).get(feature_mode)
+        if not mode_block:
+            result["setting_c"][n_str] = {
+                "accuracy": float(np.nan),
+                "macro_f1": float(np.nan),
+                "n_ref": n_ref,
+                "n_test": n_test,
+            }
+            continue
+
+        x_ref, y_ref, _ = mode_block["ref"]
+        x_test, y_test, _ = mode_block["test"]
+        fs_model = model_cls()
+        fs_model.fit(x_ref, y_ref)
+        pred_t, _ = fs_model.predict(x_test)
+        result["setting_c"][n_str] = {
+            "accuracy": float(accuracy_score(y_test, pred_t)),
+            "macro_f1": float(f1_score(y_test, pred_t,
+                                        average="macro", zero_division=0)),
+            "n_ref": n_ref,
+            "n_test": int(len(y_test)),
+        }
+
+    return result
+
+
+def evaluate_readme_baselines(split, cfg, make_loader,
+                              metadata_csv, product_col):
+    from baselines import (
+        PCAMahalanobis,
+        PLSDABaseline,
+        SVMBaseline,
+        TICPcaMLPBaseline,
+    )
+
+    cls_map = {
+        "pca_mahalanobis": PCAMahalanobis,
+        "pls_da": PLSDABaseline,
+        "svm_rbf": SVMBaseline,
+        "tic_pca_mlp": TICPcaMLPBaseline,
+    }
+    modes = sorted({spec["feature_mode"] for spec in README_BASELINE_SPECS})
+    cache = _build_baseline_feature_cache(
+        split,
+        cfg,
+        make_loader,
+        metadata_csv,
+        product_col,
+        modes,
+    )
+
+    out = {}
+    for spec in README_BASELINE_SPECS:
+        key = spec["key"]
+        feature_mode = spec["feature_mode"]
+        baseline_result = _evaluate_baseline_with_cache(
+            cls_map[key],
+            feature_mode,
+            cache,
+        )
+        baseline_result["name"] = spec["name"]
+        baseline_result["feature_mode"] = _resolve_feature_mode_label(
+            feature_mode,
+            cfg,
+        )
+        out[key] = baseline_result
+
+    return out
+
+
+def evaluate_tic_pca_mlp_baseline(split, cfg, make_loader,
+                                  metadata_csv, product_col):
+    """兼容旧接口: 返回 TIC+PCA+MLP 在 A/B/C 的结果。"""
+    all_results = evaluate_readme_baselines(
+        split,
+        cfg,
+        make_loader,
+        metadata_csv,
+        product_col,
+    )
+    return all_results.get(
+        "tic_pca_mlp",
+        {
+            "setting_a": None,
+            "setting_b": None,
+            "setting_c": {},
+            "name": "TIC+PCA+MLP",
+            "feature_mode": "tic",
+        },
+    )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -403,6 +881,16 @@ def evaluate_single_model(cfg):
     Setting B: 已知类 vs 留出产品类 → 开集检测
     Setting C: 留出产品类 N-shot 注册 → 少样本识别
     """
+    if str(getattr(cfg, "primary_model", "")).strip().lower() == "raw_pca_mlp":
+        from raw_pca_pipeline import evaluate_single_model_raw_pca
+
+        return evaluate_single_model_raw_pca(
+            cfg,
+            baseline_eval_fn=evaluate_readme_baselines,
+            print_summary_fn=_print_single_summary,
+            save_summary_fn=_save_single_summary,
+        )
+
     from config import get_device
     from dataset import GCMSDataset, load_data_split, few_shot_from_unknown
     from models import GCMSConsistencyNet
@@ -422,6 +910,17 @@ def evaluate_single_model(cfg):
         print("未找到 final_model/model.pt, 请先运行 python main.py train")
         return
 
+    # ── 输入变换: raw -> PCA(沿 m/z 轴) ──
+    input_transform = None
+    input_pca_path = model_dir / "input_rt_pca.pkl"
+    if input_pca_path.exists():
+        from input_pca import load_rt_axis_pca, RtAxisPcaTransform
+
+        input_pca_model = load_rt_axis_pca(input_pca_path)
+        input_transform = RtAxisPcaTransform(input_pca_model)
+        cfg.mz_bins = int(getattr(input_pca_model, "n_components_", cfg.mz_bins))
+        print(f"  [Input PCA] 已加载: {input_pca_path.name}, n_components={cfg.mz_bins}")
+
     # ── 全局编码器: 覆盖所有产品和批次 ──
     from sklearn.preprocessing import LabelEncoder
     import pandas as pd
@@ -439,6 +938,8 @@ def evaluate_single_model(cfg):
         with open(meta_path) as f:
             train_meta = json.load(f)
         num_batches_model = train_meta["num_batches"]
+        if bool(train_meta.get("input_raw_pca_enabled", False)):
+            cfg.mz_bins = int(train_meta.get("input_raw_pca_components", cfg.mz_bins))
     else:
         # 回退: 从 state_dict 推断
         sd = torch.load(model_dir / "model.pt", map_location="cpu",
@@ -454,7 +955,23 @@ def evaluate_single_model(cfg):
     if proto_dir.exists():
         proto_store.load(proto_dir)
 
-    def _make_loader(indices):
+    def _make_loader_main(indices):
+        ds = GCMSDataset(metadata_csv, product_col=product_col,
+                         augmentation=None, indices=indices,
+                         input_transform=input_transform)
+        ds.product_enc = global_product_enc
+        ds.batch_enc = global_batch_enc
+        ds.df["product_label"] = global_product_enc.transform(
+            ds.df[product_col])
+        ds.df["batch_label"] = global_batch_enc.transform(
+            ds.df["batch_idx"])
+        ds.num_products = len(global_product_enc.classes_)
+        ds.num_batches = len(global_batch_enc.classes_)
+        loader = torch.utils.data.DataLoader(
+            ds, batch_size=cfg.batch_size, shuffle=False)
+        return ds, loader
+
+    def _make_loader_baseline(indices):
         ds = GCMSDataset(metadata_csv, product_col=product_col,
                          augmentation=None, indices=indices)
         ds.product_enc = global_product_enc
@@ -470,7 +987,7 @@ def evaluate_single_model(cfg):
         return ds, loader
 
     # 训练集 loader (Setting A 计算 cross-batch gap)
-    _, loader_train = _make_loader(split["train_idx"])
+    _, loader_train = _make_loader_main(split["train_idx"])
 
     print(f"\n{'='*60}")
     print("单模型评估")
@@ -478,7 +995,7 @@ def evaluate_single_model(cfg):
 
     # ═══ Setting A: 批次一致性 ═══
     if split["test_batch_idx"]:
-        ds_test_batch, loader_test_batch = _make_loader(
+        ds_test_batch, loader_test_batch = _make_loader_main(
             split["test_batch_idx"])
         result_a = evaluate_setting_a(
             model, loader_train, loader_test_batch, proto_store,
@@ -500,9 +1017,12 @@ def evaluate_single_model(cfg):
 
     # ═══ Setting B: 开集检测 ═══
     if split["test_unknown_idx"]:
-        _, loader_known = _make_loader(
-            split["test_batch_idx"] or split["val_idx"])
-        ds_unknown, loader_unknown = _make_loader(split["test_unknown_idx"])
+        # 已知类采用 val + 留出批次并集，降低单一批次分布偏差
+        known_idx = sorted(
+            set(split["val_idx"]) | set(split["test_batch_idx"])
+        )
+        _, loader_known = _make_loader_main(known_idx)
+        ds_unknown, loader_unknown = _make_loader_main(split["test_unknown_idx"])
         result_b = evaluate_setting_b(
             model, proto_store, loader_known, loader_unknown,
             device, cfg, f"留出产品 {split['holdout_products']}")
@@ -515,7 +1035,8 @@ def evaluate_single_model(cfg):
         unknown_idx = split["test_unknown_idx"]
         ds_unknown_full = GCMSDataset(
             metadata_csv, product_col=product_col,
-            augmentation=None, indices=unknown_idx)
+            augmentation=None, indices=unknown_idx,
+            input_transform=input_transform)
         unknown_label_names = ds_unknown_full.get_label_name_map()
 
         fs_splits = few_shot_from_unknown(
@@ -528,14 +1049,26 @@ def evaluate_single_model(cfg):
         result_c = None
         print("\n── Setting C: 无留出产品测试数据 ──")
 
+    # ═══ Baselines: README 对比方法 ═══
+    try:
+        baselines_readme = evaluate_readme_baselines(
+            split, cfg, _make_loader_baseline, metadata_csv, product_col)
+    except Exception as e:
+        baselines_readme = {}
+        print(f"\n[README Baselines] 评估失败: {e}")
+
     # ═══ 汇总打印 ═══
-    _print_single_summary(result_a, result_b, result_c, cfg)
-    _save_single_summary(result_a, result_b, result_c, split, out_dir)
+    _print_single_summary(result_a, result_b, result_c, cfg,
+                          baselines_readme=baselines_readme)
+    _save_single_summary(result_a, result_b, result_c, split, out_dir,
+                         baselines_readme=baselines_readme,
+                         cfg=cfg)
 
     return result_a, result_b, result_c
 
 
-def _print_single_summary(result_a, result_b, result_c, cfg):
+def _print_single_summary(result_a, result_b, result_c, cfg,
+                          baselines_readme=None):
     """打印单模型评估汇总。"""
     print(f"\n{'='*60}")
     print("单模型评估汇总")
@@ -572,8 +1105,47 @@ def _print_single_summary(result_a, result_b, result_c, cfg):
             f1 = m.get("macro_f1", float("nan"))
             print(f"  {n_shot:2d}-shot: acc={acc:.4f}, f1={f1:.4f}")
 
+    if baselines_readme:
+        print("\nREADME Baselines 对比:")
+        cmp_all = _build_main_vs_readme_baselines(
+            result_a,
+            result_b,
+            result_c,
+            baselines_readme,
+        )
+        for key in README_BASELINE_ORDER:
+            baseline_result = baselines_readme.get(key)
+            if not baseline_result:
+                continue
 
-def _save_single_summary(result_a, result_b, result_c, split, out_dir):
+            name = baseline_result.get("name", key)
+            mode = baseline_result.get("feature_mode", "raw")
+            bb = baseline_result.get("setting_b") or {}
+            bc3 = (baseline_result.get("setting_c") or {}).get("3", {})
+            cmp_sb = (cmp_all.get(key) or {}).get("setting_b", {})
+            cmp_sc3 = ((cmp_all.get(key) or {}).get("setting_c", {}) or {}).get("3", {})
+
+            print(f"  [{name}] feature={mode}")
+            print(
+                "    Setting B: "
+                f"AUROC={bb.get('open_set_AUROC', float('nan')):.4f}, "
+                f"FPR95={bb.get('FPR_at_95TPR', float('nan')):.4f}"
+            )
+            print(
+                "    Setting C 3-shot: "
+                f"acc={bc3.get('accuracy', float('nan')):.4f}, "
+                f"f1={bc3.get('macro_f1', float('nan')):.4f}"
+            )
+            print(
+                "    Main-Baseline: "
+                f"d_AUROC={cmp_sb.get('open_set_AUROC', float('nan')):.4f}, "
+                f"d_FPR95={cmp_sb.get('FPR_at_95TPR', float('nan')):.4f}, "
+                f"d_3shot={cmp_sc3.get('accuracy', float('nan')):.4f}"
+            )
+
+
+def _save_single_summary(result_a, result_b, result_c, split, out_dir,
+                         baselines_readme=None, cfg=None):
     """保存单模型评估结果到 JSON。"""
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -585,6 +1157,13 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir):
         if isinstance(obj, np.ndarray):
             return obj.tolist()
         return obj
+
+    def _s_recursive(obj):
+        if isinstance(obj, dict):
+            return {str(k): _s_recursive(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_s_recursive(v) for v in obj]
+        return _s(obj)
 
     summary = {
         "split": {
@@ -618,6 +1197,67 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir):
             str(k): {kk: _s(vv) for kk, vv in v.items()}
             for k, v in result_c["few_shot"].items()
         }
+
+    if baselines_readme:
+        summary["baselines_readme"] = {}
+        for key in README_BASELINE_ORDER:
+            baseline_result = baselines_readme.get(key)
+            if not baseline_result:
+                continue
+            summary["baselines_readme"][key] = {
+                "name": baseline_result.get("name", key),
+                "feature_mode": baseline_result.get("feature_mode", "raw"),
+                "setting_a": _s_recursive(baseline_result.get("setting_a") or {}),
+                "setting_b": _s_recursive(baseline_result.get("setting_b") or {}),
+                "setting_c": _s_recursive(baseline_result.get("setting_c") or {}),
+            }
+
+        # 兼容旧字段: baseline_tic_pca_mlp + main_vs_baseline
+        tic = summary["baselines_readme"].get("tic_pca_mlp")
+        if tic:
+            summary["baseline_tic_pca_mlp"] = {
+                "setting_a": tic.get("setting_a", {}),
+                "setting_b": tic.get("setting_b", {}),
+                "setting_c": tic.get("setting_c", {}),
+            }
+            summary["main_vs_baseline"] = _s_recursive(
+                _build_main_vs_baseline(
+                    result_a,
+                    result_b,
+                    result_c,
+                    tic,
+                )
+            )
+
+        summary["main_vs_readme_baselines"] = _s_recursive(
+            _build_main_vs_readme_baselines(
+                result_a,
+                result_b,
+                result_c,
+                summary["baselines_readme"],
+            )
+        )
+
+    model_path = str(getattr(cfg, "pretrained_feature_model", "") or "").strip() if cfg else ""
+    summary["pretrained_feature_extractor"] = {
+        "model_path": model_path,
+        "arch": (str(getattr(cfg, "pretrained_feature_arch", "auto") or "auto") if cfg else "auto"),
+        "layers": (str(getattr(cfg, "pretrained_feature_layers", "layer4") or "layer4") if cfg else "layer4"),
+        "fuse": (str(getattr(cfg, "pretrained_feature_fuse", "concat") or "concat") if cfg else "concat"),
+        "enabled": bool(model_path),
+    }
+
+    summary["main_model_backbone"] = {
+        "backbone": (str(getattr(cfg, "main_backbone", "gcms") or "gcms") if cfg else "gcms"),
+        "model_path": (str(getattr(cfg, "main_backbone_model", "") or "") if cfg else ""),
+        "layers": (str(getattr(cfg, "main_feature_layers", "layer4") or "layer4") if cfg else "layer4"),
+        "fuse": (str(getattr(cfg, "main_feature_fuse", "concat") or "concat") if cfg else "concat"),
+        "transformer_patch_size": (int(getattr(cfg, "transformer_patch_size", 16)) if cfg else 16),
+        "transformer_embed_dim": (int(getattr(cfg, "transformer_embed_dim", 256)) if cfg else 256),
+        "transformer_depth": (int(getattr(cfg, "transformer_depth", 6)) if cfg else 6),
+        "transformer_num_heads": (int(getattr(cfg, "transformer_num_heads", 8)) if cfg else 8),
+        "transformer_mlp_ratio": (float(getattr(cfg, "transformer_mlp_ratio", 4.0)) if cfg else 4.0),
+    }
 
     with open(out_dir / "evaluation_summary.json", "w") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False, default=_s)
@@ -658,7 +1298,14 @@ def evaluate_all_settings(fold_results, split_info, cfg):
 
     all_a, all_b, all_c = [], [], []
 
-    for fi, fr in enumerate(tqdm(fold_results, desc="评估 folds", ncols=80)):
+    for fi, fr in enumerate(
+        tqdm(
+            fold_results,
+            desc="评估 folds",
+            ncols=80,
+            disable=not _progress_enabled(),
+        )
+    ):
         model = fr["model"].to(device)
         proto_store = fr["proto_store"]
         fold_name = fr["test_batch"]

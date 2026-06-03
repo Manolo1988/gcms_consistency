@@ -30,8 +30,8 @@ from losses import UnifiedLoss
 from register import register_from_loader
 
 from baselines import (
-    extract_features,
-    PCAMahalanobis, PLSDABaseline, SVMBaseline,
+    extract_features, extract_tic_features,
+    PCAMahalanobis, PLSDABaseline, SVMBaseline, TICPcaMLPBaseline,
     PlainEncoder, BaselineCNN, BaselineLoss,
     BaselineSupCon, SupConOnlyLoss,
     train_dl_baseline_fold,
@@ -44,6 +44,7 @@ TRADITIONAL_METHODS = {
     "PCA+Mahalanobis": PCAMahalanobis,
     "PLS-DA": PLSDABaseline,
     "SVM-RBF": SVMBaseline,
+    "TIC+PCA+MLP": TICPcaMLPBaseline,
 }
 
 DL_BASELINES = ["ResNet-CE", "ResNet-SupCon"]
@@ -212,8 +213,12 @@ def _run_traditional_fold(method_name, train_idx, val_idx,
     loader_val = DataLoader(ds_val, batch_size=cfg.batch_size,
                             shuffle=False, num_workers=0)
 
-    X_train, y_train, _ = extract_features(loader_train)
-    X_val, y_val, b_val = extract_features(loader_val)
+    if method_name == "TIC+PCA+MLP":
+        X_train, y_train, _ = extract_tic_features(loader_train)
+        X_val, y_val, b_val = extract_tic_features(loader_val)
+    else:
+        X_train, y_train, _ = extract_features(loader_train)
+        X_val, y_val, b_val = extract_features(loader_val)
 
     model_cls = TRADITIONAL_METHODS[method_name]
     model = model_cls()

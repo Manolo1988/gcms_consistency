@@ -57,6 +57,15 @@ def cmd_register(cfg, new_data_dir):
     device = get_device()
     model_dir = Path(cfg.output_dir) / "final_model"
 
+    input_transform = None
+    input_pca_path = model_dir / "input_rt_pca.pkl"
+    if input_pca_path.exists():
+        from input_pca import load_rt_axis_pca, RtAxisPcaTransform
+
+        input_pca_model = load_rt_axis_pca(input_pca_path)
+        input_transform = RtAxisPcaTransform(input_pca_model)
+        cfg.mz_bins = int(getattr(input_pca_model, "n_components_", cfg.mz_bins))
+
     # 加载已训练模型
     with open(model_dir / "train_meta.json") as f:
         meta = json.load(f)
@@ -78,7 +87,8 @@ def cmd_register(cfg, new_data_dir):
                    else "product_coarse")
     ds_old = GCMSDataset(metadata_csv, product_col=product_col,
                          augmentation=GCMSAugmentation(cfg),
-                         indices=split["train_idx"])
+                         indices=split["train_idx"],
+                         input_transform=input_transform)
     old_label_names = ds_old.get_label_name_map()
     loader_old = DataLoader(ds_old, batch_size=cfg.batch_size,
                             shuffle=True, num_workers=0)
@@ -86,7 +96,8 @@ def cmd_register(cfg, new_data_dir):
     # 加载新产品数据
     new_metadata_csv = str(Path(new_data_dir) / "metadata.csv")
     ds_new = GCMSDataset(new_metadata_csv, product_col=product_col,
-                         augmentation=GCMSAugmentation(cfg))
+                         augmentation=GCMSAugmentation(cfg),
+                         input_transform=input_transform)
     # 重新编码: 新类标签偏移, 避免与旧类冲突
     max_old_label = max(old_label_names.keys()) + 1
     new_product_names = ds_new.get_product_names()
@@ -130,13 +141,23 @@ def cmd_interpret(cfg, fold_idx=0, sample_idx=0):
                    else "product_coarse")
 
     split = load_data_split(cfg)
+    model_dir = Path(cfg.output_dir) / "final_model"
+
+    input_transform = None
+    input_pca_path = model_dir / "input_rt_pca.pkl"
+    if input_pca_path.exists():
+        from input_pca import load_rt_axis_pca, RtAxisPcaTransform
+
+        input_pca_model = load_rt_axis_pca(input_pca_path)
+        input_transform = RtAxisPcaTransform(input_pca_model)
+        cfg.mz_bins = int(getattr(input_pca_model, "n_components_", cfg.mz_bins))
 
     # 使用 Setting A 测试集 (留出批次) 作为解释对象
     test_idx = split["test_batch_idx"] or split["val_idx"]
     ds_test = GCMSDataset(metadata_csv, product_col=product_col,
-                          augmentation=None, indices=test_idx)
+                          augmentation=None, indices=test_idx,
+                          input_transform=input_transform)
 
-    model_dir = Path(cfg.output_dir) / "final_model"
     model = GCMSConsistencyNet(ds_test.num_batches, cfg).to(device)
     model.load_state_dict(torch.load(model_dir / "model.pt",
                                      map_location=device,

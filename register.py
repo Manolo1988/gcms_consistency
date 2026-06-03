@@ -129,6 +129,8 @@ class PrototypeStore:
         self.radii = {}        # class_name -> float
         self.class_names = []  # ordered class name list
         self.spherical_prototypes = {}  # 球面调整后的原型
+        self.spherical_radii = {}  # 球面空间半径(与余弦距离匹配)
+        self._class_embeddings = {}  # 运行时缓存: 用于重估球面半径
 
     def register(self, class_name, embeddings, percentile=95.0):
         """
@@ -147,6 +149,7 @@ class PrototypeStore:
 
         self.prototypes[class_name] = proto.cpu()
         self.radii[class_name] = radius
+        self._class_embeddings[class_name] = embeddings.cpu()
         if class_name not in self.class_names:
             self.class_names.append(class_name)
 
@@ -167,6 +170,16 @@ class PrototypeStore:
                     self.prototypes[c] /
                     self.prototypes[c].norm().clamp(min=1e-8)
                 )
+                emb = self._class_embeddings.get(c)
+                if emb is not None and emb.numel() > 0:
+                    emb = emb.float()
+                    emb_n = emb / emb.norm(dim=1, keepdim=True).clamp(min=1e-8)
+                    proto = self.spherical_prototypes[c].float().unsqueeze(0)
+                    dists = 1.0 - (emb_n @ proto.T).squeeze(1)
+                    sph_radius = float(np.percentile(dists.cpu().numpy(), 95.0))
+                    self.spherical_radii[c] = max(sph_radius, 1e-6)
+                else:
+                    self.spherical_radii[c] = max(float(self.radii.get(c, 1.0)), 1e-6)
             return
 
         proto_mat = torch.stack([self.prototypes[c] for c in self.class_names])
@@ -175,6 +188,16 @@ class PrototypeStore:
         )
         for i, c in enumerate(self.class_names):
             self.spherical_prototypes[c] = adjusted[i]
+            emb = self._class_embeddings.get(c)
+            if emb is not None and emb.numel() > 0:
+                emb = emb.float()
+                emb_n = emb / emb.norm(dim=1, keepdim=True).clamp(min=1e-8)
+                proto = adjusted[i].float().unsqueeze(0)
+                dists = 1.0 - (emb_n @ proto.T).squeeze(1)
+                sph_radius = float(np.percentile(dists.cpu().numpy(), 95.0))
+                self.spherical_radii[c] = max(sph_radius, 1e-6)
+            else:
+                self.spherical_radii[c] = max(float(self.radii.get(c, 1.0)), 1e-6)
 
     def predict(self, z, use_spherical=True):
         """
@@ -216,12 +239,28 @@ class PrototypeStore:
         # 最近原型
         min_dists, pred_idx = all_dists.min(dim=1)  # (B,), (B,)
 
-        # 一致性分数: S = exp(-dist / radius)
+        # 一致性分数: 距离衰减分数 + 最近邻间隔分数 (开集更稳健)
+        if use_spherical and self.spherical_prototypes and self.spherical_radii:
+            radii_source = self.spherical_radii
+        else:
+            radii_source = self.radii
+
         radii_tensor = torch.tensor(
-            [self.radii[self.class_names[i]] for i in pred_idx.cpu().tolist()],
+            [radii_source[self.class_names[i]] for i in pred_idx.cpu().tolist()],
             device=z.device, dtype=z.dtype
         )
-        scores = torch.exp(-min_dists / radii_tensor)
+        base_scores = torch.exp(-min_dists / radii_tensor.clamp(min=1e-8))
+
+        if all_dists.shape[1] > 1:
+            top2 = torch.topk(all_dists, k=2, dim=1, largest=False)
+            second_dists = top2.values[:, 1]
+            margin_scores = ((second_dists - min_dists)
+                             / second_dists.clamp(min=1e-8)).clamp(0.0, 1.0)
+        else:
+            second_dists = min_dists
+            margin_scores = torch.ones_like(min_dists)
+
+        scores = 0.75 * base_scores + 0.25 * margin_scores
 
         pred_class = [self.class_names[i] for i in pred_idx.cpu().tolist()]
 
@@ -229,17 +268,35 @@ class PrototypeStore:
             "pred_class": pred_class,
             "pred_idx": pred_idx,
             "scores": scores,
+            "base_scores": base_scores,
+            "margin_scores": margin_scores,
+            "second_dists": second_dists,
             "min_dists": min_dists,
             "all_dists": all_dists,
+            "use_spherical": bool(use_spherical and self.spherical_prototypes),
         }
 
-    def is_known(self, min_dists, factor=2.0):
+    def is_known(self, min_dists, factor=2.0, pred_idx=None, use_spherical=True):
         """
-        拒识判定: 距离 > factor * 所有已注册类的平均半径 → 未知
+        拒识判定: 优先使用“按预测类半径”的阈值，回退到平均半径。
         """
-        mean_radius = np.mean(list(self.radii.values()))
+        if use_spherical and self.spherical_radii:
+            radii_source = self.spherical_radii
+        else:
+            radii_source = self.radii
+
+        d = min_dists.detach().cpu().numpy()
+        if pred_idx is not None:
+            idx_arr = pred_idx.detach().cpu().numpy().astype(int).reshape(-1)
+            thresholds = np.array([
+                factor * radii_source[self.class_names[i]]
+                for i in idx_arr
+            ])
+            return d <= thresholds
+
+        mean_radius = np.mean(list(radii_source.values()))
         threshold = factor * mean_radius
-        return min_dists.detach().cpu().numpy() <= threshold
+        return d <= threshold
 
     def save(self, path):
         """保存原型库到 JSON + PT 文件。"""
@@ -250,6 +307,9 @@ class PrototypeStore:
         meta = {
             "class_names": self.class_names,
             "radii": {k: float(v) for k, v in self.radii.items()},
+            "spherical_radii": {
+                k: float(v) for k, v in self.spherical_radii.items()
+            },
         }
         with open(path / "proto_meta.json", "w") as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)
@@ -272,6 +332,14 @@ class PrototypeStore:
 
         self.class_names = meta["class_names"]
         self.radii = {k: float(v) for k, v in meta["radii"].items()}
+        if "spherical_radii" in meta:
+            self.spherical_radii = {
+                k: float(v) for k, v in meta["spherical_radii"].items()
+            }
+        else:
+            self.spherical_radii = {
+                k: float(v) for k, v in self.radii.items()
+            }
         self.prototypes = torch.load(path / "prototypes.pt",
                                      map_location="cpu", weights_only=False)
 

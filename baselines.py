@@ -1,6 +1,6 @@
 """
 对比算法实现:
-  传统方法:   PCA+Mahalanobis, PLS-DA, SVM-RBF
+    传统方法:   PCA+Mahalanobis, PLS-DA, SVM-RBF, TIC+PCA+MLP
   深度学习:   ResNet-CE (Softmax), ResNet-SupCon (度量学习)
   (消融变体在 compare.py 中通过配置控制)
 """
@@ -8,7 +8,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import warnings
+from pathlib import Path
 from sklearn.decomposition import PCA
+from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from torch.utils.data import DataLoader
@@ -29,6 +32,215 @@ def extract_features(loader):
         all_x.append(x.reshape(B, -1))
         all_y.append(batch["product"].numpy())
         all_b.append(batch["batch"].numpy())
+    return np.concatenate(all_x), np.concatenate(all_y), np.concatenate(all_b)
+
+
+def extract_tic_features(loader):
+    """从 DataLoader 提取 TIC 特征(绝对通道按 m/z 维求和)。"""
+    all_x, all_y, all_b = [], [], []
+    for batch in loader:
+        x = batch["input"].numpy()
+        if x.ndim != 4:
+            raise ValueError(f"期望输入为 4 维 (B,C,H,W), 实际: {x.shape}")
+
+        # 输入通常是 [绝对强度, 相对强度], 这里仅用绝对强度计算 TIC。
+        abs_channel = x[:, 0] if x.shape[1] >= 1 else x[:, 0]
+        tic = np.abs(abs_channel).sum(axis=2)
+
+        all_x.append(tic.astype(np.float32))
+        all_y.append(batch["product"].numpy())
+        all_b.append(batch["batch"].numpy())
+
+    return np.concatenate(all_x), np.concatenate(all_y), np.concatenate(all_b)
+
+
+def _infer_torchvision_arch_from_weight(weight_path):
+    name = Path(weight_path).name.lower()
+    if "wide_resnet50" in name:
+        return "wide_resnet50_2"
+    if "resnet50" in name:
+        return "resnet50"
+    if "resnet18" in name:
+        return "resnet18"
+    raise ValueError(
+        f"无法从权重文件名推断架构: {weight_path}. "
+        "请显式传入 pretrained_feature_arch。"
+    )
+
+
+def _load_torchvision_backbone(weight_path, arch="auto", device=None):
+    try:
+        import torchvision.models as tv_models
+    except Exception as e:
+        raise ImportError(
+            "需要 torchvision 才能使用预训练特征提取。"
+        ) from e
+
+    if arch in (None, "", "auto"):
+        arch = _infer_torchvision_arch_from_weight(weight_path)
+
+    builders = {
+        "resnet18": tv_models.resnet18,
+        "resnet50": tv_models.resnet50,
+        "wide_resnet50_2": tv_models.wide_resnet50_2,
+    }
+    if arch not in builders:
+        raise ValueError(f"不支持的 torchvision 架构: {arch}")
+
+    model = builders[arch](weights=None)
+    model.fc = nn.Identity()
+
+    obj = torch.load(weight_path, map_location="cpu", weights_only=False)
+    if isinstance(obj, dict):
+        state = obj
+        for key in ("state_dict", "model", "model_state_dict"):
+            if key in obj and isinstance(obj[key], dict):
+                state = obj[key]
+                break
+    else:
+        raise ValueError(f"无效权重文件格式: {weight_path}")
+
+    cleaned = {}
+    prefixes = ("module.", "model.", "backbone.", "encoder.")
+    for k, v in state.items():
+        nk = k
+        for p in prefixes:
+            if nk.startswith(p):
+                nk = nk[len(p):]
+        cleaned[nk] = v
+
+    model_state = model.state_dict()
+    matched = 0
+    for k, v in cleaned.items():
+        if k in model_state and getattr(v, "shape", None) == model_state[k].shape:
+            matched += 1
+    matched_ratio = matched / max(len(model_state), 1)
+
+    missing, unexpected = model.load_state_dict(cleaned, strict=False)
+    missing_non_cls = [k for k in missing if not k.startswith("fc.")]
+    unexpected_non_cls = [k for k in unexpected if not k.startswith("fc.")]
+
+    if matched_ratio < 0.8:
+        raise ValueError(
+            "预训练权重与骨干网络匹配率过低: "
+            f"matched={matched}/{len(model_state)} ({matched_ratio:.1%}), "
+            f"arch={arch}, weight={weight_path}"
+        )
+
+    if missing_non_cls or unexpected_non_cls:
+        warnings.warn(
+            "检测到非分类头参数键不匹配: "
+            f"missing={len(missing_non_cls)}, unexpected={len(unexpected_non_cls)}; "
+            f"arch={arch}, weight={weight_path}",
+            RuntimeWarning,
+        )
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device).eval()
+    return model, str(arch), device
+
+
+def _parse_pretrained_layers(layers):
+    valid = {"layer1", "layer2", "layer3", "layer4"}
+    if layers is None:
+        return ["layer4"]
+
+    if isinstance(layers, (list, tuple)):
+        raw = [str(x).strip().lower() for x in layers if str(x).strip()]
+    else:
+        raw = [s.strip().lower() for s in str(layers).split(",") if s.strip()]
+
+    if not raw:
+        return ["layer4"]
+
+    parsed = []
+    for item in raw:
+        if item not in valid:
+            raise ValueError(
+                f"不支持的预训练层: {item}. 仅支持 {sorted(valid)}"
+            )
+        if item not in parsed:
+            parsed.append(item)
+    return parsed
+
+
+def _extract_resnet_feature_maps(model, x):
+    x = model.conv1(x)
+    x = model.bn1(x)
+    x = model.relu(x)
+    x = model.maxpool(x)
+
+    f1 = model.layer1(x)
+    f2 = model.layer2(f1)
+    f3 = model.layer3(f2)
+    f4 = model.layer4(f3)
+    return {
+        "layer1": f1,
+        "layer2": f2,
+        "layer3": f3,
+        "layer4": f4,
+    }
+
+
+@torch.no_grad()
+def extract_pretrained_resnet_features(loader, weight_path, arch="auto", device=None,
+                                       layers="layer4", fuse="concat"):
+    """使用本地预训练 ResNet 权重提取特征。"""
+    model, arch_name, device = _load_torchvision_backbone(
+        weight_path=weight_path,
+        arch=arch,
+        device=device,
+    )
+
+    mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+
+    layer_list = _parse_pretrained_layers(layers)
+    fuse_mode = str(fuse or "concat").strip().lower()
+    if fuse_mode not in {"concat", "last"}:
+        raise ValueError("pretrained feature fuse 仅支持 concat/last")
+
+    all_x, all_y, all_b = [], [], []
+    for batch in loader:
+        x = batch["input"].float()
+        if x.ndim != 4:
+            raise ValueError(f"期望输入为 4 维 (B,C,H,W), 实际: {tuple(x.shape)}")
+
+        # 仅使用绝对强度通道并扩展到 3 通道，以匹配 ImageNet 骨干网络。
+        x = x[:, :1, :, :].repeat(1, 3, 1, 1)
+        x_min = x.amin(dim=(2, 3), keepdim=True)
+        x_max = x.amax(dim=(2, 3), keepdim=True)
+        x = (x - x_min) / (x_max - x_min + 1e-6)
+        x = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False)
+
+        x = x.to(device)
+        x = (x - mean) / std
+
+        if layer_list == ["layer4"] and fuse_mode in {"concat", "last"}:
+            feat = model(x)
+        else:
+            feat_maps = _extract_resnet_feature_maps(model, x)
+            vecs = [
+                F.adaptive_avg_pool2d(feat_maps[layer], output_size=1).flatten(1)
+                for layer in layer_list
+            ]
+            if fuse_mode == "last":
+                feat = vecs[-1]
+            else:
+                feat = torch.cat(vecs, dim=1)
+
+        all_x.append(feat.detach().cpu().numpy().astype(np.float32))
+        all_y.append(batch["product"].numpy())
+        all_b.append(batch["batch"].numpy())
+
+    if not all_x:
+        return (
+            np.empty((0, 0), dtype=np.float32),
+            np.empty((0,), dtype=np.int64),
+            np.empty((0,), dtype=np.int64),
+        )
+
     return np.concatenate(all_x), np.concatenate(all_y), np.concatenate(all_b)
 
 
@@ -193,6 +405,74 @@ class SVMBaseline(TraditionalBaseline):
         return preds, scores
 
     def get_embeddings(self, X):
+        X_s = self.scaler.transform(X)
+        return self.pca.transform(X_s)
+
+
+class TICPcaMLPBaseline(TraditionalBaseline):
+    """TIC 特征 + PCA 降维 + MLP 分类。"""
+
+    def __init__(self, n_components=64, hidden_layer_sizes=(128, 64),
+                 max_iter=300, random_state=42):
+        self.n_components = n_components
+        self.hidden_layer_sizes = hidden_layer_sizes
+        self.max_iter = max_iter
+        self.random_state = random_state
+
+        self.scaler = StandardScaler()
+        self.pca = None
+        self.mlp = None
+        self._single_class = None
+
+    def fit(self, X, y):
+        classes = np.unique(y)
+        if len(classes) < 2:
+            self._single_class = int(classes[0]) if len(classes) == 1 else None
+            self.pca = None
+            self.mlp = None
+            return
+
+        _, counts = np.unique(y, return_counts=True)
+        min_count = int(counts.min()) if len(counts) else 0
+        use_early_stopping = min_count >= 3 and len(y) >= 30
+
+        n_comp = min(self.n_components, X.shape[0] - 1, X.shape[1])
+        n_comp = max(1, int(n_comp))
+        self.pca = PCA(n_components=n_comp, random_state=self.random_state)
+
+        X_s = self.scaler.fit_transform(X)
+        X_pca = self.pca.fit_transform(X_s)
+
+        self.mlp = MLPClassifier(
+            hidden_layer_sizes=self.hidden_layer_sizes,
+            activation="relu",
+            solver="adam",
+            alpha=1e-4,
+            learning_rate_init=1e-3,
+            max_iter=self.max_iter,
+            early_stopping=use_early_stopping,
+            n_iter_no_change=12,
+            random_state=self.random_state,
+        )
+        self.mlp.fit(X_pca, y)
+
+    def predict(self, X):
+        if self._single_class is not None:
+            preds = np.full(X.shape[0], self._single_class, dtype=int)
+            scores = np.ones(X.shape[0], dtype=np.float32)
+            return preds, scores
+
+        X_s = self.scaler.transform(X)
+        X_pca = self.pca.transform(X_s)
+        probs = self.mlp.predict_proba(X_pca)
+        idx = probs.argmax(axis=1)
+        preds = self.mlp.classes_[idx]
+        scores = probs[np.arange(len(idx)), idx]
+        return preds, scores
+
+    def get_embeddings(self, X):
+        if self._single_class is not None or self.pca is None:
+            return X
         X_s = self.scaler.transform(X)
         return self.pca.transform(X_s)
 

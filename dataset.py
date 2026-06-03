@@ -23,7 +23,13 @@ class GCMSAugmentation:
         self.baseline_amp = cfg.aug_baseline_wander_amp
         self.baseline_freq = cfg.aug_baseline_wander_freq
         self.peak_broaden_sigma = cfg.aug_peak_broaden_sigma
+        self.peak_broaden_prob = float(
+            min(max(getattr(cfg, "aug_peak_broaden_prob", 0.1), 0.0), 1.0)
+        )
         self.rt_warp_strength = cfg.aug_rt_warp_strength
+        self.rt_warp_prob = float(
+            min(max(getattr(cfg, "aug_rt_warp_prob", 0.2), 0.0), 1.0)
+        )
         self.mz_channel_drop = cfg.aug_mz_channel_drop
         self.tic_jitter = cfg.aug_tic_jitter
 
@@ -67,14 +73,14 @@ class GCMSAugmentation:
             x += baseline[np.newaxis, :, np.newaxis]
 
         # 6. 峰展宽/收窄 (沿 RT 轴高斯卷积, 模拟色谱柱效率变化)
-        if self.peak_broaden_sigma > 0 and np.random.rand() < 0.3:
+        if self.peak_broaden_sigma > 0 and np.random.rand() < self.peak_broaden_prob:
             from scipy.ndimage import gaussian_filter1d
             sigma = np.random.uniform(0.5, self.peak_broaden_sigma)
             for c in range(C):
                 x[c] = gaussian_filter1d(x[c], sigma=sigma, axis=0)
 
         # 7. RT 非线性扭曲 (保留时间漂移的真实模拟)
-        if self.rt_warp_strength > 0 and np.random.rand() < 0.5:
+        if self.rt_warp_strength > 0 and np.random.rand() < self.rt_warp_prob:
             # 生成随机控制点构造单调映射
             n_ctrl = np.random.randint(3, 6)
             ctrl_x = np.linspace(0, 1, n_ctrl)
@@ -114,7 +120,8 @@ class GCMSDataset(Dataset):
 
     def __init__(self, metadata_csv, product_col="product_fine",
                  augmentation=None, exclude_blanks=True,
-                 exclude_special=True, indices=None):
+                 exclude_special=True, indices=None,
+                 input_transform=None):
         df = pd.read_csv(metadata_csv)
 
         if exclude_blanks:
@@ -129,6 +136,7 @@ class GCMSDataset(Dataset):
         self.df = df
         self.product_col = product_col
         self.aug = augmentation
+        self.input_transform = input_transform
 
         # 标签编码
         self.product_enc = LabelEncoder()
@@ -150,6 +158,9 @@ class GCMSDataset(Dataset):
         row = self.df.iloc[idx]
         data = np.load(row["tensor_path"])
         x = data["tensor"].astype(np.float32)
+
+        if self.input_transform is not None:
+            x = self.input_transform(x)
 
         if self.aug is not None:
             x = self.aug(x)
@@ -309,40 +320,65 @@ def create_data_split(metadata_csv, cfg, product_col="product_fine"):
       1. 排除样本数过少的产品 (< min_samples_per_product)
       2. 留出 num_open_test_classes 个产品类型 → Setting B/C 测试
       3. 留出约 holdout_batch_ratio 比例的批次 → Setting A 测试
-      4. 从训练数据中按 val_ratio 划出验证子集 (训练监控用)
+    4. 在 train_batches 内再留出伪 holdout 批次做验证 (训练监控用)
 
     结果:
       train_idx:        已知产品 × 训练批次 (实际训练)
-      val_idx:          已知产品 × 训练批次的验证子集
+    val_idx:          已知产品 × 伪 holdout 批次 (批次外推验证)
       test_batch_idx:   已知产品 × 留出批次 → Setting A
       test_unknown_idx: 留出产品 × 全部批次 → Setting B/C
     """
     rng = np.random.RandomState(cfg.seed)
     df = _load_and_filter(metadata_csv)
 
-    # ── 1. 排除样本过少的产品 ──
+    # ── 1. 排除样本过少/批次覆盖不足的产品 ──
     product_counts = df[product_col].value_counts()
+    product_batch_coverage = df.groupby(product_col)["batch_name"].nunique()
     all_products = sorted(df[product_col].unique())
-    excluded_products = sorted(
-        [p for p in all_products
-         if product_counts[p] < cfg.min_samples_per_product]
-    )
+    excluded_products = sorted([
+        p for p in all_products
+        if (product_counts[p] < cfg.min_samples_per_product)
+        or (product_batch_coverage[p] < cfg.min_batches_per_product)
+    ])
     viable_products = sorted(
         [p for p in all_products if p not in excluded_products]
     )
 
     # ── 2. 留出产品类型 (Setting B/C) ──
-    # 优先选择中等规模的产品作为留出类:
-    # 保留最大的类用于训练, 从较小的可用产品中选取留出类
+    # 目标: 既保证留出类可做 N-shot(1/3/5/10), 又具备跨批次覆盖。
     n_holdout = cfg.num_open_test_classes
     if n_holdout >= len(viable_products):
         raise ValueError(
             f"可用产品 {len(viable_products)} 不够留出 {n_holdout} 类"
         )
-    # 按样本数升序排列, 取最小的 n_holdout 个作为留出
-    viable_by_count = sorted(viable_products,
-                             key=lambda p: product_counts[p])
-    holdout_products = sorted(viable_by_count[:n_holdout])
+
+    preferred_products = [
+        p for p in cfg.preferred_holdout_products
+        if p in viable_products
+    ]
+    if len(preferred_products) >= n_holdout:
+        holdout_products = sorted(preferred_products[:n_holdout])
+    else:
+        # 先筛掉无法支持少样本实验的类别
+        candidate_products = [
+            p for p in viable_products
+            if (product_counts[p] >= cfg.holdout_product_min_samples)
+            and (product_batch_coverage[p] >= cfg.holdout_product_min_batches)
+        ]
+        if len(candidate_products) < n_holdout:
+            candidate_products = viable_products.copy()
+
+        # 选低资源但覆盖足够的类别，强化少样本注册场景
+        candidate_products = sorted(
+            candidate_products,
+            key=lambda p: (
+                product_counts[p],
+                -product_batch_coverage[p],
+                p,
+            ),
+        )
+        holdout_products = sorted(candidate_products[:n_holdout])
+
     known_products = sorted(
         [p for p in viable_products if p not in holdout_products]
     )
@@ -351,10 +387,45 @@ def create_data_split(metadata_csv, cfg, product_col="product_fine"):
     all_batches = sorted(df["batch_name"].unique().tolist())
     all_batches = [str(b) for b in all_batches]  # 确保是 str
     n_holdout_batches = max(1, int(len(all_batches) * cfg.holdout_batch_ratio))
-    batch_perm = rng.permutation(len(all_batches))
-    holdout_batches = sorted(
-        [all_batches[i] for i in batch_perm[:n_holdout_batches]]
-    )
+
+    preferred_batches = [
+        b for b in cfg.preferred_holdout_batches
+        if b in all_batches
+    ]
+    if len(preferred_batches) >= n_holdout_batches:
+        holdout_batches = sorted(preferred_batches[:n_holdout_batches])
+    else:
+        # 仅在已知产品子集上计算批次难度与代表性
+        known_df = df[df[product_col].isin(known_products)]
+        batch_stats = []
+        for b in all_batches:
+            b_df = known_df[known_df["batch_name"].astype(str) == b]
+            batch_stats.append({
+                "batch_name": b,
+                "sample_count": int(len(b_df)),
+                "class_count": int(b_df[product_col].nunique()),
+            })
+
+        candidate_batches = [
+            s["batch_name"] for s in batch_stats
+            if (s["sample_count"] >= cfg.holdout_batch_min_samples)
+            and (s["class_count"] >= cfg.holdout_batch_min_classes)
+        ]
+        if len(candidate_batches) < n_holdout_batches:
+            candidate_batches = [s["batch_name"] for s in sorted(
+                batch_stats,
+                key=lambda x: (
+                    -x["class_count"],
+                    -x["sample_count"],
+                    x["batch_name"],
+                ),
+            )]
+        else:
+            # 倾向选择时间靠后的批次，验证时序外推鲁棒性
+            candidate_batches = sorted(candidate_batches, reverse=True)
+
+        holdout_batches = sorted(candidate_batches[:n_holdout_batches])
+
     train_batches = sorted(
         [b for b in all_batches if b not in holdout_batches]
     )
@@ -366,18 +437,84 @@ def create_data_split(metadata_csv, cfg, product_col="product_fine"):
     df_viable = df_viable.copy()
     df_viable["batch_name"] = df_viable["batch_name"].astype(str)
 
-    # 训练候选: 已知产品 × 训练批次
-    train_mask = (
+    # 在 train_batches 内再留出伪 holdout 批次作为验证集，
+    # 让 early-stop/model selection 更贴近 Setting A 的跨批次外推场景。
+    train_known_df = df_viable[
         df_viable[product_col].isin(known_products)
         & df_viable["batch_name"].isin(train_batches)
-    )
-    train_all_idx = df_viable[train_mask].index.tolist()
+    ]
 
-    # 从训练候选中分出验证集 (分层采样)
-    train_idx, val_idx = _stratified_split(
-        df_viable.loc[train_all_idx], product_col,
-        val_ratio=cfg.val_ratio, rng=rng
+    n_pseudo_batches = max(1, int(len(train_batches) * cfg.val_ratio))
+    n_pseudo_batches = min(max(n_pseudo_batches, 1), max(len(train_batches) - 1, 1))
+
+    preferred_pseudo = [
+        b for b in cfg.preferred_holdout_batches
+        if b in train_batches
+    ]
+    if len(preferred_pseudo) >= n_pseudo_batches:
+        pseudo_holdout_batches = sorted(preferred_pseudo[:n_pseudo_batches])
+    else:
+        batch_stats = []
+        for b in train_batches:
+            b_df = train_known_df[train_known_df["batch_name"] == b]
+            batch_stats.append({
+                "batch_name": b,
+                "sample_count": int(len(b_df)),
+                "class_count": int(b_df[product_col].nunique()),
+            })
+
+        min_samples = max(10, int(getattr(cfg, "holdout_batch_min_samples", 60) // 2))
+        min_classes = max(3, int(getattr(cfg, "holdout_batch_min_classes", 5) // 2))
+        candidate_batches = [
+            s["batch_name"] for s in batch_stats
+            if (s["sample_count"] >= min_samples)
+            and (s["class_count"] >= min_classes)
+        ]
+        if len(candidate_batches) < n_pseudo_batches:
+            candidate_batches = [
+                s["batch_name"] for s in sorted(
+                    batch_stats,
+                    key=lambda x: (
+                        -x["class_count"],
+                        -x["sample_count"],
+                        x["batch_name"],
+                    ),
+                )
+            ]
+        else:
+            # 倾向选择时间靠后的批次做伪外推验证
+            candidate_batches = sorted(candidate_batches, reverse=True)
+
+        pseudo_holdout_batches = sorted(candidate_batches[:n_pseudo_batches])
+
+    model_train_batches = sorted(
+        [b for b in train_batches if b not in pseudo_holdout_batches]
     )
+
+    train_mask = (
+        df_viable[product_col].isin(known_products)
+        & df_viable["batch_name"].isin(model_train_batches)
+    )
+    val_mask = (
+        df_viable[product_col].isin(known_products)
+        & df_viable["batch_name"].isin(pseudo_holdout_batches)
+    )
+    train_idx = df_viable[train_mask].index.tolist()
+    val_idx = df_viable[val_mask].index.tolist()
+
+    # 兜底：若批次法未能形成有效验证集，则回退到分层抽样。
+    if (len(train_idx) == 0) or (len(val_idx) == 0):
+        train_mask = (
+            df_viable[product_col].isin(known_products)
+            & df_viable["batch_name"].isin(train_batches)
+        )
+        train_all_idx = df_viable[train_mask].index.tolist()
+        train_idx, val_idx = _stratified_split(
+            df_viable.loc[train_all_idx], product_col,
+            val_ratio=cfg.val_ratio, rng=rng
+        )
+        pseudo_holdout_batches = []
+        model_train_batches = train_batches.copy()
 
     # Setting A 测试: 已知产品 × 留出批次
     test_batch_mask = (
@@ -401,7 +538,14 @@ def create_data_split(metadata_csv, cfg, product_col="product_fine"):
         "known_products": known_products,
         "holdout_products": holdout_products,
         "excluded_products": excluded_products,
+        "product_batch_coverage": {
+            p: int(product_batch_coverage[p])
+            for p in viable_products + excluded_products
+            if p in product_batch_coverage
+        },
         "train_batches": train_batches,
+        "model_train_batches": model_train_batches,
+        "model_select_holdout_batches": pseudo_holdout_batches,
         "holdout_batches": holdout_batches,
         "train_idx": train_idx,
         "val_idx": val_idx,
@@ -454,7 +598,7 @@ def _stratified_split(df_subset, product_col, val_ratio, rng):
 
 
 def _print_split_summary(split, df, product_col):
-    """打印划分摘要。"""
+    """打印划分摘要，包含各数据集的产品和批次数量。"""
     print(f"\n{'='*60}")
     print("数据划分摘要")
     print(f"{'='*60}")
@@ -466,8 +610,29 @@ def _print_split_summary(split, df, product_col):
           f"{split['excluded_products']}  (样本不足)")
     print(f"  训练批次 ({len(split['train_batches'])}): "
           f"{split['train_batches']}")
+    print(f"  伪验证批次 ({len(split.get('model_select_holdout_batches', []))}): "
+          f"{split.get('model_select_holdout_batches', [])}  → 训练早停选模")
+    print(f"  实训批次 ({len(split.get('model_train_batches', split['train_batches']))}): "
+          f"{split.get('model_train_batches', split['train_batches'])}")
     print(f"  留出批次 ({len(split['holdout_batches'])}): "
           f"{split['holdout_batches']}  → Setting A")
+
+    # 统计各数据集的产品和批次数量
+    def _count_products_and_batches(indices, name):
+        subset = df.iloc[indices]
+        product_counts = subset[product_col].value_counts().to_dict()
+        batch_counts = subset["batch_name"].value_counts().to_dict()
+        print(f"\n  {name}:")
+        print(f"    产品数量: {len(product_counts)}")
+        print(f"    批次数量: {len(batch_counts)}")
+        print(f"    产品分布: {product_counts}")
+        print(f"    批次分布: {batch_counts}")
+
+    _count_products_and_batches(split['train_idx'], "训练集")
+    _count_products_and_batches(split['val_idx'], "验证集")
+    _count_products_and_batches(split['test_batch_idx'], "Setting A 测试集")
+    _count_products_and_batches(split['test_unknown_idx'], "Setting B/C 测试集")
+
     s = split["stats"]
     print(f"\n  训练集: {s['n_train']} 样本")
     print(f"  验证集: {s['n_val']} 样本  (训练监控)")

@@ -71,12 +71,54 @@ class Config:
     num_axial_heads: int = 4
     dropout: float = 0.3
     embed_normalize: bool = True              # L2 归一化嵌入
+    pretrained_feature_model: str = ""        # 预训练特征提取权重路径
+    pretrained_feature_arch: str = "auto"    # auto/resnet18/resnet50/wide_resnet50_2
+    main_backbone: str = "gcms"              # gcms/transformer/resnet18/resnet50/wide_resnet50_2
+    main_backbone_model: str = ""            # 主模型骨干本地权重路径(可空，空则回退 pretrained_feature_model)
+    main_feature_layers: str = "layer4"      # 主模型特征层, 逗号分隔: layer2,layer3,layer4
+    main_feature_fuse: str = "concat"        # 主模型层融合: concat/last
+    transformer_patch_size: int = 16          # transformer patch 大小
+    transformer_embed_dim: int = 256          # transformer token 维度
+    transformer_depth: int = 6                # transformer block 层数
+    transformer_num_heads: int = 8            # transformer 多头注意力头数
+    transformer_mlp_ratio: float = 4.0        # transformer FFN 扩展比例
+
+    # ── 主算法选择 (默认回到 README 主模型) ─────────────────
+    primary_model: str = "deep_consistency"   # deep_consistency / raw_pca_mlp
+    input_raw_pca_enabled: bool = True         # 仅 deep_consistency: raw -> PCA -> model
+    input_raw_pca_components: int = 128
+    raw_pca_components: int = 128
+    raw_pca_hidden: str = "128,64"
+    raw_pca_max_iter: int = 300
+    raw_pca_alpha: float = 1e-4
+    raw_pca_lr_init: float = 1e-3
+    raw_open_score_blend: float = 1.0
+    raw_distance_percentile: float = 95.0
+    raw_fewshot_c_3shot: float = 2.0
 
     # ── 训练 (单阶段) ──────────────────────────────────────
     epochs: int = 200
     batch_size: int = 8
     lr: float = 3e-4
     weight_decay: float = 1e-4
+    eval_interval: int = 10                # 兼容开关: 未启用分阶段验证时使用
+    eval_interval_search: int = 10         # 搜索阶段验证间隔
+    eval_interval_final: int = 5           # 收敛阶段验证间隔(更密)
+    eval_final_start_ratio: float = 0.7    # 从总训练进度该比例起切到收敛阶段
+    early_stop_patience: int = 0           # 早停耐心(验证次数), 0=关闭
+    min_epochs_before_early_stop: int = 0  # 早停前最少训练 epoch, 0=按比例自动计算
+    min_epoch_ratio_before_early_stop: float = 0.6  # 早停前最少训练比例
+    early_stop_min_lr_ratio: float = 0.2   # 仅当 lr <= 初始lr*ratio 才允许早停
+    early_stop_min_delta: float = 5e-4     # 判定“有提升”的最小 metric 增量
+    proto_val_subset_ratio: float = 0.35   # 训练中期验证: 原型构建使用训练子集比例
+    proto_val_subset_min_samples: int = 256
+    proto_val_subset_max_samples: int = 1024
+    proto_val_full_every: int = 3          # 每隔 N 次验证做一次全量原型验证
+    warmup_guard_enabled: bool = False     # 前N轮与最佳方案对比淘汰
+    warmup_guard_epoch: int = 10           # 对比轮次 (默认第10轮)
+    warmup_guard_best_at_epoch: float = 0.0  # 最佳方案在该轮的val_acc参考
+    warmup_guard_compare_best: bool = True  # True: 直接对比当前最优迭代
+    warmup_guard_min_ratio: float = 1.0    # 兼容: compare_best=False 时生效
 
     # ── 损失权重 ─────────────────────────────────────────
     # L = L_supcon + λ₁·L_adv + λ₂·L_proto + λ_recon·L_recon
@@ -107,7 +149,14 @@ class Config:
     n_shot_values: tuple = (1, 3, 5, 10)     # 少样本注册样本数列表
     holdout_batch_ratio: float = 0.1          # 留出批次比例 (Setting A)
     min_samples_per_product: int = 10         # 产品最低样本数量, 低于此排除
-    val_ratio: float = 0.1                    # 训练集中验证子集比例
+    min_batches_per_product: int = 3          # 产品最少覆盖批次数, 低于此排除
+    holdout_product_min_samples: int = 50     # 留出产品的最少样本数
+    holdout_product_min_batches: int = 8      # 留出产品的最少批次覆盖
+    holdout_batch_min_samples: int = 60       # 留出批次的最少样本数(已知类)
+    holdout_batch_min_classes: int = 5        # 留出批次最少覆盖的已知产品数
+    preferred_holdout_products: Tuple[str, ...] = ()
+    preferred_holdout_batches: Tuple[str, ...] = ()
+    val_ratio: float = 0.1                    # train_batches 内伪验证批次比例
 
     # ── 数据增强 ──────────────────────────────────────────
     aug_intensity_scale: tuple = (0.8, 1.2)
@@ -119,9 +168,17 @@ class Config:
     aug_baseline_wander_amp: float = 0.03     # 基线漂移幅度
     aug_baseline_wander_freq: int = 3         # 基线漂移正弦周期数
     aug_peak_broaden_sigma: float = 1.5       # 峰展宽高斯 sigma 上限
+    aug_peak_broaden_prob: float = 0.1        # 峰展宽触发概率(降负担)
     aug_rt_warp_strength: float = 0.02        # RT 非线性扭曲幅度
+    aug_rt_warp_prob: float = 0.2             # RT 扭曲触发概率(降负担)
     aug_mz_channel_drop: float = 0.05         # m/z 通道随机丢弃比例
     aug_tic_jitter: float = 0.1               # TIC 归一化抖动幅度
+
+    # ── DataLoader 性能 ──────────────────────────────────
+    dataloader_workers: int = 4               # 建议 4~8
+    dataloader_pin_memory: bool = True
+    dataloader_persistent_workers: bool = True
+    dataloader_prefetch_factor: int = 2
 
     # ── 产品标签粒度 ─────────────────────────────────────
     product_granularity: str = "fine"
@@ -135,6 +192,9 @@ class Config:
     prepare_plot_max_samples: Optional[int] = None
     prepare_plot_dpi: int = 120
     tag_output_with_batch_and_product: bool = True
+
+    # ── 数据准备: 直接原始矩阵PCA(不走栅格化bins) ─────────────
+    prepare_direct_raw_pca: bool = True
 
     # ── 数据准备表格导出 ─────────────────────────────────
     save_prepare_tables: bool = True
