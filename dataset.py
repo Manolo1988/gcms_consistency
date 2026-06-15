@@ -2,6 +2,7 @@
 PyTorch Dataset + 数据增强 + 批次/开集/少样本切分。
 """
 import json
+from collections import OrderedDict
 import numpy as np
 import pandas as pd
 import torch
@@ -121,7 +122,7 @@ class GCMSDataset(Dataset):
     def __init__(self, metadata_csv, product_col="product_fine",
                  augmentation=None, exclude_blanks=True,
                  exclude_special=True, indices=None,
-                 input_transform=None):
+                 input_transform=None, cfg=None):
         df = pd.read_csv(metadata_csv)
 
         if exclude_blanks:
@@ -137,6 +138,14 @@ class GCMSDataset(Dataset):
         self.product_col = product_col
         self.aug = augmentation
         self.input_transform = input_transform
+        self.cache_enabled = bool(
+            getattr(cfg, "dataset_cache_in_memory", False)
+        ) if cfg is not None else False
+        self.cache_max_items = int(
+            getattr(cfg, "dataset_cache_max_items", 4096)
+        ) if cfg is not None else 4096
+        self.cache_max_items = max(self.cache_max_items, 0)
+        self._tensor_cache = OrderedDict()
 
         # 标签编码
         self.product_enc = LabelEncoder()
@@ -154,10 +163,26 @@ class GCMSDataset(Dataset):
     def __len__(self):
         return len(self.df)
 
+    def _load_tensor(self, tensor_path):
+        if not self.cache_enabled or self.cache_max_items <= 0:
+            with np.load(tensor_path) as data:
+                return data["tensor"].astype(np.float32)
+
+        cached = self._tensor_cache.get(tensor_path)
+        if cached is not None:
+            self._tensor_cache.move_to_end(tensor_path)
+            return cached.copy()
+
+        with np.load(tensor_path) as data:
+            x = data["tensor"].astype(np.float32)
+        if len(self._tensor_cache) >= self.cache_max_items:
+            self._tensor_cache.popitem(last=False)
+        self._tensor_cache[tensor_path] = x
+        return x.copy()
+
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        data = np.load(row["tensor_path"])
-        x = data["tensor"].astype(np.float32)
+        x = self._load_tensor(row["tensor_path"])
 
         if self.input_transform is not None:
             x = self.input_transform(x)
@@ -165,8 +190,14 @@ class GCMSDataset(Dataset):
         if self.aug is not None:
             x = self.aug(x)
 
+        tic = x[0].sum(axis=1).astype(np.float32)
+        tic_min = float(tic.min()) if tic.size else 0.0
+        tic_max = float(tic.max()) if tic.size else 0.0
+        tic = (tic - tic_min) / (tic_max - tic_min + 1e-8)
+
         return {
             "input": torch.from_numpy(x),
+            "tic": torch.from_numpy(tic),
             "product": torch.tensor(row["product_label"], dtype=torch.long),
             "batch": torch.tensor(row["batch_label"], dtype=torch.long),
             "sample_id": row["sample_id"],
@@ -275,37 +306,76 @@ def unified_splits(metadata_csv, product_col="product_fine",
 
 def few_shot_from_unknown(unknown_idx, metadata_csv, product_col="product_fine",
                           n_shot_values=(1, 3, 5, 10),
-                          exclude_blanks=True, exclude_special=True, seed=42):
+                          exclude_blanks=True, exclude_special=True, seed=42,
+                          repeats=1, seed_start=42):
     """
     从未知类样本中划分 N-shot 注册集和测试集。
-    返回 dict[int, dict]:  n_shot -> {"ref_idx": [...], "test_idx": [...]}
+
+    支持多次重复抽样:
+      - repeats=1: 单次抽样 (兼容旧版), 返回 {n_shot: {"ref_idx": [...], "test_idx": [...]}}
+      - repeats>1: 多次抽样, 返回 {n_shot: [{"ref_idx": [...], "test_idx": [...]}, ...]}
+
+    Args:
+        unknown_idx:   未知类在 metadata_csv 中的索引列表
+        metadata_csv:  metadata CSV 路径
+        product_col:   产品列名
+        n_shot_values: N-shot 值元组
+        seed:          基础随机种子 (repeats=1 时使用)
+        repeats:       每个 N 重复抽样次数
+        seed_start:    重复抽样起始种子 (repeat_idx 会加到此种子)
     """
-    rng = np.random.RandomState(seed)
     df = _load_and_filter(metadata_csv, exclude_blanks, exclude_special)
     unknown_df = df.iloc[unknown_idx]
 
-    # 建立原始行号 → unknown_ds 内部位置的映射，
-    # 因为 GCMSDataset(indices=unknown_idx) 会 reset_index 到 0..N-1
+    # 建立原始行号 → unknown_ds 内部位置的映射
     orig_to_local = {orig: local for local, orig in enumerate(unknown_idx)}
 
     results = {}
     for n_shot in n_shot_values:
-        ref_idx_list = []
-        test_idx_list = []
-        for cls in unknown_df[product_col].unique():
-            cls_indices = unknown_df[
-                unknown_df[product_col] == cls
-            ].index.tolist()
-            if len(cls_indices) <= n_shot:
+        if repeats <= 1:
+            rng = np.random.RandomState(seed)
+            ref_idx_list = []
+            test_idx_list = []
+            for cls in unknown_df[product_col].unique():
+                cls_indices = unknown_df[
+                    unknown_df[product_col] == cls
+                ].index.tolist()
+                if len(cls_indices) <= n_shot:
+                    ref_idx_list.extend(
+                        [orig_to_local[i] for i in cls_indices])
+                    continue
+                perm = rng.permutation(len(cls_indices))
                 ref_idx_list.extend(
-                    [orig_to_local[i] for i in cls_indices])
-                continue
-            perm = rng.permutation(len(cls_indices))
-            ref_idx_list.extend(
-                [orig_to_local[cls_indices[j]] for j in perm[:n_shot]])
-            test_idx_list.extend(
-                [orig_to_local[cls_indices[j]] for j in perm[n_shot:]])
-        results[n_shot] = {"ref_idx": ref_idx_list, "test_idx": test_idx_list}
+                    [orig_to_local[cls_indices[j]] for j in perm[:n_shot]])
+                test_idx_list.extend(
+                    [orig_to_local[cls_indices[j]] for j in perm[n_shot:]])
+            results[n_shot] = {"ref_idx": ref_idx_list, "test_idx": test_idx_list}
+        else:
+            # Multiple repeats
+            repeats_list = []
+            for r in range(repeats):
+                rng = np.random.RandomState(seed_start + r)
+                ref_idx_list = []
+                test_idx_list = []
+                for cls in unknown_df[product_col].unique():
+                    cls_indices = unknown_df[
+                        unknown_df[product_col] == cls
+                    ].index.tolist()
+                    if len(cls_indices) <= n_shot:
+                        ref_idx_list.extend(
+                            [orig_to_local[i] for i in cls_indices])
+                        continue
+                    perm = rng.permutation(len(cls_indices))
+                    ref_idx_list.extend(
+                        [orig_to_local[cls_indices[j]] for j in perm[:n_shot]])
+                    test_idx_list.extend(
+                        [orig_to_local[cls_indices[j]] for j in perm[n_shot:]])
+                repeats_list.append({
+                    "ref_idx": ref_idx_list,
+                    "test_idx": test_idx_list,
+                    "repeat_idx": r,
+                })
+            results[n_shot] = repeats_list
     return results
 
 
@@ -328,7 +398,8 @@ def create_data_split(metadata_csv, cfg, product_col="product_fine"):
       test_batch_idx:   已知产品 × 留出批次 → Setting A
       test_unknown_idx: 留出产品 × 全部批次 → Setting B/C
     """
-    rng = np.random.RandomState(cfg.seed)
+    split_seed = int(getattr(cfg, "split_seed", cfg.seed))
+    rng = np.random.RandomState(split_seed)
     df = _load_and_filter(metadata_csv)
 
     # ── 1. 排除样本过少/批次覆盖不足的产品 ──
@@ -368,7 +439,6 @@ def create_data_split(metadata_csv, cfg, product_col="product_fine"):
         if len(candidate_products) < n_holdout:
             candidate_products = viable_products.copy()
 
-        # 选低资源但覆盖足够的类别，强化少样本注册场景
         candidate_products = sorted(
             candidate_products,
             key=lambda p: (
@@ -377,7 +447,11 @@ def create_data_split(metadata_csv, cfg, product_col="product_fine"):
                 p,
             ),
         )
-        holdout_products = sorted(candidate_products[:n_holdout])
+        if split_seed == 42:
+            holdout_products = sorted(candidate_products[:n_holdout])
+        else:
+            pool = candidate_products[:max(n_holdout, min(len(candidate_products), n_holdout * 4))]
+            holdout_products = sorted(rng.choice(pool, size=n_holdout, replace=False).tolist())
 
     known_products = sorted(
         [p for p in viable_products if p not in holdout_products]
@@ -424,7 +498,11 @@ def create_data_split(metadata_csv, cfg, product_col="product_fine"):
             # 倾向选择时间靠后的批次，验证时序外推鲁棒性
             candidate_batches = sorted(candidate_batches, reverse=True)
 
-        holdout_batches = sorted(candidate_batches[:n_holdout_batches])
+        if split_seed == 42:
+            holdout_batches = sorted(candidate_batches[:n_holdout_batches])
+        else:
+            pool = candidate_batches[:max(n_holdout_batches, min(len(candidate_batches), n_holdout_batches * 4))]
+            holdout_batches = sorted(rng.choice(pool, size=n_holdout_batches, replace=False).tolist())
 
     train_batches = sorted(
         [b for b in all_batches if b not in holdout_batches]
@@ -485,7 +563,11 @@ def create_data_split(metadata_csv, cfg, product_col="product_fine"):
             # 倾向选择时间靠后的批次做伪外推验证
             candidate_batches = sorted(candidate_batches, reverse=True)
 
-        pseudo_holdout_batches = sorted(candidate_batches[:n_pseudo_batches])
+        if split_seed == 42:
+            pseudo_holdout_batches = sorted(candidate_batches[:n_pseudo_batches])
+        else:
+            pool = candidate_batches[:max(n_pseudo_batches, min(len(candidate_batches), n_pseudo_batches * 4))]
+            pseudo_holdout_batches = sorted(rng.choice(pool, size=n_pseudo_batches, replace=False).tolist())
 
     model_train_batches = sorted(
         [b for b in train_batches if b not in pseudo_holdout_batches]
@@ -552,6 +634,7 @@ def create_data_split(metadata_csv, cfg, product_col="product_fine"):
         "test_batch_idx": test_batch_idx,
         "test_unknown_idx": test_unknown_idx,
         "seed": cfg.seed,
+        "split_seed": split_seed,
         "stats": {
             "n_train": len(train_idx),
             "n_val": len(val_idx),

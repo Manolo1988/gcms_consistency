@@ -157,6 +157,27 @@ class Config:
     preferred_holdout_products: Tuple[str, ...] = ()
     preferred_holdout_batches: Tuple[str, ...] = ()
     val_ratio: float = 0.1                    # train_batches 内伪验证批次比例
+    split_seed: int = 42                      # 数据划分随机种子
+
+    # ── Few-shot 重复抽样 ────────────────────────────────
+    fewshot_repeats: int = 1                  # 每个 N-shot 重复抽样次数, 1=不重复
+    fewshot_seed_start: int = 42              # 重复抽样起始种子
+
+    # ── Open-set Score Calibration ──────────────────────
+    open_score_calibration_enabled: bool = False
+    open_score_calibration_mode: str = "logistic"  # pseudo_unknown / grid_search / logistic
+    open_score_features: str = "base,margin,min_dist,radius_norm,second_dist"
+    open_score_weights: str = ""              # 保存校准后权重 (JSON string)
+    open_score_calibration_holdout_products: int = 1  # 留出伪未知类数量
+    open_score_calibration_seed: int = 42
+
+    # ── TIC Auxiliary Branch ────────────────────────────
+    tic_branch_enabled: bool = False          # 启用 TIC 辅助分支
+    tic_source: str = "from_tensor"           # from_tensor / raw_file
+    tic_encoder: str = "cnn1d"               # cnn1d / mlp / transformer
+    tic_embed_dim: int = 64                   # TIC 编码器输出维度
+    tic_fusion_mode: str = "concat"           # concat / gated / sum
+    tic_fusion_output_dim: int = 256          # 融合后输出维度
 
     # ── 数据增强 ──────────────────────────────────────────
     aug_intensity_scale: tuple = (0.8, 1.2)

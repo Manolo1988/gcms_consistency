@@ -12,6 +12,11 @@ import torch
 from pathlib import Path
 
 
+def _batch_tic(batch, device):
+    tic = batch.get("tic") if isinstance(batch, dict) else None
+    return tic.to(device) if torch.is_tensor(tic) else None
+
+
 class SphericalPrototypeAdjuster:
     """
     SAIM 风格球面原型调整器。
@@ -385,7 +390,7 @@ def compute_prototypes(model, dataloader, device, percentile=95.0):
 
     for batch in dataloader:
         x = batch["input"].to(device)
-        z = model.encode(x)
+        z = model.encode(x, tic=_batch_tic(batch, device))
         all_z.append(z.cpu())
         all_labels.append(batch["product"])
         all_sample_ids.extend(
@@ -524,14 +529,14 @@ def finetune_for_new_product(model, old_store, new_loader, old_loader,
         for new_batch in new_loader:
             x_new = new_batch["input"].to(device)
             y_new = new_batch["product"].to(device)
-            z_new = model.encode(x_new)
+            z_new = model.encode(x_new, tic=_batch_tic(new_batch, device))
 
             # 混合新旧数据
             if replay_batches:
                 old_batch = replay_batches[n_batches % len(replay_batches)]
                 x_old = old_batch["input"].to(device)
                 y_old = old_batch["product"].to(device)
-                z_old = model.encode(x_old)
+                z_old = model.encode(x_old, tic=_batch_tic(old_batch, device))
 
                 # 拼接
                 z_all = torch.cat([z_new, z_old], dim=0)

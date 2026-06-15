@@ -10,6 +10,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Function
 
+from tic_branch import compute_tic_from_tensor, TICEncoder1D, TICFusion
+
 
 # ═══════════════════════════════════════════════════════════
 #  基础模块
@@ -563,6 +565,7 @@ class GCMSConsistencyNet(nn.Module):
     def __init__(self, num_batches, cfg):
         super().__init__()
         self.embed_normalize = cfg.embed_normalize
+        self.tic_branch_enabled = bool(getattr(cfg, "tic_branch_enabled", False))
 
         backbone = str(getattr(cfg, "main_backbone", "gcms") or "gcms").lower()
         if backbone in {"gcms", "deep_consistency"}:
@@ -598,8 +601,31 @@ class GCMSConsistencyNet(nn.Module):
                 fuse=getattr(cfg, "main_feature_fuse", "concat"),
                 dropout=cfg.dropout,
             )
-        dim = self.encoder.out_dim
-        feat_map_dim = getattr(self.encoder, "feat_map_dim", dim)
+        dim_2d = self.encoder.out_dim
+        feat_map_dim = getattr(self.encoder, "feat_map_dim", dim_2d)
+
+        dim = dim_2d
+        if self.tic_branch_enabled:
+            tic_dim = int(getattr(cfg, "tic_embed_dim", 64))
+            fusion_mode = str(getattr(cfg, "tic_fusion_mode", "concat") or "concat").lower()
+            fusion_out = int(getattr(cfg, "tic_fusion_output_dim", dim_2d) or dim_2d)
+            if fusion_mode == "sum":
+                fusion_out = dim_2d
+            self.tic_encoder = TICEncoder1D(
+                input_length=int(getattr(cfg, "rt_bins", 1024)),
+                embed_dim=tic_dim,
+                encoder_type=str(getattr(cfg, "tic_encoder", "cnn1d") or "cnn1d").lower(),
+            )
+            self.tic_fusion = TICFusion(
+                z_dim=dim_2d,
+                tic_dim=tic_dim,
+                output_dim=fusion_out,
+                mode=fusion_mode,
+            )
+            dim = fusion_out
+        else:
+            self.tic_encoder = None
+            self.tic_fusion = None
 
         # 对比学习投影头 (仅训练)
         self.proj_head = ProjectionHead(dim, cfg.proj_dim)
@@ -610,8 +636,20 @@ class GCMSConsistencyNet(nn.Module):
             feat_map_dim, cfg.in_channels, cfg.rt_bins, cfg.mz_bins
         )
 
-    def forward(self, x, return_feat_map=False):
-        z_raw, feat_map = self.encoder(x)
+    def _fuse_tic(self, x, z_raw):
+        if not self.tic_branch_enabled:
+            return z_raw
+        tic = compute_tic_from_tensor(x)
+        z_tic = self.tic_encoder(tic)
+        return self.tic_fusion(z_raw, z_tic)
+
+    def forward(self, x, tic=None, return_feat_map=False):
+        z_2d_raw, feat_map = self.encoder(x)
+        if self.tic_branch_enabled:
+            tic_in = compute_tic_from_tensor(x) if tic is None else tic
+            z_raw = self.tic_fusion(z_2d_raw, self.tic_encoder(tic_in))
+        else:
+            z_raw = z_2d_raw
 
         # 归一化嵌入 (度量学习标准做法)
         if self.embed_normalize:
@@ -634,9 +672,14 @@ class GCMSConsistencyNet(nn.Module):
             out["feat_map"] = feat_map
         return out
 
-    def encode(self, x):
+    def encode(self, x, tic=None):
         """仅提取嵌入向量 (推理用)。"""
-        z_raw, _ = self.encoder(x)
+        z_2d_raw, _ = self.encoder(x)
+        if self.tic_branch_enabled:
+            tic_in = compute_tic_from_tensor(x) if tic is None else tic
+            z_raw = self.tic_fusion(z_2d_raw, self.tic_encoder(tic_in))
+        else:
+            z_raw = z_2d_raw
         if self.embed_normalize:
             return F.normalize(z_raw, dim=1)
         return z_raw

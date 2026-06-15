@@ -77,6 +77,15 @@ def main():
     parser.add_argument("--dataloader_prefetch_factor", type=int, default=None)
     parser.add_argument("--disable_dataloader_pin_memory", action="store_true")
     parser.add_argument("--disable_dataloader_persistent_workers", action="store_true")
+    parser.add_argument("--enable_dataset_cache", action="store_true",
+                        help="Cache loaded npz tensors inside each Dataset worker")
+    parser.add_argument("--dataset_cache_max_items", type=int, default=None)
+    parser.add_argument("--disable_amp", action="store_true")
+    parser.add_argument("--amp_dtype", type=str, default=None,
+                        help="float16/bfloat16")
+    parser.add_argument("--disable_channels_last", action="store_true")
+    parser.add_argument("--enable_torch_compile", action="store_true")
+    parser.add_argument("--disable_cuda_benchmark", action="store_true")
     parser.add_argument("--warmup_guard_enabled", action="store_true",
                         help="Enable warmup guard against current best strategy")
     parser.add_argument("--warmup_guard_epoch", type=int, default=None)
@@ -179,6 +188,7 @@ def main():
         "proto_val_subset_ratio", "proto_val_subset_min_samples",
         "proto_val_subset_max_samples", "proto_val_full_every",
         "dataloader_workers", "dataloader_prefetch_factor",
+        "dataset_cache_max_items", "amp_dtype",
         "warmup_guard_epoch", "warmup_guard_best_at_epoch", "warmup_guard_min_ratio",
         "pretrained_feature_model", "pretrained_feature_arch",
         "main_backbone", "main_backbone_model", "main_feature_layers", "main_feature_fuse",
@@ -202,6 +212,16 @@ def main():
         cfg.dataloader_pin_memory = False
     if args.disable_dataloader_persistent_workers:
         cfg.dataloader_persistent_workers = False
+    if args.enable_dataset_cache:
+        cfg.dataset_cache_in_memory = True
+    if args.disable_amp:
+        cfg.amp_enabled = False
+    if args.disable_channels_last:
+        cfg.channels_last = False
+    if args.enable_torch_compile:
+        cfg.torch_compile = True
+    if args.disable_cuda_benchmark:
+        cfg.cuda_benchmark = False
     if args.warmup_guard_enabled:
         cfg.warmup_guard_enabled = True
     if args.warmup_guard_compare_best:

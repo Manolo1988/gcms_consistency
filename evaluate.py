@@ -42,6 +42,11 @@ def _resolve_product_label_name_map(loader):
     return {}
 
 
+def _batch_tic(batch, device):
+    tic = batch.get("tic") if isinstance(batch, dict) else None
+    return tic.to(device) if torch.is_tensor(tic) else None
+
+
 # ═══════════════════════════════════════════════════════════
 #  核心收集函数
 # ═══════════════════════════════════════════════════════════
@@ -60,7 +65,7 @@ def collect_embeddings(model, loader, device):
         disable=not _progress_enabled(),
     ):
         x = batch["input"].to(device)
-        z = model.encode(x)
+        z = model.encode(x, tic=_batch_tic(batch, device))
 
         for i in range(x.size(0)):
             records.append({
@@ -87,7 +92,7 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
         disable=not _progress_enabled(),
     ):
         x = batch["input"].to(device)
-        z = model.encode(x)
+        z = model.encode(x, tic=_batch_tic(batch, device))
         result = proto_store.predict(z)
 
         for i in range(x.size(0)):
@@ -252,7 +257,7 @@ def batch_robustness_metrics(records):
 def open_set_metrics(known_records, unknown_records):
     """
     开集评估: 已知类 vs 未知类的分离度。
-    返回 AUROC 和 FPR@95TPR。
+    返回 AUROC, FPR@95TPR, EER, TPR@FPR5, TPR@FPR10。
     """
     known_scores = np.array([
         r.get("open_set_score", r.get("consistency_score", 0.0))
@@ -263,25 +268,19 @@ def open_set_metrics(known_records, unknown_records):
         for r in unknown_records
     ])
 
-    # 标签: 1=已知, 0=未知
-    labels = np.concatenate([np.ones(len(known_scores)),
-                             np.zeros(len(unknown_scores))])
-    scores = np.concatenate([known_scores, unknown_scores])
+    from open_score_calibration import evaluate_calibration
+    cal_metrics = evaluate_calibration(known_scores, unknown_scores)
 
-    result = {}
-    if len(np.unique(labels)) > 1:
-        result["open_set_AUROC"] = float(roc_auc_score(labels, scores))
-
-        # FPR@95TPR
-        fpr, tpr, thresholds = roc_curve(labels, scores)
-        idx_95 = np.searchsorted(tpr, 0.95)
-        result["FPR_at_95TPR"] = float(fpr[min(idx_95, len(fpr) - 1)])
-    else:
-        result["open_set_AUROC"] = float(np.nan)
-        result["FPR_at_95TPR"] = float(np.nan)
-
-    result["known_score_mean"] = float(known_scores.mean()) if len(known_scores) else float(np.nan)
-    result["unknown_score_mean"] = float(unknown_scores.mean()) if len(unknown_scores) else float(np.nan)
+    result = {
+        "open_set_AUROC": cal_metrics["AUROC"],
+        "FPR_at_95TPR": cal_metrics["FPR_at_95TPR"],
+        "EER": cal_metrics["EER"],
+        "TPR_at_FPR5": cal_metrics["TPR_at_FPR5"],
+        "TPR_at_FPR10": cal_metrics["TPR_at_FPR10"],
+        "known_score_mean": cal_metrics["known_score_mean"],
+        "unknown_score_mean": cal_metrics["unknown_score_mean"],
+        "AUPR": cal_metrics.get("AUPR", float("nan")),
+    }
     return result
 
 
@@ -430,6 +429,7 @@ def _build_baseline_feature_cache(split, cfg, make_loader,
             product_col=product_col,
             augmentation=None,
             indices=unknown_idx,
+            cfg=cfg,
         )
         fs_splits = few_shot_from_unknown(
             unknown_idx,
@@ -851,21 +851,180 @@ def evaluate_setting_b(model, proto_store, loader_known, loader_unknown,
     return {"open_set": osm}
 
 
+def fit_open_score_calibrator_pseudo_unknown(model, cfg, split, make_loader,
+                                             metadata_csv, product_col,
+                                             save_dir=None):
+    """Fit calibration on known-class pseudo unknowns only; never uses Setting B unknowns."""
+    from open_score_calibration import OpenScoreCalibrator
+    from register import register_from_loader
+    import pandas as pd
+
+    rng = np.random.RandomState(int(getattr(cfg, "open_score_calibration_seed", 42)))
+    train_df = pd.read_csv(metadata_csv)
+    train_df = train_df[(train_df["product_fine"] != "BLANK")
+                        & (~train_df["is_special"])].reset_index(drop=True)
+    train_df = train_df.iloc[split["train_idx"]]
+    products = sorted(train_df[product_col].unique().tolist())
+    n_holdout = int(getattr(cfg, "open_score_calibration_holdout_products", 1) or 1)
+    n_holdout = min(max(n_holdout, 1), max(len(products) - 1, 1))
+    if len(products) <= 1:
+        raise ValueError("校准失败: 已知训练产品数不足，无法构造伪未知")
+
+    eligible = []
+    for p in products:
+        n = int((train_df[product_col] == p).sum())
+        if n >= 5:
+            eligible.append(p)
+    if len(eligible) < n_holdout:
+        eligible = products
+    pseudo_products = sorted(rng.choice(eligible, size=n_holdout, replace=False).tolist())
+
+    known_idx = train_df.index[~train_df[product_col].isin(pseudo_products)].tolist()
+    pseudo_idx = train_df.index[train_df[product_col].isin(pseudo_products)].tolist()
+    if not known_idx or not pseudo_idx:
+        raise ValueError("校准失败: 伪未知划分为空")
+
+    ds_known, loader_cal_known = make_loader(known_idx)
+    _, loader_cal_unknown = make_loader(pseudo_idx)
+    label_names = ds_known.get_label_name_map()
+    proto_cal, _, _ = register_from_loader(
+        model, loader_cal_known, label_names, next(model.parameters()).device,
+        percentile=cfg.accept_percentile,
+    )
+
+    features = [
+        f.strip() for f in str(getattr(cfg, "open_score_features", "")).split(",")
+        if f.strip()
+    ]
+    features = [{"base": "base_score", "margin": "margin_score"}.get(f, f) for f in features]
+    calibrator = OpenScoreCalibrator(
+        mode=getattr(cfg, "open_score_calibration_mode", "logistic"),
+        features=features,
+        seed=int(getattr(cfg, "open_score_calibration_seed", 42)),
+    )
+
+    known_features, pseudo_features = [], []
+    known_scores, pseudo_scores = [], []
+    device = next(model.parameters()).device
+    model.eval()
+    with torch.no_grad():
+        for loader, feature_list, score_list in [
+            (loader_cal_known, known_features, known_scores),
+            (loader_cal_unknown, pseudo_features, pseudo_scores),
+        ]:
+            for batch in loader:
+                x = batch["input"].to(device)
+                z = model.encode(x, tic=_batch_tic(batch, device))
+                pred = proto_cal.predict(z)
+                feature_list.append(calibrator.collect_features_from_predict(pred, proto_cal))
+                score_list.extend(pred["scores"].detach().cpu().numpy().tolist())
+
+    calibrator.fit(known_features, pseudo_features)
+    metadata = {
+        "fit_scope": "known_train_pseudo_unknown",
+        "pseudo_unknown_products": pseudo_products,
+        "n_fit_known": int(len(known_scores)),
+        "n_fit_pseudo_unknown": int(len(pseudo_scores)),
+        "features": features,
+        "mode": getattr(cfg, "open_score_calibration_mode", "logistic"),
+    }
+    if save_dir is not None:
+        Path(save_dir).mkdir(parents=True, exist_ok=True)
+        with open(Path(save_dir) / "calibration_fit_metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
+    return calibrator, metadata
+
+
+def apply_calibrator_to_loader(model, proto_store, calibrator, loader, device):
+    scores = []
+    model.eval()
+    with torch.no_grad():
+        for batch in loader:
+            x = batch["input"].to(device)
+            z = model.encode(x, tic=_batch_tic(batch, device))
+            pred = proto_store.predict(z)
+            fd = calibrator.collect_features_from_predict(pred, proto_store)
+            n = fd["base_score"].shape[0]
+            for i in range(n):
+                scores.append(calibrator.apply({k: v[i] for k, v in fd.items()}))
+    return scores
+
+
 def evaluate_setting_c(model, unknown_dataset, unknown_idx_splits,
                        label_names, device, cfg, fold_name=""):
-    """Setting C: 少样本 — N-shot 注册未知类。"""
+    """Setting C: 少样本 — N-shot 注册未知类。
+
+    支持 Few-shot repeats:
+      - 如果 unknown_idx_splits[n_shot] 是 dict (单次): 旧兼容模式
+      - 如果 unknown_idx_splits[n_shot] 是 list (多次): 重复抽样模式,
+        输出 mean/std/CI
+    """
     results = {}
+    repeats_per_n = {}
     print(f"\n── Setting C [{fold_name}] ──")
     for n_shot, split in unknown_idx_splits.items():
-        if not split["test_idx"]:
-            results[n_shot] = {"accuracy": np.nan, "macro_f1": np.nan}
-            continue
-        m = few_shot_evaluate(
-            model, unknown_dataset, split["ref_idx"], split["test_idx"],
-            label_names, device, cfg)
-        results[n_shot] = m
-        print(f"  {n_shot}-shot: acc={m['accuracy']:.4f}, "
-              f"f1={m['macro_f1']:.4f}")
+        if isinstance(split, list):
+            # Multiple repeats
+            accs, f1s = [], []
+            for rep in split:
+                if not rep.get("test_idx"):
+                    continue
+                m = few_shot_evaluate(
+                    model, unknown_dataset, rep["ref_idx"], rep["test_idx"],
+                    label_names, device, cfg)
+                accs.append(m["accuracy"])
+                f1s.append(m["macro_f1"])
+
+            if not accs:
+                results[n_shot] = {"accuracy": np.nan, "macro_f1": np.nan}
+                continue
+
+            acc_arr = np.array(accs, dtype=np.float64)
+            f1_arr = np.array(f1s, dtype=np.float64)
+            n_repeats = len(accs)
+
+            # Compute statistics
+            mean_acc = float(acc_arr.mean())
+            std_acc = float(acc_arr.std(ddof=1)) if n_repeats > 1 else 0.0
+            ci95_acc = 1.96 * std_acc / np.sqrt(n_repeats) if n_repeats > 1 else 0.0
+
+            mean_f1 = float(f1_arr.mean())
+            std_f1 = float(f1_arr.std(ddof=1)) if n_repeats > 1 else 0.0
+            ci95_f1 = 1.96 * std_f1 / np.sqrt(n_repeats) if n_repeats > 1 else 0.0
+
+            results[n_shot] = {
+                "accuracy": mean_acc,
+                "accuracy_mean": mean_acc,
+                "accuracy_std": std_acc,
+                "accuracy_ci95": ci95_acc,
+                "accuracy_ci95_low": mean_acc - ci95_acc,
+                "accuracy_ci95_high": mean_acc + ci95_acc,
+                "macro_f1": mean_f1,
+                "macro_f1_mean": mean_f1,
+                "macro_f1_std": std_f1,
+                "macro_f1_ci95": ci95_f1,
+                "repeats": n_repeats,
+                "accuracy_values": [float(v) for v in acc_arr],
+                "macro_f1_values": [float(v) for v in f1_arr],
+                "n_ref": split[0].get("n_ref", len(split[0].get("ref_idx", []))) if split else 0,
+                "n_test": len(split[0].get("test_idx", [])) if split else 0,
+            }
+            repeats_per_n[n_shot] = n_repeats
+
+            print(f"  {n_shot}-shot ({n_repeats} repeats): "
+                  f"acc={mean_acc:.4f}±{std_acc:.4f} [{mean_acc-ci95_acc:.4f}, {mean_acc+ci95_acc:.4f}], "
+                  f"f1={mean_f1:.4f}±{std_f1:.4f}")
+        else:
+            # Single repeat (compat)
+            if not split.get("test_idx"):
+                results[n_shot] = {"accuracy": np.nan, "macro_f1": np.nan}
+                continue
+            m = few_shot_evaluate(
+                model, unknown_dataset, split["ref_idx"], split["test_idx"],
+                label_names, device, cfg)
+            results[n_shot] = m
+            print(f"  {n_shot}-shot: acc={m['accuracy']:.4f}, "
+                  f"f1={m['macro_f1']:.4f}")
     return {"few_shot": results}
 
 
@@ -940,6 +1099,12 @@ def evaluate_single_model(cfg):
         num_batches_model = train_meta["num_batches"]
         if bool(train_meta.get("input_raw_pca_enabled", False)):
             cfg.mz_bins = int(train_meta.get("input_raw_pca_components", cfg.mz_bins))
+        for key in [
+            "tic_branch_enabled", "tic_encoder", "tic_embed_dim",
+            "tic_fusion_mode", "tic_fusion_output_dim",
+        ]:
+            if key in train_meta:
+                setattr(cfg, key, train_meta[key])
     else:
         # 回退: 从 state_dict 推断
         sd = torch.load(model_dir / "model.pt", map_location="cpu",
@@ -958,7 +1123,8 @@ def evaluate_single_model(cfg):
     def _make_loader_main(indices):
         ds = GCMSDataset(metadata_csv, product_col=product_col,
                          augmentation=None, indices=indices,
-                         input_transform=input_transform)
+                         input_transform=input_transform,
+                         cfg=cfg)
         ds.product_enc = global_product_enc
         ds.batch_enc = global_batch_enc
         ds.df["product_label"] = global_product_enc.transform(
@@ -973,7 +1139,8 @@ def evaluate_single_model(cfg):
 
     def _make_loader_baseline(indices):
         ds = GCMSDataset(metadata_csv, product_col=product_col,
-                         augmentation=None, indices=indices)
+                         augmentation=None, indices=indices,
+                         cfg=cfg)
         ds.product_enc = global_product_enc
         ds.batch_enc = global_batch_enc
         ds.df["product_label"] = global_product_enc.transform(
@@ -1026,6 +1193,55 @@ def evaluate_single_model(cfg):
         result_b = evaluate_setting_b(
             model, proto_store, loader_known, loader_unknown,
             device, cfg, f"留出产品 {split['holdout_products']}")
+
+        # ═══ Open-set Score Calibration (optional) ═══
+        if getattr(cfg, "open_score_calibration_enabled", False):
+            try:
+                from open_score_calibration import (
+                    evaluate_calibration,
+                )
+                cal_dir = out_dir / "calibration"
+                cal_dir.mkdir(parents=True, exist_ok=True)
+
+                calibrator, cal_fit_meta = fit_open_score_calibrator_pseudo_unknown(
+                    model, cfg, split, _make_loader_main, metadata_csv,
+                    product_col, save_dir=cal_dir,
+                )
+                calibrator.save(cal_dir)
+
+                known_records = collect_predictions(
+                    model, loader_known, proto_store, device,
+                    reject_factor=cfg.reject_threshold_factor,
+                )
+                unknown_records = collect_predictions(
+                    model, loader_unknown, proto_store, device,
+                    reject_factor=cfg.reject_threshold_factor,
+                )
+                metrics_uncal = evaluate_calibration(
+                    [r["open_set_score"] for r in known_records],
+                    [r["open_set_score"] for r in unknown_records],
+                )
+
+                known_cal = apply_calibrator_to_loader(
+                    model, proto_store, calibrator, loader_known, device)
+                unknown_cal = apply_calibrator_to_loader(
+                    model, proto_store, calibrator, loader_unknown, device)
+                metrics_cal = evaluate_calibration(known_cal, unknown_cal)
+
+                result_b["open_set"]["calibration"] = {
+                    "enabled": True,
+                    "mode": cfg.open_score_calibration_mode,
+                    "fit_metadata": cal_fit_meta,
+                    "pre_calibration": metrics_uncal,
+                    "post_calibration": metrics_cal,
+                    "delta_AUROC": metrics_cal.get("AUROC", float("nan")) - metrics_uncal.get("AUROC", float("nan")),
+                    "delta_FPR95": metrics_cal.get("FPR_at_95TPR", float("nan")) - metrics_uncal.get("FPR_at_95TPR", float("nan")),
+                }
+                print(f"\n  [Calibration] delta_AUROC={result_b['open_set']['calibration']['delta_AUROC']:.4f}, "
+                      f"delta_FPR95={result_b['open_set']['calibration']['delta_FPR95']:.4f}")
+            except Exception as e:
+                print(f"\n  [Calibration] Failed: {e}")
+                result_b["open_set"]["calibration"] = {"enabled": True, "error": str(e)}
     else:
         result_b = None
         print("\n── Setting B: 无留出产品测试数据 ──")
@@ -1036,15 +1252,35 @@ def evaluate_single_model(cfg):
         ds_unknown_full = GCMSDataset(
             metadata_csv, product_col=product_col,
             augmentation=None, indices=unknown_idx,
-            input_transform=input_transform)
+            input_transform=input_transform,
+            cfg=cfg)
         unknown_label_names = ds_unknown_full.get_label_name_map()
+
+        fs_repeats = int(getattr(cfg, "fewshot_repeats", 1))
+        fs_seed_start = int(getattr(cfg, "fewshot_seed_start", cfg.seed))
 
         fs_splits = few_shot_from_unknown(
             unknown_idx, metadata_csv, product_col=product_col,
-            n_shot_values=cfg.n_shot_values, seed=cfg.seed)
+            n_shot_values=cfg.n_shot_values, seed=cfg.seed,
+            repeats=fs_repeats, seed_start=fs_seed_start)
         result_c = evaluate_setting_c(
             model, ds_unknown_full, fs_splits, unknown_label_names,
             device, cfg, f"留出产品 {split['holdout_products']}")
+
+        # Save per-repeat CSV if repeats > 1
+        if fs_repeats > 1:
+            import csv
+            repeats_dir = out_dir / "fewshot"
+            repeats_dir.mkdir(parents=True, exist_ok=True)
+            for n_shot, data in result_c.get("few_shot", {}).items():
+                if "accuracy_values" in data:
+                    csv_path = repeats_dir / f"repeats_{n_shot}shot.csv"
+                    with open(csv_path, "w", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["repeat", "accuracy", "macro_f1"])
+                        for i, (acc, f1) in enumerate(zip(
+                            data["accuracy_values"], data["macro_f1_values"])):
+                            writer.writerow([i, acc, f1])
     else:
         result_c = None
         print("\n── Setting C: 无留出产品测试数据 ──")
@@ -1284,7 +1520,8 @@ def evaluate_all_settings(fold_results, split_info, cfg):
     unknown_idx = split_info["unknown_idx"]
     if unknown_idx:
         unknown_ds = GCMSDataset(metadata_csv, product_col=product_col,
-                                 augmentation=None, indices=unknown_idx)
+                                 augmentation=None, indices=unknown_idx,
+                                 cfg=cfg)
         unknown_loader = torch.utils.data.DataLoader(
             unknown_ds, batch_size=cfg.batch_size, shuffle=False)
         fs_splits = few_shot_from_unknown(
@@ -1316,11 +1553,13 @@ def evaluate_all_settings(fold_results, split_info, cfg):
         if train_idx is not None:
             train_noaug = GCMSDataset(
                 metadata_csv, product_col=product_col,
-                augmentation=None, indices=train_idx)
+                augmentation=None, indices=train_idx,
+                cfg=cfg)
         else:
             train_noaug = GCMSDataset(
                 metadata_csv, product_col=product_col,
-                augmentation=None, indices=ds_train.df.index.tolist())
+                augmentation=None, indices=ds_train.df.index.tolist(),
+                cfg=cfg)
         train_noaug.product_enc = ds_train.product_enc
         train_noaug.batch_enc = ds_train.batch_enc
         train_noaug.df["product_label"] = ds_train.product_enc.transform(
