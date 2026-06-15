@@ -7,9 +7,19 @@
 """
 import json
 import random
+import sys
 import numpy as np
 import torch
 from pathlib import Path
+
+
+def _ensure_numpy_pickle_compat():
+    """Allow checkpoints pickled with NumPy 2.x to load on NumPy 1.x."""
+    try:
+        import numpy.core as numpy_core
+        sys.modules.setdefault("numpy._core", numpy_core)
+    except Exception:
+        pass
 
 
 def _batch_tic(batch, device):
@@ -345,11 +355,13 @@ class PrototypeStore:
             self.spherical_radii = {
                 k: float(v) for k, v in self.radii.items()
             }
+        _ensure_numpy_pickle_compat()
         self.prototypes = torch.load(path / "prototypes.pt",
                                      map_location="cpu", weights_only=False)
 
         sph_path = path / "spherical_prototypes.pt"
         if sph_path.exists():
+            _ensure_numpy_pickle_compat()
             self.spherical_prototypes = torch.load(
                 sph_path, map_location="cpu", weights_only=False
             )
