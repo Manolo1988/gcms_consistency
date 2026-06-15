@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 from config import Config, get_device
 from dataset import GCMSDataset, load_data_split
 from models import GCMSConsistencyNet
-from register import PrototypeStore
+from register import PrototypeStore, register_from_loader
 
 
 def _load_cfg(run_dir: Path) -> Config:
@@ -91,7 +91,7 @@ def _batch_tic(batch, device):
     return tic.to(device, non_blocking=True) if torch.is_tensor(tic) else None
 
 
-def _make_loader(metadata_csv, product_col, indices, cfg, product_enc, batch_enc):
+def _make_dataset(metadata_csv, product_col, indices, cfg, product_enc, batch_enc):
     ds = GCMSDataset(
         metadata_csv,
         product_col=product_col,
@@ -105,8 +105,17 @@ def _make_loader(metadata_csv, product_col, indices, cfg, product_enc, batch_enc
     ds.df["batch_label"] = batch_enc.transform(ds.df["batch_idx"])
     ds.num_products = len(product_enc.classes_)
     ds.num_batches = len(batch_enc.classes_)
+    return ds
+
+
+def _make_loader(metadata_csv, product_col, indices, cfg, product_enc, batch_enc):
+    ds = _make_dataset(metadata_csv, product_col, indices, cfg, product_enc, batch_enc)
     loader = torch.utils.data.DataLoader(ds, batch_size=cfg.batch_size, shuffle=False)
-    return loader
+    return ds, loader
+
+
+def _label_name_map(dataset):
+    return {int(i): str(name) for i, name in enumerate(dataset.product_enc.classes_)}
 
 
 def _collect_score_parts(model, proto_store, loader, device, use_spherical):
@@ -186,6 +195,11 @@ def main():
     parser.add_argument("--output_csv", default="", help="Optional CSV output path")
     parser.add_argument("--output_md", default="", help="Optional Markdown output path")
     parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument(
+        "--rebuild_prototypes",
+        action="store_true",
+        help="Recompute prototypes from train_idx instead of loading final_model/prototypes",
+    )
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir).resolve()
@@ -214,19 +228,39 @@ def main():
     model = GCMSConsistencyNet(num_batches_model, cfg).to(device)
     model.load_state_dict(torch.load(model_dir / "model.pt", map_location=device, weights_only=True))
 
-    proto_store = PrototypeStore()
-    proto_store.load(model_dir / "prototypes")
-
     import pandas as pd
     full_df = pd.read_csv(metadata_csv)
     full_df = full_df[(full_df["product_fine"] != "BLANK") & (~full_df["is_special"])].reset_index(drop=True)
     product_enc = LabelEncoder().fit(sorted(full_df[product_col].unique()))
     batch_enc = LabelEncoder().fit(sorted(full_df["batch_idx"].unique()))
 
+    proto_store = None
+    if not args.rebuild_prototypes:
+        try:
+            proto_store = PrototypeStore()
+            proto_store.load(model_dir / "prototypes")
+            print("Loaded prototypes from final_model/prototypes")
+        except Exception as exc:
+            print(f"Prototype load failed, rebuilding from train split: {exc}")
+            proto_store = None
+
+    if proto_store is None:
+        ds_train, loader_train = _make_loader(
+            metadata_csv, product_col, split["train_idx"], cfg, product_enc, batch_enc
+        )
+        proto_store, _, _ = register_from_loader(
+            model,
+            loader_train,
+            _label_name_map(ds_train),
+            device,
+            percentile=float(getattr(cfg, "accept_percentile", 95.0)),
+        )
+        print("Rebuilt prototypes from train split")
+
     known_idx = sorted(set(split["val_idx"]) | set(split["test_batch_idx"]))
     unknown_idx = split["test_unknown_idx"]
-    loader_known = _make_loader(metadata_csv, product_col, known_idx, cfg, product_enc, batch_enc)
-    loader_unknown = _make_loader(metadata_csv, product_col, unknown_idx, cfg, product_enc, batch_enc)
+    _, loader_known = _make_loader(metadata_csv, product_col, known_idx, cfg, product_enc, batch_enc)
+    _, loader_unknown = _make_loader(metadata_csv, product_col, unknown_idx, cfg, product_enc, batch_enc)
 
     known_scores = {}
     unknown_scores = {}
