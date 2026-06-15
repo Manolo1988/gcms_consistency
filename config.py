@@ -1,6 +1,7 @@
 """全局配置：路径、网格参数、模型参数、训练超参数。"""
 import os
 import sys
+import subprocess
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, List
@@ -17,6 +18,37 @@ def get_device():
     """
     import torch
     if torch.cuda.is_available():
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+        if visible:
+            return torch.device("cuda:0")
+
+        try:
+            cmd = [
+                "nvidia-smi",
+                "--query-gpu=index,memory.used,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ]
+            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
+            candidates = []
+            for line in out.strip().splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) < 3:
+                    continue
+                idx = int(parts[0])
+                mem_used = float(parts[1])
+                util = float(parts[2])
+                candidates.append((mem_used, util, idx))
+            if candidates:
+                candidates.sort(key=lambda x: (x[0], x[1], x[2]))
+                best_idx = candidates[0][2]
+                print(
+                    f"[Device] Selected CUDA device {best_idx} "
+                    f"(mem_used={candidates[0][0]:.0f} MiB, util={candidates[0][1]:.0f}%)"
+                )
+                return torch.device(f"cuda:{best_idx}")
+        except Exception:
+            pass
+
         return torch.device("cuda")
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         try:
