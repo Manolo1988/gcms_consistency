@@ -200,6 +200,15 @@ class Config:
     dataloader_pin_memory: bool = True
     dataloader_persistent_workers: bool = True
     dataloader_prefetch_factor: int = 2
+    dataset_cache_in_memory: bool = False     # 内存充足时缓存 npz tensor
+    dataset_cache_max_items: int = 4096        # 每个 Dataset 实例最多缓存样本数
+
+    # ── 训练性能 ────────────────────────────────────────────
+    amp_enabled: bool = True                   # CUDA 下使用 mixed precision
+    amp_dtype: str = "float16"                 # float16 / bfloat16
+    channels_last: bool = True                 # CUDA 卷积使用 NHWC memory format
+    torch_compile: bool = False                # PyTorch 2 compile; 首轮较慢
+    cuda_benchmark: bool = True                # 固定输入尺寸下启用 cuDNN benchmark
 
     # ── 产品标签粒度 ─────────────────────────────────────
     product_granularity: str = "fine"

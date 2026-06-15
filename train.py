@@ -87,6 +87,16 @@ def _load_model_state(model, state_dict):
     getattr(model, "_orig_mod", model).load_state_dict(state_dict)
 
 
+def _make_grad_scaler(cfg, device):
+    enabled = _cuda_amp_enabled(cfg, device)
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        try:
+            return torch.amp.GradScaler("cuda", enabled=enabled)
+        except TypeError:
+            pass
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
 def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -511,7 +521,7 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=cfg.epochs
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=_cuda_amp_enabled(cfg, device))
+    scaler = _make_grad_scaler(cfg, device)
     early_stop_ctrl = _resolve_early_stop_controls(cfg, cfg.epochs, cfg.lr)
 
     best_acc = 0
@@ -731,7 +741,7 @@ def train_single_model(cfg: Config):
                                   weight_decay=cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=cfg.epochs)
-    scaler = torch.cuda.amp.GradScaler(enabled=_cuda_amp_enabled(cfg, device))
+    scaler = _make_grad_scaler(cfg, device)
     early_stop_ctrl = _resolve_early_stop_controls(cfg, cfg.epochs, cfg.lr)
 
     best_acc = 0
