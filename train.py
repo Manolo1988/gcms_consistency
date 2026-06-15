@@ -372,7 +372,15 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch,
         ncols=100,
         disable=not _progress_enabled(),
     )
-    for batch in pbar:
+    if not _progress_enabled():
+        print(
+            f"    [train] epoch {epoch+1}/{total_epochs} start, "
+            f"batches={len(loader)}, workers={getattr(loader, 'num_workers', 'na')}",
+            flush=True,
+        )
+    for batch_idx, batch in enumerate(pbar):
+        if batch_idx == 0 and not _progress_enabled():
+            print(f"    [train] epoch {epoch+1}: first batch loaded", flush=True)
         batch_dev = _move_batch_to_device(batch, device, channels_last=channels_last)
         x = batch_dev["input"]
 

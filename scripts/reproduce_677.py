@@ -30,6 +30,12 @@ import sys
 import os
 from pathlib import Path
 
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -342,6 +348,8 @@ def main():
                         help="Override epochs (use small value for smoke test)")
     parser.add_argument("--dataloader_workers", type=int, default=None)
     parser.add_argument("--dataloader_prefetch_factor", type=int, default=None)
+    parser.add_argument("--disable_dataloader_pin_memory", action="store_true")
+    parser.add_argument("--disable_dataloader_persistent_workers", action="store_true")
     parser.add_argument("--enable_dataset_cache", action="store_true")
     parser.add_argument("--dataset_cache_max_items", type=int, default=None)
     parser.add_argument("--disable_amp", action="store_true")
@@ -369,6 +377,10 @@ def main():
         cfg.dataloader_workers = args.dataloader_workers
     if args.dataloader_prefetch_factor is not None:
         cfg.dataloader_prefetch_factor = args.dataloader_prefetch_factor
+    if args.disable_dataloader_pin_memory:
+        cfg.dataloader_pin_memory = False
+    if args.disable_dataloader_persistent_workers:
+        cfg.dataloader_persistent_workers = False
     if args.enable_dataset_cache:
         cfg.dataset_cache_in_memory = True
     if args.dataset_cache_max_items is not None:
