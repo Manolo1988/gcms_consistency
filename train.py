@@ -882,6 +882,8 @@ def train_single_model(cfg: Config):
             "tic_embed_dim": int(getattr(cfg, "tic_embed_dim", 64)),
             "tic_fusion_mode": str(getattr(cfg, "tic_fusion_mode", "concat")),
             "tic_fusion_output_dim": int(getattr(cfg, "tic_fusion_output_dim", cfg.feature_dim)),
+            "best_val_acc": float(best_acc),
+            "best_val_metric": float(best_metric),
         }, f, indent=2)
 
     print(f"\n模型已保存到 {model_dir}")

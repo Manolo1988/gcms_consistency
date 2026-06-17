@@ -68,18 +68,18 @@ def get_677_config():
     # ── No input PCA ──
     cfg.input_raw_pca_enabled = False
     cfg.input_raw_pca_components = 128
-    cfg.prepare_direct_raw_pca = False
+    cfg.prepare_direct_raw_pca = True
 
     # ── 677 core training ──
     cfg.epochs = 200
     cfg.batch_size = 16
     cfg.lr = 0.00026
     cfg.weight_decay = 1e-4
-    cfg.eval_interval = 10
+    cfg.eval_interval = 5
     cfg.eval_interval_search = 10
     cfg.eval_interval_final = 5
     cfg.eval_final_start_ratio = 0.7
-    cfg.early_stop_patience = 0
+    cfg.early_stop_patience = 10
     cfg.early_stop_min_lr_ratio = 0.2
 
     # ── 677 core loss ──
@@ -110,8 +110,8 @@ def get_677_config():
     cfg.num_open_test_classes = 2
     cfg.n_shot_values = (1, 3, 5, 10)
     cfg.holdout_batch_ratio = 0.1
-    cfg.preferred_holdout_products = ("HMD", "XCJ")
-    cfg.preferred_holdout_batches = ("20250905", "20250912", "20250920")
+    cfg.preferred_holdout_products = ()
+    cfg.preferred_holdout_batches = ()
     cfg.val_ratio = 0.1
 
     # ── Default new features: disabled for baseline ──
