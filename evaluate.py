@@ -940,6 +940,7 @@ def evaluate_single_model(cfg):
         num_batches_model = train_meta["num_batches"]
         if bool(train_meta.get("input_raw_pca_enabled", False)):
             cfg.mz_bins = int(train_meta.get("input_raw_pca_components", cfg.mz_bins))
+        cfg.rt_bins = int(train_meta.get("input_raw_pca_rt_bins", cfg.rt_bins))
     else:
         # 回退: 从 state_dict 推断
         sd = torch.load(model_dir / "model.pt", map_location="cpu",

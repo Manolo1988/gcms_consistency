@@ -16,18 +16,31 @@ from config import Config
 
 
 def cmd_prepare(cfg):
-    from data_prepare import scan_dataset, convert_all
+    from data_prepare import scan_dataset, convert_all, _build_tensor_paths
     from dataset import create_data_split
+    import numpy as np
+
     metadata = scan_dataset(cfg.dataset_root)
     print("\n产品分布:")
     print(metadata["code"].value_counts().to_string())
-    convert_all(metadata, cfg.prepared_dir, cfg)
 
-    # 创建固定数据划分
-    metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
+    # ── Step 1: 先保存 metadata.csv + 创建 split ──
+    out_dir = Path(cfg.prepared_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tensor_dir = out_dir / "tensors"
+    tensor_dir.mkdir(parents=True, exist_ok=True)
+
+    metadata = metadata.copy()
+    metadata["tensor_path"] = _build_tensor_paths(metadata, tensor_dir, cfg)
+    metadata_csv = str(out_dir / "metadata.csv")
+    metadata.to_csv(metadata_csv, index=False, encoding="utf-8-sig")
+
     product_col = ("product_fine" if cfg.product_granularity == "fine"
                    else "product_coarse")
-    create_data_split(metadata_csv, cfg, product_col=product_col)
+    split = create_data_split(metadata_csv, cfg, product_col=product_col)
+
+    # ── Step 2: PCA 仅用训练集拟合, 全部样本转换 ──
+    convert_all(metadata, cfg.prepared_dir, cfg, fit_indices=split["train_idx"])
 
 
 def cmd_train(cfg):

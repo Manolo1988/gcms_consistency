@@ -41,7 +41,13 @@ htmlcov/
 .tox/
 .nox/
 .coverage
-.coverage.*
+.coverage.*        
+output_new/
+outputs/
+prepared_data_pca171/
+prepared_data_pca192/
+pretrained_models/
+new_prepared_data/
 .cache
 nosetests.xml
 coverage.xml

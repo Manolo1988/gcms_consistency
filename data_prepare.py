@@ -377,8 +377,16 @@ def _resample_rt_linear(mat_rt_k: np.ndarray, src_rts: np.ndarray, target_len: i
     return np.asarray(out, dtype=np.float32)
 
 
-def _fit_or_load_raw_direct_input_pca(metadata_csv: Path, cfg: Config, n_components: int):
-    """基于原始 RT×m/z 矩阵拟合/加载 PCA 模型。"""
+def _fit_or_load_raw_direct_input_pca(metadata_csv: Path, cfg: Config, n_components: int,
+                                       fit_indices=None):
+    """
+    基于原始 RT×m/z 矩阵拟合/加载 PCA 模型。
+
+    fit_indices: 若提供, 则仅用这些行索引(原始 CSV 行号)拟合 PCA,
+                 而非全部 metadata。用于防止数据泄漏。
+    """
+    # 当指定 fit_indices 时, 不使用缓存 (缓存键不含 fit_indices)
+    use_cache = fit_indices is None
     cache_root = Path(cfg.prepared_dir) / "cache" / "input_pca"
     cache_root.mkdir(parents=True, exist_ok=True)
 
@@ -387,7 +395,7 @@ def _fit_or_load_raw_direct_input_pca(metadata_csv: Path, cfg: Config, n_compone
     meta_path = cache_root / f"raw_direct_rt_axis_pca_{key}.json"
     ref_axis_path = cache_root / f"raw_direct_rt_axis_pca_{key}_ref_mz.npy"
 
-    if model_path.exists() and ref_axis_path.exists():
+    if use_cache and model_path.exists() and ref_axis_path.exists():
         import pickle
 
         with open(model_path, "rb") as f:
@@ -404,13 +412,24 @@ def _fit_or_load_raw_direct_input_pca(metadata_csv: Path, cfg: Config, n_compone
     if meta_df.empty:
         raise RuntimeError("metadata 为空，无法拟合 PCA")
 
+    # 如果指定了 fit_indices, 仅保留这些行用于 PCA 拟合
+    if fit_indices is not None:
+        fit_set = set(fit_indices)
+        pca_meta_df = meta_df[meta_df.index.isin(fit_set)]
+        print(
+            f"  [Input PCA] 仅用 {len(pca_meta_df)}/{len(meta_df)} 个样本拟合 PCA"
+            f" (fit_indices 已指定)"
+        )
+    else:
+        pca_meta_df = meta_df
+
     ipca = None
     ref_mz_axis = None
     n_tensors = 0
     n_rows = 0
     skipped = 0
 
-    for _, row in tqdm(meta_df.iterrows(), total=len(meta_df), desc="拟合原始PCA"):
+    for _, row in tqdm(pca_meta_df.iterrows(), total=len(pca_meta_df), desc="拟合原始PCA"):
         try:
             _rts, mzs, raw_mat = _read_raw_matrix_no_bins(row["d_path"], cfg)
         except Exception as e:
@@ -442,9 +461,11 @@ def _fit_or_load_raw_direct_input_pca(metadata_csv: Path, cfg: Config, n_compone
     import pickle
     import time
 
-    with open(model_path, "wb") as f:
-        pickle.dump(ipca, f)
-    np.save(ref_axis_path, ref_mz_axis.astype(np.float32))
+    # 仅在未指定 fit_indices 时缓存 (缓存键未编码 fit_indices, 避免污染)
+    if fit_indices is None:
+        with open(model_path, "wb") as f:
+            pickle.dump(ipca, f)
+        np.save(ref_axis_path, ref_mz_axis.astype(np.float32))
 
     meta = {
         "cache_key": key,
@@ -453,18 +474,25 @@ def _fit_or_load_raw_direct_input_pca(metadata_csv: Path, cfg: Config, n_compone
         "n_skipped": int(skipped),
         "input_width": int(len(ref_mz_axis)),
         "n_components": int(getattr(ipca, "n_components_", n_components)),
+        "fit_scope": "train_only" if fit_indices is not None else "all",
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "cache_model_path": str(model_path),
-        "cache_ref_mz_axis_path": str(ref_axis_path),
+        "cache_model_path": str(model_path) if fit_indices is None else "",
+        "cache_ref_mz_axis_path": str(ref_axis_path) if fit_indices is None else "",
     }
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
+    if fit_indices is None:
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
 
     return ipca, ref_mz_axis.astype(np.float32), meta, False, model_path
 
 
-def _precompute_input_pca_tensors(metadata_csv: Path, cfg: Config):
-    """对原始 RT×m/z 数据做 PCA 并直接落盘 (不走栅格化 bins)。"""
+def _precompute_input_pca_tensors(metadata_csv: Path, cfg: Config, fit_indices=None):
+    """
+    对原始 RT×m/z 数据做 PCA 并直接落盘 (不走栅格化 bins)。
+
+    fit_indices: 若提供, 则仅用这些行索引拟合 PCA (防止数据泄漏)。
+                 所有样本仍会被转换。
+    """
     if not bool(getattr(cfg, "input_raw_pca_enabled", False)):
         return None
 
@@ -483,6 +511,7 @@ def _precompute_input_pca_tensors(metadata_csv: Path, cfg: Config):
         metadata_csv=Path(metadata_csv),
         cfg=cfg,
         n_components=n_comp,
+        fit_indices=fit_indices,
     )
 
     n_comp_real = int(getattr(pca_model, "n_components_", n_comp))
@@ -551,8 +580,13 @@ def _build_tensor_paths(metadata: pd.DataFrame, tensor_dir: Path, cfg: Config):
     return tensor_paths
 
 
-def _convert_all_raw_direct_pca(metadata: pd.DataFrame, out_dir: Path, cfg: Config):
-    """主路径：不做 bins，直接原始矩阵 PCA 后落盘。"""
+def _convert_all_raw_direct_pca(metadata: pd.DataFrame, out_dir: Path, cfg: Config,
+                                  fit_indices=None):
+    """
+    主路径：不做 bins，直接原始矩阵 PCA 后落盘。
+
+    fit_indices: 若提供, 则仅用这些行索引拟合 PCA (防止数据泄漏)。
+    """
     tensor_dir = out_dir / "tensors"
     tensor_dir.mkdir(parents=True, exist_ok=True)
 
@@ -562,11 +596,13 @@ def _convert_all_raw_direct_pca(metadata: pd.DataFrame, out_dir: Path, cfg: Conf
     meta_path = out_dir / "metadata.csv"
     metadata.to_csv(meta_path, index=False, encoding="utf-8-sig")
 
+    scope_tag = "train_only" if fit_indices is not None else "all"
     print(
         "\n[Prepare] 使用原始 RT×m/z 直读 PCA 流程(不做栅格化 bins): "
-        f"samples={len(metadata)}, rt_target={cfg.rt_bins}, pca_components={cfg.input_raw_pca_components}"
+        f"samples={len(metadata)}, rt_target={cfg.rt_bins}, pca_components={cfg.input_raw_pca_components}, "
+        f"fit_scope={scope_tag}"
     )
-    pca_prepare_info = _precompute_input_pca_tensors(meta_path, cfg)
+    pca_prepare_info = _precompute_input_pca_tensors(meta_path, cfg, fit_indices=fit_indices)
 
     info = {
         "rt_bins": int(cfg.rt_bins),
@@ -579,8 +615,9 @@ def _convert_all_raw_direct_pca(metadata: pd.DataFrame, out_dir: Path, cfg: Conf
         "plot_dir": "",
         "tables_saved": False,
         "table_dir": "",
-        "prepare_mode": "raw_rt_mz_direct_pca",
-        "input_pca_source": "raw_rt_mz_no_bins",
+        "prepare_mode": "raw_rt_mz_direct_pca_train_only" if fit_indices is not None else "raw_rt_mz_direct_pca",
+        "input_pca_source": "raw_rt_mz_no_bins_train_only" if fit_indices is not None else "raw_rt_mz_no_bins",
+        "input_pca_fit_scope": "train_only" if fit_indices is not None else "all",
     }
 
     if pca_prepare_info is not None:
@@ -607,14 +644,19 @@ def _convert_all_raw_direct_pca(metadata: pd.DataFrame, out_dir: Path, cfg: Conf
     return metadata
 
 
-def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config):
-    """逐样本读取 .D 并生成 .npz 张量。"""
+def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config, fit_indices=None):
+    """
+    逐样本读取 .D 并生成 .npz 张量。
+
+    fit_indices: 若提供, 则仅用这些行索引拟合 PCA (防止数据泄漏)。
+                 仅在 prepare_direct_raw_pca 路径生效。
+    """
     out_dir = Path(out_dir)
 
     if bool(getattr(cfg, "prepare_direct_raw_pca", True)) and bool(
         getattr(cfg, "input_raw_pca_enabled", False)
     ):
-        return _convert_all_raw_direct_pca(metadata, out_dir, cfg)
+        return _convert_all_raw_direct_pca(metadata, out_dir, cfg, fit_indices=fit_indices)
 
     tensor_dir = out_dir / "tensors"
     tensor_dir.mkdir(parents=True, exist_ok=True)

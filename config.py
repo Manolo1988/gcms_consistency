@@ -50,14 +50,14 @@ class Config:
         Path(__file__).resolve().parent / "outputs"
     )
     prepared_dir: str = str(
-        Path(__file__).resolve().parent / "prepared_data"
+        Path(__file__).resolve().parent / "new_prepared_data"
     )
 
     # ── RT × m/z 网格 ────────────────────────────────────
     rt_bins: int = 1024
     mz_bins: int = 256
     rt_range: Optional[tuple] = (0.0, 40.0)
-    mz_range: tuple = (0.0, 200.0)
+    mz_range: tuple = (0.0, 550.0)
     log_transform: bool = True
     rt_range_percentiles: tuple = (1.0, 99.5)
     mz_range_percentiles: tuple = (1.0, 99.0)
@@ -86,7 +86,7 @@ class Config:
     # ── 主算法选择 (默认回到 README 主模型) ─────────────────
     primary_model: str = "deep_consistency"   # deep_consistency / raw_pca_mlp
     input_raw_pca_enabled: bool = True         # 仅 deep_consistency: raw -> PCA -> model
-    input_raw_pca_components: int = 128
+    input_raw_pca_components: int = 256
     raw_pca_components: int = 128
     raw_pca_hidden: str = "128,64"
     raw_pca_max_iter: int = 300
@@ -154,8 +154,8 @@ class Config:
     holdout_product_min_batches: int = 8      # 留出产品的最少批次覆盖
     holdout_batch_min_samples: int = 60       # 留出批次的最少样本数(已知类)
     holdout_batch_min_classes: int = 5        # 留出批次最少覆盖的已知产品数
-    preferred_holdout_products: Tuple[str, ...] = ()
-    preferred_holdout_batches: Tuple[str, ...] = ()
+    preferred_holdout_products: Tuple[str, ...] = ("HMD", "XCJ")
+    preferred_holdout_batches: Tuple[str, ...] = ("20250905", "20250912", "20250920")
     val_ratio: float = 0.1                    # train_batches 内伪验证批次比例
 
     # ── 数据增强 ──────────────────────────────────────────

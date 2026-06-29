@@ -759,7 +759,7 @@ def train_single_model(cfg: Config):
             "num_products": int(ds_train.num_products),
             "input_raw_pca_enabled": pca_enabled,
             "input_raw_pca_precomputed": pca_precomputed,
-            "input_raw_pca_components": int(getattr(cfg, "input_raw_pca_components", cfg.mz_bins)),
+            "input_raw_pca_components": int(cfg.mz_bins),
             "input_raw_pca_rt_bins": int(getattr(cfg, "rt_bins", 0)),
         }, f, indent=2)
 
