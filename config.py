@@ -47,7 +47,7 @@ class Config:
         Path(__file__).resolve().parent / "dataset"
     )
     output_dir: str = str(
-        Path(__file__).resolve().parent / "outputs"
+        Path(__file__).resolve().parent / "new_outputs"
     )
     prepared_dir: str = str(
         Path(__file__).resolve().parent / "new_prepared_data"
@@ -97,8 +97,8 @@ class Config:
     raw_fewshot_c_3shot: float = 2.0
 
     # ── 训练 (单阶段) ──────────────────────────────────────
-    epochs: int = 200
-    batch_size: int = 8
+    epochs: int = 30
+    batch_size: int = 32
     lr: float = 3e-4
     weight_decay: float = 1e-4
     eval_interval: int = 10                # 兼容开关: 未启用分阶段验证时使用
@@ -124,7 +124,7 @@ class Config:
     # L = L_supcon + λ₁·L_adv + λ₂·L_proto + λ_recon·L_recon
     # 无 softmax 分类损失: 类别数不写入网络权重, 支持注册即用
     lambda_supcon: float = 1.0                # 监督对比损失 (类间可分)
-    lambda_adv: float = 0.1                   # λ₁ 批次对抗 (去批次)
+    lambda_adv: float = 0.03               # λ₁ 批次对抗 (去批次)
     lambda_proto: float = 0.5                 # λ₂ 原型紧凑 (类内紧凑)
     lambda_recon: float = 0.2                 # 重建正则
     supcon_temperature: float = 0.07          # SupCon 温度参数
