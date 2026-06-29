@@ -413,11 +413,16 @@ def _fit_or_load_raw_direct_input_pca(metadata_csv: Path, cfg: Config, n_compone
         raise RuntimeError("metadata 为空，无法拟合 PCA")
 
     # 如果指定了 fit_indices, 仅保留这些行用于 PCA 拟合
+    # fit_indices 是过滤后 reset 的位置索引, 需要先过滤+reset 再选取
     if fit_indices is not None:
+        # 与 GCMSDataset / create_data_split 保持一致的过滤逻辑
+        filtered_df = meta_df[
+            (meta_df["product_fine"] != "BLANK") & (~meta_df["is_special"])
+        ].reset_index(drop=True)
         fit_set = set(fit_indices)
-        pca_meta_df = meta_df[meta_df.index.isin(fit_set)]
+        pca_meta_df = filtered_df.iloc[list(fit_set)]
         print(
-            f"  [Input PCA] 仅用 {len(pca_meta_df)}/{len(meta_df)} 个样本拟合 PCA"
+            f"  [Input PCA] 仅用 {len(pca_meta_df)}/{len(filtered_df)} 个样本拟合 PCA"
             f" (fit_indices 已指定)"
         )
     else:

@@ -192,6 +192,7 @@ def _load_and_filter(metadata_csv, exclude_blanks=True, exclude_special=True):
         df = df[df["product_fine"] != "BLANK"]
     if exclude_special:
         df = df[~df["is_special"]]
+    df = df.reset_index(drop=True)  # 统一坐标: 过滤后位置索引 0..N-1
     return df.reset_index(drop=True)
 
 

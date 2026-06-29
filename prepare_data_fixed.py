@@ -124,6 +124,7 @@ def _create_data_split(metadata_csv, cfg, product_col="product_fine"):
     """
     rng = np.random.RandomState(cfg.seed)
     df = _load_and_filter(metadata_csv)
+    df = df.reset_index(drop=True)  # 统一使用过滤后的位置索引 (0..2803)
 
     # ── 1. 排除样本过少/批次覆盖不足的产品 ──
     product_counts = df[product_col].value_counts()
@@ -385,13 +386,14 @@ def fit_pca_on_train_only(metadata_csv: str, train_idx: list, cfg: Config):
     n_comp = int(getattr(cfg, "input_raw_pca_components", 256))
     full_df = pd.read_csv(metadata_csv)
 
-    # 与 _load_and_filter 保持一致的过滤逻辑
+    # 与 GCMSDataset / _create_data_split 一致: 过滤后 reset_index
     filtered_df = full_df[
         (full_df["product_fine"] != "BLANK") & (~full_df["is_special"])
-    ]
+    ].reset_index(drop=True)
 
+    # train_idx 现在是过滤后 reset 的位置索引 (0..2803)
     train_set = set(train_idx)
-    train_samples = filtered_df[filtered_df.index.isin(train_set)]
+    train_samples = filtered_df.iloc[list(train_set)]
     print(f"  PCA 拟合样本数: {len(train_samples)} / {len(filtered_df)} (过滤后总样本)")
 
     if len(train_samples) == 0:
