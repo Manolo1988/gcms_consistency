@@ -133,7 +133,7 @@ class Config:
     # ── 一致性与原型 ─────────────────────────────────────
     accept_percentile: float = 95.0           # 一致性径阈值百分位
     reject_threshold_factor: float = 2.0      # 拒识: dist > factor * radius
-    use_spherical_prototypes: bool = True     # 是否将原型重分布到单位超球面 (ablation 时可关)
+    use_spherical_prototypes: bool = False    # 关闭球面重分布 (ablation 对照)
 
     # ── 增量注册微调 ─────────────────────────────────────
     finetune_epochs: int = 20                 # 微调轮数

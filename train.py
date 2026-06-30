@@ -374,15 +374,35 @@ def validate_with_prototypes(model, train_loader_noaug, val_loader,
     if not np.isnan(auroc_correct):
         val_metric = val_acc + 0.05 * auroc_correct
 
-    # ── Per-class confusion ──
+    # ── Per-class accuracy + confusion matrix ──
     per_class_acc = {}
     all_labels_arr = np.array(all_val_labels)
     all_preds_arr = np.array(all_val_preds)
+    # Use ALL proto classes for confusion matrix (model may predict classes absent from val)
+    all_class_names = sorted(proto_store.prototypes.keys())
+    all_class_indices = sorted(proto_store.class_names)
+    n_classes = len(all_class_indices)
+    label_to_idx = {lbl: i for i, lbl in enumerate(all_class_indices)}
+    conf_mat = np.zeros((n_classes, n_classes), dtype=int)
     for lbl in np.unique(all_labels_arr):
         mask = all_labels_arr == lbl
         per_class_acc[label_names.get(lbl, str(lbl))] = float(
             (all_preds_arr[mask] == lbl).mean()
         )
+    for t, p in zip(all_labels_arr, all_preds_arr):
+        ti = label_to_idx.get(int(t), -1)
+        pi = label_to_idx.get(int(p), -1)
+        if ti >= 0 and pi >= 0:
+            conf_mat[ti, pi] += 1
+    # Build readable confusion string
+    class_names_short = [str(c)[:5] for c in all_class_names]
+    conf_lines = ["confusion (row=true, col=pred):"]
+    header = f"{'':>6s} " + " ".join(f"{n:>5s}" for n in class_names_short)
+    conf_lines.append(header)
+    for i, name in enumerate(all_class_names):
+        row_str = " ".join(f"{conf_mat[i,j]:5d}" for j in range(n_classes))
+        conf_lines.append(f"{str(name)[:6]:>6s} [{row_str}]")
+    conf_str = "\n       ".join(conf_lines)
 
     # ── Prototype radii (use store.radii for raw, store.spherical_radii for spherical) ──
     radii = {}
@@ -401,6 +421,7 @@ def validate_with_prototypes(model, train_loader_noaug, val_loader,
         "train_proto_acc": float(train_proto_acc),
         "per_class_acc": per_class_acc,
         "radii": radii,
+        "confusion": conf_str,
     }, proto_store
 
 
@@ -522,6 +543,7 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
             train_pa = float(val_m.get("train_proto_acc", float("nan")))
             pa = val_m.get("per_class_acc", {})
             radii = val_m.get("radii", {})
+            confusion = val_m.get("confusion", "")
             pa_str = " ".join(f"{k}={v:.2f}" for k, v in sorted(pa.items()))
             radii_str = " ".join(
                 f"{k}=raw{r.get('raw',float('nan')):.3f}/sph{r.get('sph',float('nan')):.3f}"
@@ -534,6 +556,7 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
                 f"proto={'full' if use_full_proto else 'subset'})"
                 f"\n       per_class: {pa_str}"
                 f"\n       radii:     {radii_str}"
+                f"\n       {confusion}"
             )
 
             # 规则: 前N轮若显著落后于当前最佳方案, 直接淘汰该策略
@@ -738,6 +761,7 @@ def train_single_model(cfg: Config):
             train_pa = float(val_m.get("train_proto_acc", float("nan")))
             pa = val_m.get("per_class_acc", {})
             radii = val_m.get("radii", {})
+            confusion = val_m.get("confusion", "")
             pa_str = " ".join(f"{k}={v:.2f}" for k, v in sorted(pa.items()))
             radii_str = " ".join(
                 f"{k}=raw{r.get('raw',float('nan')):.3f}/sph{r.get('sph',float('nan')):.3f}"
@@ -750,6 +774,7 @@ def train_single_model(cfg: Config):
                 f"proto={'full' if use_full_proto else 'subset'})"
                 f"\n       per_class: {pa_str}"
                 f"\n       radii:     {radii_str}"
+                f"\n       {confusion}"
             )
 
             # 规则: 前N轮若显著落后于当前最佳方案, 直接淘汰该策略
