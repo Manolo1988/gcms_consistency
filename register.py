@@ -403,11 +403,12 @@ def compute_prototypes(model, dataloader, device, percentile=95.0):
 
 
 def register_from_loader(model, dataloader, label_names, device,
-                         percentile=95.0):
+                         percentile=95.0, use_spherical=True):
     """
     从 DataLoader 注册所有类原型。
 
     label_names: dict[int -> str] 标签索引到名称的映射
+    use_spherical: 是否调用 redistribute_on_sphere 做球面重分布
     """
     all_z, all_labels, unique_labels, store = compute_prototypes(
         model, dataloader, device, percentile
@@ -418,8 +419,8 @@ def register_from_loader(model, dataloader, label_names, device,
         name = label_names.get(lbl, str(lbl))
         store.register(name, all_z[mask], percentile=percentile)
 
-    # 球面原型调整: 均匀分布在单位超球面上
-    store.redistribute_on_sphere()
+    if use_spherical:
+        store.redistribute_on_sphere()
 
     return store, all_z, all_labels
 

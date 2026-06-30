@@ -110,10 +110,10 @@ class Config:
     min_epoch_ratio_before_early_stop: float = 0.6  # 早停前最少训练比例
     early_stop_min_lr_ratio: float = 0.2   # 仅当 lr <= 初始lr*ratio 才允许早停
     early_stop_min_delta: float = 5e-4     # 判定“有提升”的最小 metric 增量
-    proto_val_subset_ratio: float = 0.35   # 训练中期验证: 原型构建使用训练子集比例
+    proto_val_subset_ratio: float = 1.0    # 训练中期验证: 原型构建使用全部训练集 (ablation 强制 full)
     proto_val_subset_min_samples: int = 256
     proto_val_subset_max_samples: int = 1024
-    proto_val_full_every: int = 3          # 每隔 N 次验证做一次全量原型验证
+    proto_val_full_every: int = 1          # 每个验证周期都用全量原型 (大于 proto_val_subset_ratio 间隔则为全量)
     warmup_guard_enabled: bool = False     # 前N轮与最佳方案对比淘汰
     warmup_guard_epoch: int = 10           # 对比轮次 (默认第10轮)
     warmup_guard_best_at_epoch: float = 0.0  # 最佳方案在该轮的val_acc参考
@@ -124,15 +124,16 @@ class Config:
     # L = L_supcon + λ₁·L_adv + λ₂·L_proto + λ_recon·L_recon
     # 无 softmax 分类损失: 类别数不写入网络权重, 支持注册即用
     lambda_supcon: float = 1.0                # 监督对比损失 (类间可分)
-    lambda_adv: float = 0.03               # λ₁ 批次对抗 (去批次)
-    lambda_proto: float = 0.5                 # λ₂ 原型紧凑 (类内紧凑)
+    lambda_adv: float = 0.0                   # λ₁ 批次对抗 (去批次) — ablation 关闭
+    lambda_proto: float = 1.0                 # λ₂ 原型紧凑 (类内紧凑)
     lambda_recon: float = 0.2                 # 重建正则
-    supcon_temperature: float = 0.07          # SupCon 温度参数
-    proto_margin: float = 1.0                 # 原型损失推斥间距
+    supcon_temperature: float = 0.10          # SupCon 温度参数
+    proto_margin: float = 1.5                 # 原型损失推斥间距
 
     # ── 一致性与原型 ─────────────────────────────────────
     accept_percentile: float = 95.0           # 一致性径阈值百分位
     reject_threshold_factor: float = 2.0      # 拒识: dist > factor * radius
+    use_spherical_prototypes: bool = True     # 是否将原型重分布到单位超球面 (ablation 时可关)
 
     # ── 增量注册微调 ─────────────────────────────────────
     finetune_epochs: int = 20                 # 微调轮数

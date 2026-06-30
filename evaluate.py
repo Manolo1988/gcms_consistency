@@ -88,7 +88,7 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
     ):
         x = batch["input"].to(device)
         z = model.encode(x)
-        result = proto_store.predict(z)
+        result = proto_store.predict(z, use_spherical=False)
 
         for i in range(x.size(0)):
             pred_idx = result["pred_idx"][i].item()

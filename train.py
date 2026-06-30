@@ -325,12 +325,23 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch,
 @torch.no_grad()
 def validate_with_prototypes(model, train_loader_noaug, val_loader,
                               label_names, device, cfg):
-    """构建训练集原型，在验证集上做原型匹配评估。"""
+    """构建训练集原型，在验证集和训练集上做原型匹配评估。"""
     model.eval()
-    proto_store, _, _ = register_from_loader(
+    proto_store, train_z, train_labels = register_from_loader(
         model, train_loader_noaug, label_names, device,
-        percentile=cfg.accept_percentile)
+        percentile=cfg.accept_percentile,
+        use_spherical=getattr(cfg, "use_spherical_prototypes", True))
 
+    # ── 训练集自检: train_proto_acc ──
+    train_preds = proto_store.predict(train_z, use_spherical=False)["pred_idx"].cpu().numpy()
+    train_labels_np = train_labels.cpu().numpy()
+    train_correct = (train_preds == train_labels_np).sum()
+    train_total = len(train_labels_np)
+    train_proto_acc = float(train_correct) / max(train_total, 1)
+
+    # ── 验证集评估 ──
+    all_val_preds = []
+    all_val_labels = []
     correct, total = 0, 0
     correct_flags = []
     score_vals = []
@@ -343,27 +354,53 @@ def validate_with_prototypes(model, train_loader_noaug, val_loader,
     ):
         x = batch["input"].to(device)
         z = model.encode(x)
-        result = proto_store.predict(z)
-        corr = (result["pred_idx"].cpu() == batch["product"])
+        result = proto_store.predict(z, use_spherical=False)
+        preds = result["pred_idx"].cpu()
+        labels = batch["product"]
+        corr = (preds == labels)
         correct += corr.sum().item()
-        total += len(batch["product"])
+        total += len(labels)
         correct_flags.extend(corr.numpy().astype(int).tolist())
         score_vals.extend(result["scores"].detach().cpu().numpy().tolist())
+        all_val_preds.extend(preds.numpy().tolist())
+        all_val_labels.extend(labels.numpy().tolist())
 
     val_acc = correct / max(total, 1)
     auroc_correct = float("nan")
     if len(set(correct_flags)) > 1:
         auroc_correct = float(roc_auc_score(correct_flags, score_vals))
 
-    # 联合指标: 精度为主, 分数可分性为辅
     val_metric = val_acc
     if not np.isnan(auroc_correct):
         val_metric = val_acc + 0.05 * auroc_correct
+
+    # ── Per-class confusion ──
+    per_class_acc = {}
+    all_labels_arr = np.array(all_val_labels)
+    all_preds_arr = np.array(all_val_preds)
+    for lbl in np.unique(all_labels_arr):
+        mask = all_labels_arr == lbl
+        per_class_acc[label_names.get(lbl, str(lbl))] = float(
+            (all_preds_arr[mask] == lbl).mean()
+        )
+
+    # ── Prototype radii (use store.radii for raw, store.spherical_radii for spherical) ──
+    radii = {}
+    raw_radii = getattr(proto_store, "radii", {})
+    sph_radii = getattr(proto_store, "spherical_radii", {})
+    for name in proto_store.prototypes:
+        radii[name] = {
+            "raw": float(raw_radii.get(name, float("nan"))),
+            "sph": float(sph_radii.get(name, float("nan"))),
+        }
 
     return {
         "acc": float(val_acc),
         "auroc_correct": float(auroc_correct),
         "metric": float(val_metric),
+        "train_proto_acc": float(train_proto_acc),
+        "per_class_acc": per_class_acc,
+        "radii": radii,
     }, proto_store
 
 
@@ -482,10 +519,21 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
                 no_improve_checks = 0
             else:
                 no_improve_checks += 1
+            train_pa = float(val_m.get("train_proto_acc", float("nan")))
+            pa = val_m.get("per_class_acc", {})
+            radii = val_m.get("radii", {})
+            pa_str = " ".join(f"{k}={v:.2f}" for k, v in sorted(pa.items()))
+            radii_str = " ".join(
+                f"{k}=raw{r.get('raw',float('nan')):.3f}/sph{r.get('sph',float('nan')):.3f}"
+                for k, r in sorted(radii.items())
+            )
             print(
-                f"    -> val_acc={val_acc:.3f}, val_auroc={val_auroc:.3f}, "
-                f"val_metric={val_metric:.3f} (best_metric={best_metric:.3f}, "
-                f"proto_scope={'full' if use_full_proto else 'subset'})"
+                f"    -> val_acc={val_acc:.3f}, train_pa={train_pa:.3f}, "
+                f"val_auroc={val_auroc:.3f}, "
+                f"val_metric={val_metric:.3f} (best={best_metric:.3f}, "
+                f"proto={'full' if use_full_proto else 'subset'})"
+                f"\n       per_class: {pa_str}"
+                f"\n       radii:     {radii_str}"
             )
 
             # 规则: 前N轮若显著落后于当前最佳方案, 直接淘汰该策略
@@ -687,10 +735,21 @@ def train_single_model(cfg: Config):
                 no_improve_checks = 0
             else:
                 no_improve_checks += 1
+            train_pa = float(val_m.get("train_proto_acc", float("nan")))
+            pa = val_m.get("per_class_acc", {})
+            radii = val_m.get("radii", {})
+            pa_str = " ".join(f"{k}={v:.2f}" for k, v in sorted(pa.items()))
+            radii_str = " ".join(
+                f"{k}=raw{r.get('raw',float('nan')):.3f}/sph{r.get('sph',float('nan')):.3f}"
+                for k, r in sorted(radii.items())
+            )
             print(
-                f"    -> val_acc={val_acc:.3f}, val_auroc={val_auroc:.3f}, "
-                f"val_metric={val_metric:.3f} (best_metric={best_metric:.3f}, "
-                f"proto_scope={'full' if use_full_proto else 'subset'})"
+                f"    -> val_acc={val_acc:.3f}, train_pa={train_pa:.3f}, "
+                f"val_auroc={val_auroc:.3f}, "
+                f"val_metric={val_metric:.3f} (best={best_metric:.3f}, "
+                f"proto={'full' if use_full_proto else 'subset'})"
+                f"\n       per_class: {pa_str}"
+                f"\n       radii:     {radii_str}"
             )
 
             # 规则: 前N轮若显著落后于当前最佳方案, 直接淘汰该策略
@@ -737,7 +796,8 @@ def train_single_model(cfg: Config):
     # ── 注册最终原型 ──
     proto_store, all_z, all_labels = register_from_loader(
         model, loader_train_noaug, label_names, device,
-        percentile=cfg.accept_percentile)
+        percentile=cfg.accept_percentile,
+        use_spherical=getattr(cfg, "use_spherical_prototypes", True))
     proto_store.summary()
 
     # ── 保存 ──
