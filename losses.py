@@ -117,8 +117,8 @@ class BatchPrototypeLoss(nn.Module):
 
 class UnifiedLoss(nn.Module):
     """
-    单阶段统一损失 (无 softmax 分类):
-      L = L_supcon + λ₁·L_adv + λ₂·L_proto + λ_recon·L_recon
+    统一损失:
+      L = L_supcon + λ₁·L_adv + λ_cls·L_cls + λ₂·L_proto + λ_recon·L_recon
     """
 
     def __init__(self, cfg):
@@ -126,10 +126,12 @@ class UnifiedLoss(nn.Module):
         self.supcon_loss = SupConLoss(temperature=cfg.supcon_temperature)
         self.proto_loss = BatchPrototypeLoss(margin=cfg.proto_margin)
         self.domain_loss = nn.CrossEntropyLoss()
+        self.cls_loss = nn.CrossEntropyLoss()
         self.recon_loss = nn.MSELoss()
 
         self.lam_supcon = cfg.lambda_supcon
         self.lam_adv = cfg.lambda_adv
+        self.lam_cls = getattr(cfg, "lambda_cls", 0.0)
         self.lam_proto = cfg.lambda_proto
         self.lam_recon = cfg.lambda_recon
 
@@ -143,6 +145,11 @@ class UnifiedLoss(nn.Module):
         # 批次对抗损失 (GRL, 去批次)
         l_adv = self.domain_loss(model_out["domain_logits"], batch_labels)
 
+        # CE 分类辅助损失 (加速产品判别)
+        l_cls = torch.tensor(0.0, device=labels.device)
+        if model_out.get("cls_logits") is not None:
+            l_cls = self.cls_loss(model_out["cls_logits"], labels)
+
         # 原型距离损失 (在嵌入空间, 类内紧凑)
         l_proto = self.proto_loss(model_out["z"], labels)
 
@@ -151,11 +158,12 @@ class UnifiedLoss(nn.Module):
 
         total = (self.lam_supcon * l_supcon
                  + self.lam_adv * l_adv
+                 + self.lam_cls * l_cls
                  + self.lam_proto * l_proto
                  + self.lam_recon * l_recon)
 
         return {
-            "supcon": l_supcon, "adv": l_adv,
+            "supcon": l_supcon, "adv": l_adv, "cls": l_cls,
             "proto": l_proto, "recon": l_recon,
             "total": total,
         }

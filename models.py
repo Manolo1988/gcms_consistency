@@ -560,7 +560,7 @@ class GCMSConsistencyNet(nn.Module):
       无 softmax 分类头: 类别数不写入网络权重, 支持注册即用
     """
 
-    def __init__(self, num_batches, cfg):
+    def __init__(self, num_batches, cfg, num_products=None):
         super().__init__()
         self.embed_normalize = cfg.embed_normalize
 
@@ -605,6 +605,8 @@ class GCMSConsistencyNet(nn.Module):
         self.proj_head = ProjectionHead(dim, cfg.proj_dim)
         # 批次对抗头: 梯度反转消除批次信息 (训练后丢弃)
         self.domain_head = DomainHead(dim, num_batches)
+        # CE 分类辅助头 (加速产品判别学习, 训练后丢弃)
+        self.cls_head = nn.Linear(dim, num_products) if num_products else None
         # 重建解码器 (正则项)
         self.decoder = ReconDecoder(
             feat_map_dim, cfg.in_channels, cfg.rt_bins, cfg.mz_bins
@@ -621,6 +623,7 @@ class GCMSConsistencyNet(nn.Module):
 
         proj = self.proj_head(z_raw)
         domain_logits = self.domain_head(z_raw)
+        cls_logits = self.cls_head(z_raw) if self.cls_head is not None else None
         recon = self.decoder(feat_map)
 
         out = {
@@ -628,6 +631,7 @@ class GCMSConsistencyNet(nn.Module):
             "z_raw": z_raw,
             "proj": proj,
             "domain_logits": domain_logits,
+            "cls_logits": cls_logits,
             "recon": recon,
         }
         if return_feat_map:

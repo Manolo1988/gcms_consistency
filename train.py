@@ -456,7 +456,7 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
         f"prefetch_factor={int(getattr(cfg, 'dataloader_prefetch_factor', 2) or 2)}"
     )
 
-    model = GCMSConsistencyNet(num_batches, cfg).to(device)
+    model = GCMSConsistencyNet(num_batches, cfg, num_products=ds_train.num_products).to(device)
     criterion = UnifiedLoss(cfg).to(device)
 
     # 无增强训练集 (原型计算用)
@@ -502,6 +502,7 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
         # 关闭 tqdm 时仍保留每轮可观测日志，避免看起来像“卡住”
         print(f"  Epoch {epoch+1}/{cfg.epochs}  "
               f"supcon={m_train.get('supcon',0):.3f} "
+              f"cls={m_train.get('cls',0):.3f} "
               f"adv={m_train.get('adv',0):.3f} "
               f"proto={m_train.get('proto',0):.3f} "
               f"total={m_train.get('total',0):.3f}")
@@ -677,7 +678,7 @@ def train_single_model(cfg: Config):
         f"prefetch_factor={int(getattr(cfg, 'dataloader_prefetch_factor', 2) or 2)}"
     )
 
-    model = GCMSConsistencyNet(num_batches, cfg).to(device)
+    model = GCMSConsistencyNet(num_batches, cfg, num_products=ds_train.num_products).to(device)
     criterion = UnifiedLoss(cfg).to(device)
 
     # 无增强训练集 (原型计算用)
@@ -721,6 +722,7 @@ def train_single_model(cfg: Config):
         # 关闭 tqdm 时仍保留每轮可观测日志，避免看起来像“卡住”
         print(f"  Epoch {epoch+1}/{cfg.epochs}  "
               f"supcon={m_train.get('supcon',0):.3f} "
+              f"cls={m_train.get('cls',0):.3f} "
               f"adv={m_train.get('adv',0):.3f} "
               f"proto={m_train.get('proto',0):.3f} "
               f"total={m_train.get('total',0):.3f}")

@@ -938,6 +938,7 @@ def evaluate_single_model(cfg):
         with open(meta_path) as f:
             train_meta = json.load(f)
         num_batches_model = train_meta["num_batches"]
+        num_products_model = train_meta.get("num_products", None)
         if bool(train_meta.get("input_raw_pca_enabled", False)):
             cfg.mz_bins = int(train_meta.get("input_raw_pca_components", cfg.mz_bins))
         cfg.rt_bins = int(train_meta.get("input_raw_pca_rt_bins", cfg.rt_bins))
@@ -946,8 +947,9 @@ def evaluate_single_model(cfg):
         sd = torch.load(model_dir / "model.pt", map_location="cpu",
                         weights_only=True)
         num_batches_model = sd["domain_head.fc.2.weight"].shape[0]
+        num_products_model = None
 
-    model = GCMSConsistencyNet(num_batches_model, cfg).to(device)
+    model = GCMSConsistencyNet(num_batches_model, cfg, num_products=num_products_model).to(device)
     model.load_state_dict(torch.load(
         model_dir / "model.pt", map_location=device, weights_only=True))
 

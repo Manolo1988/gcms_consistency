@@ -97,7 +97,7 @@ class Config:
     raw_fewshot_c_3shot: float = 2.0
 
     # ── 训练 (单阶段) ──────────────────────────────────────
-    epochs: int = 30
+    epochs: int = 120
     batch_size: int = 32
     lr: float = 3e-4
     weight_decay: float = 1e-4
@@ -127,13 +127,14 @@ class Config:
     lambda_adv: float = 0.0                   # λ₁ 批次对抗 (去批次) — ablation 关闭
     lambda_proto: float = 1.0                 # λ₂ 原型紧凑 (类内紧凑)
     lambda_recon: float = 0.2                 # 重建正则
+    lambda_cls: float = 0.5                   # CE 分类辅助头权重 (加速产品判别学习)
     supcon_temperature: float = 0.10          # SupCon 温度参数
     proto_margin: float = 1.5                 # 原型损失推斥间距
 
     # ── 一致性与原型 ─────────────────────────────────────
     accept_percentile: float = 95.0           # 一致性径阈值百分位
     reject_threshold_factor: float = 2.0      # 拒识: dist > factor * radius
-    use_spherical_prototypes: bool = False    # 关闭球面重分布 (ablation 对照)
+    use_spherical_prototypes: bool = True     # 球面重分布平衡各类半径 (分类/注册必须)
 
     # ── 增量注册微调 ─────────────────────────────────────
     finetune_epochs: int = 20                 # 微调轮数
