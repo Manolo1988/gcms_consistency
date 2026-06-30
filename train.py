@@ -106,6 +106,74 @@ def _loader_runtime_kwargs(cfg, device):
     return kwargs
 
 
+def _cuda_amp_enabled(cfg, device):
+    return bool(
+        getattr(cfg, "amp_enabled", True)
+        and getattr(device, "type", "cpu") == "cuda"
+        and torch.cuda.is_available()
+    )
+
+
+def _amp_dtype(cfg):
+    dtype_name = str(getattr(cfg, "amp_dtype", "float16") or "float16").lower()
+    if dtype_name in {"bf16", "bfloat16"}:
+        return torch.bfloat16
+    return torch.float16
+
+
+def _channels_last_enabled(cfg, device):
+    return bool(
+        getattr(cfg, "channels_last", True)
+        and getattr(device, "type", "cpu") == "cuda"
+    )
+
+
+def _move_batch_to_device(batch, device, channels_last=False):
+    batch_dev = {}
+    for k, v in batch.items():
+        if torch.is_tensor(v):
+            v = v.to(device, non_blocking=True)
+            if k == "input" and channels_last and v.ndim == 4:
+                v = v.contiguous(memory_format=torch.channels_last)
+        batch_dev[k] = v
+    return batch_dev
+
+
+def _enable_cuda_fast_paths(cfg, device):
+    if getattr(device, "type", "cpu") != "cuda":
+        return
+    if bool(getattr(cfg, "cuda_benchmark", True)):
+        torch.backends.cudnn.benchmark = True
+    allow_tf32 = bool(getattr(cfg, "allow_tf32", True))
+    torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+    torch.backends.cudnn.allow_tf32 = allow_tf32
+    try:
+        torch.set_float32_matmul_precision("high" if allow_tf32 else "highest")
+    except Exception:
+        pass
+
+
+def _maybe_optimize_model(model, cfg, device):
+    if _channels_last_enabled(cfg, device):
+        model = model.to(memory_format=torch.channels_last)
+
+    if bool(getattr(cfg, "torch_compile", False)) and hasattr(torch, "compile"):
+        try:
+            model = torch.compile(model)
+            print("  torch.compile: enabled")
+        except Exception as exc:
+            print(f"  torch.compile: disabled ({exc})")
+    return model
+
+
+def _model_state_dict_for_save(model):
+    return getattr(model, "_orig_mod", model).state_dict()
+
+
+def _load_model_state(model, state_dict):
+    getattr(model, "_orig_mod", model).load_state_dict(state_dict)
+
+
 def _build_proto_subset_loader(dataset, cfg, device):
     """训练中期验证: 仅用训练子集构原型, 降低验证成本。"""
     n_total = len(dataset)
@@ -282,9 +350,12 @@ def _build_balanced_sampler(dataset):
 
 
 def train_one_epoch(model, loader, criterion, optimizer, device, epoch,
-                    total_epochs):
+                    total_epochs, cfg=None, scaler=None):
     model.train()
     running = {}
+    amp_enabled = _cuda_amp_enabled(cfg, device) if cfg is not None else False
+    amp_dtype = _amp_dtype(cfg) if cfg is not None else torch.float16
+    channels_last = _channels_last_enabled(cfg, device) if cfg is not None else False
 
     # DANN alpha 渐进增大
     p = epoch / total_epochs
@@ -299,19 +370,29 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch,
         disable=not _progress_enabled(),
     )
     for batch in pbar:
-        x = batch["input"].to(device)
-        batch_dev = {k: v.to(device) if torch.is_tensor(v) else v
-                     for k, v in batch.items()}
-        batch_dev["input"] = x
+        batch_dev = _move_batch_to_device(
+            batch, device, channels_last=channels_last
+        )
+        x = batch_dev["input"]
 
-        out = model(x)
-        losses = criterion(out, batch_dev)
-        loss = losses["total"]
+        optimizer.zero_grad(set_to_none=True)
+        with torch.autocast(
+            device_type="cuda", dtype=amp_dtype, enabled=amp_enabled
+        ):
+            out = model(x)
+            losses = criterion(out, batch_dev)
+            loss = losses["total"]
 
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-        optimizer.step()
+        if amp_enabled and scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            optimizer.step()
 
         for k, v in losses.items():
             running[k] = running.get(k, 0.0) + v.item()
@@ -352,7 +433,9 @@ def validate_with_prototypes(model, train_loader_noaug, val_loader,
         ncols=80,
         disable=not _progress_enabled(),
     ):
-        x = batch["input"].to(device)
+        x = batch["input"].to(device, non_blocking=True)
+        if _channels_last_enabled(cfg, device) and x.ndim == 4:
+            x = x.contiguous(memory_format=torch.channels_last)
         z = model.encode(x)
         result = proto_store.predict(z, use_spherical=False)
         preds = result["pred_idx"].cpu()
@@ -457,8 +540,12 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
         f"prefetch_factor={int(getattr(cfg, 'dataloader_prefetch_factor', 2) or 2)}"
     )
 
+    _enable_cuda_fast_paths(cfg, device)
+
     model = GCMSConsistencyNet(num_batches, cfg, num_products=ds_train.num_products).to(device)
+    model = _maybe_optimize_model(model, cfg, device)
     criterion = UnifiedLoss(cfg).to(device)
+    criterion.set_label_names(ds_train.get_label_name_map())
 
     # 无增强训练集 (原型计算用)
     ds_train_noaug = GCMSDataset(metadata_csv, product_col=product_col,
@@ -487,6 +574,7 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=cfg.epochs
     )
+    scaler = torch.cuda.amp.GradScaler(enabled=_cuda_amp_enabled(cfg, device))
     early_stop_ctrl = _resolve_early_stop_controls(cfg, cfg.epochs, cfg.lr)
 
     best_acc = 0
@@ -497,7 +585,7 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
 
     for epoch in range(cfg.epochs):
         m_train = train_one_epoch(model, loader_train, criterion, optimizer,
-                                  device, epoch, cfg.epochs)
+                                  device, epoch, cfg.epochs, cfg=cfg, scaler=scaler)
         scheduler.step()
 
         # 关闭 tqdm 时仍保留每轮可观测日志，避免看起来像“卡住”
@@ -506,6 +594,7 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
               f"cls={m_train.get('cls',0):.3f} "
               f"adv={m_train.get('adv',0):.3f} "
               f"proto={m_train.get('proto',0):.3f} "
+              f"hardpair={m_train.get('hardpair',0):.3f} "
               f"total={m_train.get('total',0):.3f}")
 
         # 按配置间隔做原型验证；若启用前N轮淘汰，确保该轮次会触发验证
@@ -538,7 +627,7 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
                 best_metric = val_metric
                 best_acc = val_acc
                 best_state = {k: v.cpu().clone()
-                              for k, v in model.state_dict().items()}
+                              for k, v in _model_state_dict_for_save(model).items()}
                 no_improve_checks = 0
             else:
                 no_improve_checks += 1
@@ -600,7 +689,7 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
                 )
 
     if best_state is not None:
-        model.load_state_dict(best_state)
+        _load_model_state(model, best_state)
 
     # 注册最终原型
     proto_store, all_z, all_labels = register_from_loader(
@@ -612,7 +701,7 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
     # 保存
     fold_dir = Path(cfg.output_dir) / f"fold_{fold_idx}"
     fold_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), fold_dir / "model.pt")
+    torch.save(_model_state_dict_for_save(model), fold_dir / "model.pt")
     proto_store.save(fold_dir / "prototypes")
     with open(fold_dir / "product_classes.json", "w") as f:
         json.dump(list(ds_train.product_enc.classes_), f)
@@ -679,8 +768,12 @@ def train_single_model(cfg: Config):
         f"prefetch_factor={int(getattr(cfg, 'dataloader_prefetch_factor', 2) or 2)}"
     )
 
+    _enable_cuda_fast_paths(cfg, device)
+
     model = GCMSConsistencyNet(num_batches, cfg, num_products=ds_train.num_products).to(device)
+    model = _maybe_optimize_model(model, cfg, device)
     criterion = UnifiedLoss(cfg).to(device)
+    criterion.set_label_names(ds_train.get_label_name_map())
 
     # 无增强训练集 (原型计算用)
     ds_train_noaug = GCMSDataset(metadata_csv, product_col=product_col,
@@ -707,6 +800,7 @@ def train_single_model(cfg: Config):
                                   weight_decay=cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=cfg.epochs)
+    scaler = torch.cuda.amp.GradScaler(enabled=_cuda_amp_enabled(cfg, device))
     early_stop_ctrl = _resolve_early_stop_controls(cfg, cfg.epochs, cfg.lr)
 
     best_acc = 0
@@ -717,7 +811,7 @@ def train_single_model(cfg: Config):
 
     for epoch in range(cfg.epochs):
         m_train = train_one_epoch(model, loader_train, criterion, optimizer,
-                                  device, epoch, cfg.epochs)
+                                  device, epoch, cfg.epochs, cfg=cfg, scaler=scaler)
         scheduler.step()
 
         # 关闭 tqdm 时仍保留每轮可观测日志，避免看起来像“卡住”
@@ -726,6 +820,7 @@ def train_single_model(cfg: Config):
               f"cls={m_train.get('cls',0):.3f} "
               f"adv={m_train.get('adv',0):.3f} "
               f"proto={m_train.get('proto',0):.3f} "
+              f"hardpair={m_train.get('hardpair',0):.3f} "
               f"total={m_train.get('total',0):.3f}")
 
         epoch_num = epoch + 1
@@ -757,7 +852,7 @@ def train_single_model(cfg: Config):
                 best_metric = val_metric
                 best_acc = val_acc
                 best_state = {k: v.cpu().clone()
-                              for k, v in model.state_dict().items()}
+                              for k, v in _model_state_dict_for_save(model).items()}
                 no_improve_checks = 0
             else:
                 no_improve_checks += 1
@@ -819,7 +914,7 @@ def train_single_model(cfg: Config):
                 )
 
     if best_state is not None:
-        model.load_state_dict(best_state)
+        _load_model_state(model, best_state)
 
     # ── 注册最终原型 ──
     proto_store, all_z, all_labels = register_from_loader(
@@ -831,7 +926,7 @@ def train_single_model(cfg: Config):
     # ── 保存 ──
     model_dir = Path(cfg.output_dir) / "final_model"
     model_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), model_dir / "model.pt")
+    torch.save(_model_state_dict_for_save(model), model_dir / "model.pt")
     proto_store.save(model_dir / "prototypes")
     if input_pca_model is not None:
         from input_pca import save_rt_axis_pca

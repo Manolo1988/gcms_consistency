@@ -382,9 +382,21 @@ def compute_prototypes(model, dataloader, device, percentile=95.0):
     all_z = []
     all_labels = []
     all_sample_ids = []
+    use_channels_last = False
+    try:
+        first_param = next(model.parameters())
+        use_channels_last = (
+            first_param.is_cuda
+            and first_param.ndim == 4
+            and first_param.is_contiguous(memory_format=torch.channels_last)
+        )
+    except StopIteration:
+        pass
 
     for batch in dataloader:
-        x = batch["input"].to(device)
+        x = batch["input"].to(device, non_blocking=True)
+        if use_channels_last and x.ndim == 4:
+            x = x.contiguous(memory_format=torch.channels_last)
         z = model.encode(x)
         all_z.append(z.cpu())
         all_labels.append(batch["product"])

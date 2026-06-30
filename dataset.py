@@ -448,19 +448,50 @@ def create_data_split(metadata_csv, cfg, product_col="product_fine"):
     n_pseudo_batches = min(max(n_pseudo_batches, 1), max(len(train_batches) - 1, 1))
 
     preferred_pseudo = [
-        b for b in cfg.preferred_holdout_batches
+        b for b in getattr(cfg, "preferred_val_batches", ())
         if b in train_batches
     ]
     if len(preferred_pseudo) >= n_pseudo_batches:
         pseudo_holdout_batches = sorted(preferred_pseudo[:n_pseudo_batches])
     else:
+        hard_pair_names = getattr(cfg, "hard_pair_names", ())
+        hard_pair_products = sorted({
+            str(p)
+            for pair in hard_pair_names
+            for p in pair
+            if isinstance(pair, (list, tuple)) and len(pair) == 2
+        })
+        avoid_val_batches = {
+            str(b) for b in getattr(cfg, "avoid_val_batches", ())
+        }
+        max_product_frac = float(
+            getattr(cfg, "val_batch_max_product_frac", 1.0) or 1.0
+        )
+        min_pair_samples = int(
+            getattr(cfg, "val_batch_min_hard_pair_samples", 0) or 0
+        )
+
         batch_stats = []
         for b in train_batches:
             b_df = train_known_df[train_known_df["batch_name"] == b]
+            product_counts_b = b_df[product_col].value_counts()
+            max_frac = (
+                float(product_counts_b.max() / len(b_df))
+                if len(b_df) > 0 and len(product_counts_b) > 0 else 1.0
+            )
+            hard_pair_min = 0
+            if hard_pair_products:
+                hard_pair_min = min(
+                    int(product_counts_b.get(p, 0))
+                    for p in hard_pair_products
+                )
             batch_stats.append({
                 "batch_name": b,
                 "sample_count": int(len(b_df)),
                 "class_count": int(b_df[product_col].nunique()),
+                "max_product_frac": max_frac,
+                "hard_pair_min_count": hard_pair_min,
+                "avoid": b in avoid_val_batches,
             })
 
         min_samples = max(10, int(getattr(cfg, "holdout_batch_min_samples", 60) // 2))
@@ -469,12 +500,21 @@ def create_data_split(metadata_csv, cfg, product_col="product_fine"):
             s["batch_name"] for s in batch_stats
             if (s["sample_count"] >= min_samples)
             and (s["class_count"] >= min_classes)
+            and (not s["avoid"])
+            and (s["max_product_frac"] <= max_product_frac)
+            and (
+                (not hard_pair_products)
+                or (s["hard_pair_min_count"] >= min_pair_samples)
+            )
         ]
         if len(candidate_batches) < n_pseudo_batches:
             candidate_batches = [
                 s["batch_name"] for s in sorted(
                     batch_stats,
                     key=lambda x: (
+                        x["avoid"],
+                        x["max_product_frac"],
+                        -x["hard_pair_min_count"],
                         -x["class_count"],
                         -x["sample_count"],
                         x["batch_name"],
@@ -482,8 +522,17 @@ def create_data_split(metadata_csv, cfg, product_col="product_fine"):
                 )
             ]
         else:
-            # 倾向选择时间靠后的批次做伪外推验证
-            candidate_batches = sorted(candidate_batches, reverse=True)
+            # 选择靠后的、但产品分布不过度偏斜的批次做伪外推验证。
+            stat_map = {s["batch_name"]: s for s in batch_stats}
+            candidate_batches = sorted(
+                candidate_batches,
+                key=lambda b: (
+                    -stat_map[b]["hard_pair_min_count"],
+                    stat_map[b]["max_product_frac"],
+                    b,
+                ),
+                reverse=False,
+            )
 
         pseudo_holdout_batches = sorted(candidate_batches[:n_pseudo_batches])
 

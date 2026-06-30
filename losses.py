@@ -115,6 +115,58 @@ class BatchPrototypeLoss(nn.Module):
         return (loss_pull + 0.5 * loss_push) / K
 
 
+class HardPairMarginLoss(nn.Module):
+    """
+    针对已知易混产品对的批内原型边界损失。
+
+    对每个易混对 (A, B)，当一个 batch 同时含有 A/B 时，要求：
+      dist(sample_A, proto_B) - dist(sample_A, proto_A) >= margin
+      dist(sample_B, proto_A) - dist(sample_B, proto_B) >= margin
+    这样只强化指定相似对的局部边界，不会把所有类别一刀切推远。
+    """
+
+    def __init__(self, margin=0.35):
+        super().__init__()
+        self.margin = float(margin)
+        self.pair_label_ids = []
+
+    def set_label_names(self, label_names):
+        name_to_id = {str(name): int(idx) for idx, name in label_names.items()}
+        pair_names = getattr(self, "pair_names", ())
+        self.pair_label_ids = [
+            (name_to_id[a], name_to_id[b])
+            for a, b in pair_names
+            if a in name_to_id and b in name_to_id
+        ]
+
+    def forward(self, z, labels):
+        device = z.device
+        if not self.pair_label_ids:
+            return torch.tensor(0.0, device=device, requires_grad=True)
+
+        losses = []
+        for a_id, b_id in self.pair_label_ids:
+            mask_a = labels == a_id
+            mask_b = labels == b_id
+            if not (mask_a.any() and mask_b.any()):
+                continue
+
+            proto_a = z[mask_a].mean(dim=0)
+            proto_b = z[mask_b].mean(dim=0)
+
+            d_aa = (z[mask_a] - proto_a).norm(dim=1)
+            d_ab = (z[mask_a] - proto_b).norm(dim=1)
+            d_bb = (z[mask_b] - proto_b).norm(dim=1)
+            d_ba = (z[mask_b] - proto_a).norm(dim=1)
+
+            losses.append(F.relu(self.margin + d_aa - d_ab).mean())
+            losses.append(F.relu(self.margin + d_bb - d_ba).mean())
+
+        if not losses:
+            return torch.tensor(0.0, device=device, requires_grad=True)
+        return torch.stack(losses).mean()
+
+
 class UnifiedLoss(nn.Module):
     """
     统一损失:
@@ -125,6 +177,13 @@ class UnifiedLoss(nn.Module):
         super().__init__()
         self.supcon_loss = SupConLoss(temperature=cfg.supcon_temperature)
         self.proto_loss = BatchPrototypeLoss(margin=cfg.proto_margin)
+        self.hard_pair_loss = HardPairMarginLoss(
+            margin=getattr(cfg, "hard_pair_margin", 0.35)
+        )
+        self.hard_pair_loss.pair_names = tuple(
+            (str(a), str(b))
+            for a, b in getattr(cfg, "hard_pair_names", ())
+        )
         self.domain_loss = nn.CrossEntropyLoss()
         self.cls_loss = nn.CrossEntropyLoss()
         self.recon_loss = nn.MSELoss()
@@ -134,6 +193,10 @@ class UnifiedLoss(nn.Module):
         self.lam_cls = getattr(cfg, "lambda_cls", 0.0)
         self.lam_proto = cfg.lambda_proto
         self.lam_recon = cfg.lambda_recon
+        self.lam_hard_pair = getattr(cfg, "lambda_hard_pair", 0.0)
+
+    def set_label_names(self, label_names):
+        self.hard_pair_loss.set_label_names(label_names)
 
     def forward(self, model_out, batch):
         labels = batch["product"]
@@ -153,6 +216,9 @@ class UnifiedLoss(nn.Module):
         # 原型距离损失 (在嵌入空间, 类内紧凑)
         l_proto = self.proto_loss(model_out["z"], labels)
 
+        # 易混产品对边界损失
+        l_hard_pair = self.hard_pair_loss(model_out["z"], labels)
+
         # 重建损失 (防止表征退化)
         l_recon = self.recon_loss(model_out["recon"], batch["input"])
 
@@ -160,10 +226,11 @@ class UnifiedLoss(nn.Module):
                  + self.lam_adv * l_adv
                  + self.lam_cls * l_cls
                  + self.lam_proto * l_proto
+                 + self.lam_hard_pair * l_hard_pair
                  + self.lam_recon * l_recon)
 
         return {
             "supcon": l_supcon, "adv": l_adv, "cls": l_cls,
-            "proto": l_proto, "recon": l_recon,
+            "proto": l_proto, "hardpair": l_hard_pair, "recon": l_recon,
             "total": total,
         }

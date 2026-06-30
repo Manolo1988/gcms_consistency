@@ -103,7 +103,7 @@ class Config:
     weight_decay: float = 1e-4
     eval_interval: int = 10                # 兼容开关: 未启用分阶段验证时使用
     eval_interval_search: int = 10         # 搜索阶段验证间隔
-    eval_interval_final: int = 5           # 收敛阶段验证间隔(更密)
+    eval_interval_final: int = 10          # 收敛阶段验证间隔
     eval_final_start_ratio: float = 0.7    # 从总训练进度该比例起切到收敛阶段
     early_stop_patience: int = 0           # 早停耐心(验证次数), 0=关闭
     min_epochs_before_early_stop: int = 0  # 早停前最少训练 epoch, 0=按比例自动计算
@@ -128,8 +128,14 @@ class Config:
     lambda_proto: float = 1.0                 # λ₂ 原型紧凑 (类内紧凑)
     lambda_recon: float = 0.2                 # 重建正则
     lambda_cls: float = 0.5                   # CE 分类辅助头权重 (加速产品判别学习)
+    lambda_hard_pair: float = 0.25            # 易混产品对边界约束
     supcon_temperature: float = 0.10          # SupCon 温度参数
     proto_margin: float = 1.5                 # 原型损失推斥间距
+    hard_pair_margin: float = 0.35            # 易混对最近异类原型至少远出该距离
+    hard_pair_names: Tuple[Tuple[str, str], ...] = (
+        ("H88", "H99"),
+        ("RJD", "YJD"),
+    )
 
     # ── 一致性与原型 ─────────────────────────────────────
     accept_percentile: float = 95.0           # 一致性径阈值百分位
@@ -158,6 +164,10 @@ class Config:
     holdout_batch_min_classes: int = 5        # 留出批次最少覆盖的已知产品数
     preferred_holdout_products: Tuple[str, ...] = ("HMD", "XCJ")
     preferred_holdout_batches: Tuple[str, ...] = ("20250905", "20250912", "20250920")
+    preferred_val_batches: Tuple[str, ...] = ("20250926", "20250828")
+    avoid_val_batches: Tuple[str, ...] = ("20260306",)
+    val_batch_max_product_frac: float = 0.55  # 单个产品占比过高的批次不做常规选模验证
+    val_batch_min_hard_pair_samples: int = 2  # 验证批次中每个易混产品至少出现的样本数
     val_ratio: float = 0.1                    # train_batches 内伪验证批次比例
 
     # ── 数据增强 ──────────────────────────────────────────
@@ -177,10 +187,18 @@ class Config:
     aug_tic_jitter: float = 0.1               # TIC 归一化抖动幅度
 
     # ── DataLoader 性能 ──────────────────────────────────
-    dataloader_workers: int = 4               # 建议 4~8
+    dataloader_workers: int = 8               # 4090/本地SSD建议 8 起步
     dataloader_pin_memory: bool = True
     dataloader_persistent_workers: bool = True
-    dataloader_prefetch_factor: int = 2
+    dataloader_prefetch_factor: int = 4
+
+    # ── CUDA 性能 ────────────────────────────────────────
+    amp_enabled: bool = True                  # 4090 上启用混合精度
+    amp_dtype: str = "float16"                # float16 / bfloat16
+    channels_last: bool = True                # Conv2d 使用 NHWC 内存格式
+    torch_compile: bool = False               # 首轮编译较慢；长跑可手动打开
+    cuda_benchmark: bool = True               # 固定输入尺寸时启用 cuDNN autotune
+    allow_tf32: bool = True                   # 4090 TensorFloat32 加速 matmul/conv
 
     # ── 产品标签粒度 ─────────────────────────────────────
     product_granularity: str = "fine"

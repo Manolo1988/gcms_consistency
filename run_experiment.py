@@ -57,7 +57,9 @@ def main():
     parser.add_argument("--lambda_adv", type=float, default=None)
     parser.add_argument("--lambda_proto", type=float, default=None)
     parser.add_argument("--lambda_recon", type=float, default=None)
+    parser.add_argument("--lambda_hard_pair", type=float, default=None)
     parser.add_argument("--supcon_temperature", type=float, default=None)
+    parser.add_argument("--hard_pair_margin", type=float, default=None)
     parser.add_argument("--reject_threshold_factor", type=float, default=None)
     parser.add_argument("--accept_percentile", type=float, default=None)
     parser.add_argument("--eval_interval", type=int, default=None)
@@ -171,7 +173,8 @@ def main():
     for key in [
         "epochs", "batch_size", "lr", "weight_decay",
         "lambda_adv", "lambda_proto", "lambda_recon",
-        "supcon_temperature", "reject_threshold_factor", "accept_percentile",
+        "lambda_hard_pair", "supcon_temperature", "hard_pair_margin",
+        "reject_threshold_factor", "accept_percentile",
         "eval_interval", "early_stop_patience",
         "eval_interval_search", "eval_interval_final", "eval_final_start_ratio",
         "min_epochs_before_early_stop", "min_epoch_ratio_before_early_stop",
