@@ -616,6 +616,8 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
                 or (eval_checks % full_every == 0)
             )
             proto_loader = loader_train_noaug if use_full_proto else loader_train_noaug_subset
+            proto_scope = "full" if use_full_proto else "subset"
+            print(f"    -> validating: build {proto_scope} prototypes ...", flush=True)
 
             val_m, _ = validate_with_prototypes(
                 model, proto_loader, loader_val,
@@ -841,6 +843,8 @@ def train_single_model(cfg: Config):
                 or (eval_checks % full_every == 0)
             )
             proto_loader = loader_train_noaug if use_full_proto else loader_train_noaug_subset
+            proto_scope = "full" if use_full_proto else "subset"
+            print(f"    -> validating: build {proto_scope} prototypes ...", flush=True)
 
             val_m, _ = validate_with_prototypes(
                 model, proto_loader, loader_val,

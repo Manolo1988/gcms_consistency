@@ -110,10 +110,10 @@ class Config:
     min_epoch_ratio_before_early_stop: float = 0.6  # 早停前最少训练比例
     early_stop_min_lr_ratio: float = 0.2   # 仅当 lr <= 初始lr*ratio 才允许早停
     early_stop_min_delta: float = 5e-4     # 判定“有提升”的最小 metric 增量
-    proto_val_subset_ratio: float = 1.0    # 训练中期验证: 原型构建使用全部训练集 (ablation 强制 full)
+    proto_val_subset_ratio: float = 0.5    # 训练中期验证: 用训练子集构原型提速
     proto_val_subset_min_samples: int = 256
     proto_val_subset_max_samples: int = 1024
-    proto_val_full_every: int = 1          # 每个验证周期都用全量原型 (大于 proto_val_subset_ratio 间隔则为全量)
+    proto_val_full_every: int = 3          # 搜索阶段每隔 N 次验证使用全量原型
     warmup_guard_enabled: bool = False     # 前N轮与最佳方案对比淘汰
     warmup_guard_epoch: int = 10           # 对比轮次 (默认第10轮)
     warmup_guard_best_at_epoch: float = 0.0  # 最佳方案在该轮的val_acc参考
