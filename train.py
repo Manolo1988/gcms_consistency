@@ -378,11 +378,12 @@ def validate_with_prototypes(model, train_loader_noaug, val_loader,
     per_class_acc = {}
     all_labels_arr = np.array(all_val_labels)
     all_preds_arr = np.array(all_val_preds)
-    # Use ALL proto classes for confusion matrix (model may predict classes absent from val)
-    all_class_names = sorted(proto_store.prototypes.keys())
-    all_class_indices = sorted(proto_store.class_names)
-    n_classes = len(all_class_indices)
-    label_to_idx = {lbl: i for i, lbl in enumerate(all_class_indices)}
+    # Use integer label ids for the matrix; proto_store.class_names are strings.
+    n_classes = len(proto_store.class_names)
+    all_class_names = [
+        str(label_names.get(i, proto_store.class_names[i]))
+        for i in range(n_classes)
+    ]
     conf_mat = np.zeros((n_classes, n_classes), dtype=int)
     for lbl in np.unique(all_labels_arr):
         mask = all_labels_arr == lbl
@@ -390,9 +391,9 @@ def validate_with_prototypes(model, train_loader_noaug, val_loader,
             (all_preds_arr[mask] == lbl).mean()
         )
     for t, p in zip(all_labels_arr, all_preds_arr):
-        ti = label_to_idx.get(int(t), -1)
-        pi = label_to_idx.get(int(p), -1)
-        if ti >= 0 and pi >= 0:
+        ti = int(t)
+        pi = int(p)
+        if 0 <= ti < n_classes and 0 <= pi < n_classes:
             conf_mat[ti, pi] += 1
     # Build readable confusion string
     class_names_short = [str(c)[:5] for c in all_class_names]
