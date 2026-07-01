@@ -1172,12 +1172,16 @@ def evaluate_single_model(cfg):
         print("\n── Setting C: 无留出产品测试数据 ──")
 
     # ═══ Baselines: README 对比方法 ═══
-    try:
-        baselines_readme = evaluate_readme_baselines(
-            split, cfg, _make_loader_baseline, metadata_csv, product_col)
-    except Exception as e:
+    if bool(getattr(cfg, "evaluate_readme_baselines", True)):
+        try:
+            baselines_readme = evaluate_readme_baselines(
+                split, cfg, _make_loader_baseline, metadata_csv, product_col)
+        except Exception as e:
+            baselines_readme = {}
+            print(f"\n[README Baselines] 评估失败: {e}")
+    else:
         baselines_readme = {}
-        print(f"\n[README Baselines] 评估失败: {e}")
+        print("\n[README Baselines] 已跳过 (--skip_readme_baselines)")
 
     # ═══ 汇总打印 ═══
     _print_single_summary(result_a, result_b, result_c, cfg,

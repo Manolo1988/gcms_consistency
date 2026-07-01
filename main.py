@@ -262,6 +262,8 @@ def main():
                         help="额外压力测试批次, 逗号分隔；默认 20260306")
     parser.add_argument("--no_auto_create_split_on_train", action="store_true",
                         help="训练前不自动刷新 split.json")
+    parser.add_argument("--skip_readme_baselines", action="store_true",
+                        help="评估时跳过 README baselines, 只跑主模型 Setting A/B/C")
 
     # 数据准备选项
     parser.add_argument("--save_plot", dest="save_prepare_plots",
@@ -304,6 +306,8 @@ def main():
         )
     if args.no_auto_create_split_on_train:
         cfg.auto_create_split_on_train = False
+    if args.skip_readme_baselines:
+        cfg.evaluate_readme_baselines = False
 
     cfg.save_prepare_plots = bool(args.save_prepare_plots)
     cfg.save_prepare_tables = bool(args.save_prepare_tables)
