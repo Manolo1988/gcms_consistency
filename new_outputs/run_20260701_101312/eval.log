@@ -1,0 +1,28 @@
+
+============================================================
+单模型评估
+============================================================
+/home/ubuntu/anaconda3/envs/seas/lib/python3.9/site-packages/sklearn/metrics/_classification.py:2399: UserWarning: y_pred contains classes not in y_true
+  warnings.warn("y_pred contains classes not in y_true")
+
+── Setting A [留出批次 ['20250905', '20250912', '20250920']] ──
+  Accuracy:       0.8185
+  Macro-F1:       0.5523
+  Cross-batch Δ:  0.1768
+  Score AUROC:    0.7143
+  Cohen's d:      0.8292
+  Sil(product):   0.5085
+  Sil(batch):     -0.0184
+  Batch pred:     0.5833
+
+── Setting B [留出产品 ['HMD', 'XCJ']] ──
+  Open-set AUROC:  0.6607
+  FPR@95TPR:       0.9323
+  Known mean:      0.4660
+  Unknown mean:    0.3383
+
+── Setting C [留出产品 ['HMD', 'XCJ']] ──
+  1-shot: acc=0.5344, f1=0.4302
+  3-shot: acc=0.9843, f1=0.9843
+  5-shot: acc=0.9837, f1=0.9837
+  10-shot: acc=0.9912, f1=0.9911

@@ -1,0 +1,312 @@
+
+============================================================
+训练单一模型, device = cuda
+============================================================
+  已知产品: ['H88', 'H99', 'HRJ', 'HRY', 'HYX', 'HYZ', 'RJD', 'YJD']
+  留出产品: ['HMD', 'XCJ']  (Setting B/C)
+  留出批次: ['20250905', '20250912', '20250920']  (Setting A)
+  伪验证批次: ['20250926', '20260306'] (训练早停选模)
+  [Input PCA] 检测到 prepared_data 已预先分解, 直接使用落盘 tensor (rt_bins=1024, n_components=239)
+  训练: 2093 样本, 验证: 208 样本
+  产品数: 8, 批次数: 28
+  DataLoader: workers=8, pin_memory=True, prefetch_factor=4
+  Epoch 1/120  supcon=3.409 cls=2.008 adv=3.336 proto=0.859 hardpair=0.155 total=5.399
+  Epoch 2/120  supcon=3.340 cls=1.872 adv=3.351 proto=0.825 hardpair=0.140 total=5.221
+  Epoch 3/120  supcon=3.269 cls=1.732 adv=3.356 proto=0.807 hardpair=0.110 total=5.048
+  Epoch 4/120  supcon=2.986 cls=1.335 adv=3.365 proto=0.762 hardpair=0.110 total=4.519
+  Epoch 5/120  supcon=2.681 cls=1.057 adv=3.361 proto=0.685 hardpair=0.103 total=3.996
+  Epoch 6/120  supcon=2.364 cls=0.813 adv=3.363 proto=0.653 hardpair=0.087 total=3.518
+  Epoch 7/120  supcon=2.198 cls=0.647 adv=3.374 proto=0.629 hardpair=0.087 total=3.246
+  Epoch 8/120  supcon=2.081 cls=0.538 adv=3.374 proto=0.607 hardpair=0.083 total=3.051
+  Epoch 9/120  supcon=1.960 cls=0.458 adv=3.377 proto=0.595 hardpair=0.082 total=2.876
+  Epoch 10/120  supcon=1.808 cls=0.345 adv=3.374 proto=0.582 hardpair=0.071 total=2.652
+    -> validating: build subset prototypes ...
+    -> val_acc=0.361, train_pa=0.907, val_auroc=0.427, val_metric=0.382 (best=0.382, proto=subset)
+       per_class: H88=0.50 H99=0.13 HRJ=0.93 HYZ=1.00 RJD=0.85 YJD=0.00
+       radii:     H88=raw0.656/sph0.478 H99=raw0.536/sph0.354 HRJ=raw0.226/sph0.163 HRY=raw0.227/sph0.145 HYX=raw0.588/sph0.361 HYZ=raw0.524/sph0.458 RJD=raw0.397/sph0.424 YJD=raw0.767/sph0.568
+       confusion (row=true, col=pred):
+                H88   H99   HRJ   HRY   HYX   HYZ   RJD   YJD
+          H88 [    1     0     0     0     0     0     1     0]
+          H99 [   46     9     0     4     0     0    11     1]
+          HRJ [    0     0    27     1     0     1     0     0]
+          HRY [    0     0     0     0     0     0     0     0]
+          HYX [    0     0     0     0     0     0     0     0]
+          HYZ [    0     0     0     0     0    27     0     0]
+          RJD [    0     0     0     0     0     2    11     0]
+          YJD [    0     0     0     0     0     0    66     0]
+  Epoch 11/120  supcon=1.852 cls=0.352 adv=3.368 proto=0.575 hardpair=0.069 total=2.691
+  Epoch 12/120  supcon=1.771 cls=0.285 adv=3.372 proto=0.569 hardpair=0.054 total=2.565
+  Epoch 13/120  supcon=1.750 cls=0.289 adv=3.371 proto=0.571 hardpair=0.044 total=2.546
+  Epoch 14/120  supcon=1.652 cls=0.230 adv=3.372 proto=0.567 hardpair=0.034 total=2.410
+  Epoch 15/120  supcon=1.586 cls=0.179 adv=3.353 proto=0.550 hardpair=0.028 total=2.300
+  Epoch 16/120  supcon=1.613 cls=0.187 adv=3.357 proto=0.540 hardpair=0.020 total=2.318
+  Epoch 17/120  supcon=1.569 cls=0.171 adv=3.367 proto=0.549 hardpair=0.020 total=2.274
+  Epoch 18/120  supcon=1.539 cls=0.158 adv=3.363 proto=0.534 hardpair=0.018 total=2.221
+  Epoch 19/120  supcon=1.507 cls=0.140 adv=3.374 proto=0.540 hardpair=0.016 total=2.185
+  Epoch 20/120  supcon=1.495 cls=0.114 adv=3.372 proto=0.529 hardpair=0.015 total=2.149
+    -> validating: build subset prototypes ...
+    -> val_acc=0.524, train_pa=0.972, val_auroc=0.439, val_metric=0.546 (best=0.546, proto=subset)
+       per_class: H88=1.00 H99=0.63 HRJ=0.90 HYZ=0.93 RJD=0.85 YJD=0.00
+       radii:     H88=raw0.604/sph0.427 H99=raw0.374/sph0.134 HRJ=raw0.188/sph0.077 HRY=raw0.260/sph0.087 HYX=raw0.148/sph0.061 HYZ=raw0.529/sph0.248 RJD=raw0.164/sph0.078 YJD=raw0.474/sph0.251
+       confusion (row=true, col=pred):
+                H88   H99   HRJ   HRY   HYX   HYZ   RJD   YJD
+          H88 [    2     0     0     0     0     0     0     0]
+          H99 [   10    45     0     3     2     0     4     7]
+          HRJ [    0     0    26     2     0     1     0     0]
+          HRY [    0     0     0     0     0     0     0     0]
+          HYX [    0     0     0     0     0     0     0     0]
+          HYZ [    1     1     0     0     0    25     0     0]
+          RJD [    0     0     0     1     0     1    11     0]
+          YJD [    0     0     0     0     0     0    66     0]
+  Epoch 21/120  supcon=1.485 cls=0.118 adv=3.379 proto=0.528 hardpair=0.013 total=2.140
+  Epoch 22/120  supcon=1.503 cls=0.126 adv=3.363 proto=0.535 hardpair=0.011 total=2.168
+  Epoch 23/120  supcon=1.453 cls=0.105 adv=3.376 proto=0.521 hardpair=0.010 total=2.092
+  Epoch 24/120  supcon=1.434 cls=0.086 adv=3.363 proto=0.529 hardpair=0.008 total=2.070
+  Epoch 25/120  supcon=1.452 cls=0.087 adv=3.373 proto=0.515 hardpair=0.010 total=2.076
+  Epoch 26/120  supcon=1.406 cls=0.077 adv=3.373 proto=0.526 hardpair=0.005 total=2.034
+  Epoch 27/120  supcon=1.405 cls=0.068 adv=3.373 proto=0.506 hardpair=0.004 total=2.008
+  Epoch 28/120  supcon=1.416 cls=0.078 adv=3.372 proto=0.515 hardpair=0.007 total=2.034
+  Epoch 29/120  supcon=1.429 cls=0.085 adv=3.368 proto=0.512 hardpair=0.006 total=2.048
+  Epoch 30/120  supcon=1.394 cls=0.059 adv=3.381 proto=0.509 hardpair=0.006 total=1.995
+    -> validating: build full prototypes ...
+    -> val_acc=0.418, train_pa=0.990, val_auroc=0.367, val_metric=0.437 (best=0.546, proto=full)
+       per_class: H88=1.00 H99=0.31 HRJ=0.90 HYZ=1.00 RJD=0.77 YJD=0.00
+       radii:     H88=raw0.355/sph0.119 H99=raw0.321/sph0.110 HRJ=raw0.240/sph0.062 HRY=raw0.125/sph0.019 HYX=raw0.177/sph0.054 HYZ=raw0.260/sph0.089 RJD=raw0.294/sph0.074 YJD=raw0.322/sph0.107
+       confusion (row=true, col=pred):
+                H88   H99   HRJ   HRY   HYX   HYZ   RJD   YJD
+          H88 [    2     0     0     0     0     0     0     0]
+          H99 [   41    22     0     5     0     0     3     0]
+          HRJ [    0     0    26     3     0     0     0     0]
+          HRY [    0     0     0     0     0     0     0     0]
+          HYX [    0     0     0     0     0     0     0     0]
+          HYZ [    0     0     0     0     0    27     0     0]
+          RJD [    0     1     0     1     0     1    10     0]
+          YJD [    0     0     0     0     0     0    66     0]
+  Epoch 31/120  supcon=1.403 cls=0.064 adv=3.374 proto=0.504 hardpair=0.006 total=2.002
+  Epoch 32/120  supcon=1.367 cls=0.064 adv=3.376 proto=0.510 hardpair=0.007 total=1.972
+  Epoch 33/120  supcon=1.348 cls=0.054 adv=3.362 proto=0.514 hardpair=0.003 total=1.950
+  Epoch 34/120  supcon=1.383 cls=0.063 adv=3.369 proto=0.506 hardpair=0.004 total=1.982
+  Epoch 35/120  supcon=1.393 cls=0.057 adv=3.373 proto=0.501 hardpair=0.003 total=1.984
+  Epoch 36/120  supcon=1.313 cls=0.036 adv=3.370 proto=0.505 hardpair=0.004 total=1.898
+  Epoch 37/120  supcon=1.368 cls=0.050 adv=3.366 proto=0.513 hardpair=0.004 total=1.967
+  Epoch 38/120  supcon=1.334 cls=0.044 adv=3.359 proto=0.512 hardpair=0.003 total=1.929
+  Epoch 39/120  supcon=1.320 cls=0.026 adv=3.365 proto=0.496 hardpair=0.002 total=1.889
+  Epoch 40/120  supcon=1.367 cls=0.059 adv=3.356 proto=0.504 hardpair=0.005 total=1.961
+    -> validating: build subset prototypes ...
+    -> val_acc=0.534, train_pa=0.994, val_auroc=0.395, val_metric=0.553 (best=0.553, proto=subset)
+       per_class: H88=1.00 H99=0.65 HRJ=0.90 HYZ=1.00 RJD=0.77 YJD=0.00
+       radii:     H88=raw0.269/sph0.075 H99=raw0.211/sph0.070 HRJ=raw0.158/sph0.026 HRY=raw0.114/sph0.022 HYX=raw0.086/sph0.015 HYZ=raw0.203/sph0.030 RJD=raw0.138/sph0.076 YJD=raw0.255/sph0.072
+       confusion (row=true, col=pred):
+                H88   H99   HRJ   HRY   HYX   HYZ   RJD   YJD
+          H88 [    2     0     0     0     0     0     0     0]
+          H99 [   17    46     0     3     0     1     4     0]
+          HRJ [    0     0    26     3     0     0     0     0]
+          HRY [    0     0     0     0     0     0     0     0]
+          HYX [    0     0     0     0     0     0     0     0]
+          HYZ [    0     0     0     0     0    27     0     0]
+          RJD [    0     0     0     1     0     1    10     1]
+          YJD [    0     0     0     0     0     0    66     0]
+  Epoch 41/120  supcon=1.352 cls=0.039 adv=3.377 proto=0.492 hardpair=0.003 total=1.924
+  Epoch 42/120  supcon=1.376 cls=0.051 adv=3.363 proto=0.493 hardpair=0.004 total=1.955
+  Epoch 43/120  supcon=1.363 cls=0.043 adv=3.354 proto=0.492 hardpair=0.001 total=1.936
+  Epoch 44/120  supcon=1.298 cls=0.018 adv=3.358 proto=0.498 hardpair=0.001 total=1.864
+  Epoch 45/120  supcon=1.359 cls=0.037 adv=3.368 proto=0.493 hardpair=0.003 total=1.931
+  Epoch 46/120  supcon=1.353 cls=0.050 adv=3.358 proto=0.500 hardpair=0.005 total=1.938
+  Epoch 47/120  supcon=1.326 cls=0.041 adv=3.370 proto=0.507 hardpair=0.003 total=1.913
+  Epoch 48/120  supcon=1.327 cls=0.033 adv=3.371 proto=0.498 hardpair=0.002 total=1.900
+  Epoch 49/120  supcon=1.333 cls=0.034 adv=3.368 proto=0.493 hardpair=0.002 total=1.902
+  Epoch 50/120  supcon=1.315 cls=0.028 adv=3.365 proto=0.497 hardpair=0.002 total=1.885
+    -> validating: build subset prototypes ...
+    -> val_acc=0.529, train_pa=0.994, val_auroc=0.413, val_metric=0.550 (best=0.553, proto=subset)
+       per_class: H88=1.00 H99=0.65 HRJ=0.93 HYZ=0.93 RJD=0.69 YJD=0.02
+       radii:     H88=raw0.274/sph0.086 H99=raw0.142/sph0.037 HRJ=raw0.092/sph0.010 HRY=raw0.105/sph0.015 HYX=raw0.101/sph0.011 HYZ=raw0.256/sph0.038 RJD=raw0.151/sph0.040 YJD=raw0.118/sph0.029
+       confusion (row=true, col=pred):
+                H88   H99   HRJ   HRY   HYX   HYZ   RJD   YJD
+          H88 [    2     0     0     0     0     0     0     0]
+          H99 [   20    46     0     5     0     0     0     0]
+          HRJ [    0     0    27     2     0     0     0     0]
+          HRY [    0     0     0     0     0     0     0     0]
+          HYX [    0     0     0     0     0     0     0     0]
+          HYZ [    2     0     0     0     0    25     0     0]
+          RJD [    1     0     0     1     0     1     9     1]
+          YJD [    0     0     0     0     0     0    65     1]
+  Epoch 51/120  supcon=1.307 cls=0.027 adv=3.368 proto=0.498 hardpair=0.002 total=1.878
+  Epoch 52/120  supcon=1.297 cls=0.015 adv=3.363 proto=0.492 hardpair=0.000 total=1.855
+  Epoch 53/120  supcon=1.313 cls=0.030 adv=3.364 proto=0.503 hardpair=0.003 total=1.890
+  Epoch 54/120  supcon=1.290 cls=0.025 adv=3.364 proto=0.497 hardpair=0.002 total=1.858
+  Epoch 55/120  supcon=1.304 cls=0.025 adv=3.368 proto=0.488 hardpair=0.001 total=1.863
+  Epoch 56/120  supcon=1.310 cls=0.029 adv=3.365 proto=0.495 hardpair=0.002 total=1.876
+  Epoch 57/120  supcon=1.314 cls=0.035 adv=3.378 proto=0.498 hardpair=0.004 total=1.888
+  Epoch 58/120  supcon=1.327 cls=0.039 adv=3.369 proto=0.498 hardpair=0.003 total=1.903
+  Epoch 59/120  supcon=1.322 cls=0.027 adv=3.367 proto=0.492 hardpair=0.001 total=1.885
+  Epoch 60/120  supcon=1.294 cls=0.017 adv=3.366 proto=0.485 hardpair=0.001 total=1.845
+    -> validating: build full prototypes ...
+    -> val_acc=0.389, train_pa=0.996, val_auroc=0.654, val_metric=0.422 (best=0.553, proto=full)
+       per_class: H88=1.00 H99=0.23 HRJ=0.93 HYZ=0.93 RJD=0.85 YJD=0.00
+       radii:     H88=raw0.131/sph0.012 H99=raw0.143/sph0.024 HRJ=raw0.210/sph0.029 HRY=raw0.068/sph0.006 HYX=raw0.048/sph0.008 HYZ=raw0.137/sph0.014 RJD=raw0.075/sph0.011 YJD=raw0.166/sph0.023
+       confusion (row=true, col=pred):
+                H88   H99   HRJ   HRY   HYX   HYZ   RJD   YJD
+          H88 [    2     0     0     0     0     0     0     0]
+          H99 [   48    16     0     5     0     0     1     1]
+          HRJ [    0     0    27     2     0     0     0     0]
+          HRY [    0     0     0     0     0     0     0     0]
+          HYX [    0     0     0     0     0     0     0     0]
+          HYZ [    2     0     0     0     0    25     0     0]
+          RJD [    0     0     0     1     0     1    11     0]
+          YJD [    0     0     0     0     0     0    66     0]
+  Epoch 61/120  supcon=1.325 cls=0.032 adv=3.368 proto=0.495 hardpair=0.001 total=1.893
+  Epoch 62/120  supcon=1.296 cls=0.009 adv=3.350 proto=0.487 hardpair=0.001 total=1.845
+  Epoch 63/120  supcon=1.276 cls=0.012 adv=3.358 proto=0.492 hardpair=0.000 total=1.831
+  Epoch 64/120  supcon=1.272 cls=0.011 adv=3.363 proto=0.488 hardpair=0.001 total=1.822
+  Epoch 65/120  supcon=1.342 cls=0.029 adv=3.375 proto=0.488 hardpair=0.003 total=1.903
+  Epoch 66/120  supcon=1.311 cls=0.024 adv=3.358 proto=0.487 hardpair=0.000 total=1.866
+  Epoch 67/120  supcon=1.293 cls=0.014 adv=3.357 proto=0.485 hardpair=0.001 total=1.843
+  Epoch 68/120  supcon=1.301 cls=0.020 adv=3.360 proto=0.493 hardpair=0.001 total=1.861
+  Epoch 69/120  supcon=1.297 cls=0.021 adv=3.360 proto=0.490 hardpair=0.002 total=1.854
+  Epoch 70/120  supcon=1.330 cls=0.029 adv=3.364 proto=0.490 hardpair=0.001 total=1.892
+    -> validating: build subset prototypes ...
+    -> val_acc=0.356, train_pa=0.996, val_auroc=0.661, val_metric=0.389 (best=0.553, proto=subset)
+       per_class: H88=1.00 H99=0.14 HRJ=0.93 HYZ=1.00 RJD=0.62 YJD=0.00
+       radii:     H88=raw0.150/sph0.018 H99=raw0.138/sph0.016 HRJ=raw0.134/sph0.023 HRY=raw0.085/sph0.009 HYX=raw0.121/sph0.017 HYZ=raw0.166/sph0.022 RJD=raw0.089/sph0.008 YJD=raw0.175/sph0.021
+       confusion (row=true, col=pred):
+                H88   H99   HRJ   HRY   HYX   HYZ   RJD   YJD
+          H88 [    2     0     0     0     0     0     0     0]
+          H99 [   57    10     0     4     0     0     0     0]
+          HRJ [    0     0    27     2     0     0     0     0]
+          HRY [    0     0     0     0     0     0     0     0]
+          HYX [    0     0     0     0     0     0     0     0]
+          HYZ [    0     0     0     0     0    27     0     0]
+          RJD [    0     0     0     1     0     1     8     3]
+          YJD [    0     0     0     0     0     0    66     0]
+  Epoch 71/120  supcon=1.273 cls=0.011 adv=3.371 proto=0.489 hardpair=0.001 total=1.825
+  Epoch 72/120  supcon=1.278 cls=0.017 adv=3.367 proto=0.491 hardpair=0.002 total=1.835
+  Epoch 73/120  supcon=1.275 cls=0.010 adv=3.360 proto=0.489 hardpair=0.000 total=1.825
+  Epoch 74/120  supcon=1.284 cls=0.008 adv=3.377 proto=0.484 hardpair=0.000 total=1.828
+  Epoch 75/120  supcon=1.322 cls=0.019 adv=3.365 proto=0.482 hardpair=0.002 total=1.870
+  Epoch 76/120  supcon=1.281 cls=0.016 adv=3.370 proto=0.486 hardpair=0.000 total=1.831
+  Epoch 77/120  supcon=1.260 cls=0.005 adv=3.376 proto=0.486 hardpair=0.001 total=1.804
+  Epoch 78/120  supcon=1.285 cls=0.016 adv=3.375 proto=0.485 hardpair=0.002 total=1.833
+  Epoch 79/120  supcon=1.282 cls=0.013 adv=3.366 proto=0.488 hardpair=0.001 total=1.833
+  Epoch 80/120  supcon=1.282 cls=0.015 adv=3.358 proto=0.487 hardpair=0.002 total=1.833
+    -> validating: build subset prototypes ...
+    -> val_acc=0.524, train_pa=0.995, val_auroc=0.418, val_metric=0.545 (best=0.553, proto=subset)
+       per_class: H88=1.00 H99=0.61 HRJ=0.93 HYZ=1.00 RJD=0.77 YJD=0.00
+       radii:     H88=raw0.142/sph0.029 H99=raw0.121/sph0.019 HRJ=raw0.077/sph0.008 HRY=raw0.093/sph0.005 HYX=raw0.096/sph0.012 HYZ=raw0.124/sph0.018 RJD=raw0.079/sph0.010 YJD=raw0.130/sph0.019
+       confusion (row=true, col=pred):
+                H88   H99   HRJ   HRY   HYX   HYZ   RJD   YJD
+          H88 [    2     0     0     0     0     0     0     0]
+          H99 [   24    43     0     4     0     0     0     0]
+          HRJ [    0     0    27     2     0     0     0     0]
+          HRY [    0     0     0     0     0     0     0     0]
+          HYX [    0     0     0     0     0     0     0     0]
+          HYZ [    0     0     0     0     0    27     0     0]
+          RJD [    1     0     0     1     0     1    10     0]
+          YJD [    0     0     0     0     0     0    66     0]
+  Epoch 81/120  supcon=1.285 cls=0.012 adv=3.370 proto=0.480 hardpair=0.000 total=1.826
+  Epoch 82/120  supcon=1.279 cls=0.010 adv=3.370 proto=0.489 hardpair=0.001 total=1.829
+  Epoch 83/120  supcon=1.274 cls=0.007 adv=3.368 proto=0.486 hardpair=0.001 total=1.818
+  Epoch 84/120  supcon=1.275 cls=0.005 adv=3.363 proto=0.484 hardpair=0.001 total=1.817
+  Epoch 85/120  supcon=1.268 cls=0.007 adv=3.360 proto=0.479 hardpair=0.001 total=1.806
+  Epoch 86/120  supcon=1.282 cls=0.014 adv=3.354 proto=0.480 hardpair=0.001 total=1.825
+  Epoch 87/120  supcon=1.264 cls=0.004 adv=3.368 proto=0.487 hardpair=0.000 total=1.809
+  Epoch 88/120  supcon=1.297 cls=0.017 adv=3.368 proto=0.484 hardpair=0.001 total=1.845
+  Epoch 89/120  supcon=1.272 cls=0.006 adv=3.366 proto=0.478 hardpair=0.000 total=1.809
+  Epoch 90/120  supcon=1.256 cls=0.008 adv=3.372 proto=0.487 hardpair=0.001 total=1.802
+    -> validating: build full prototypes ...
+    -> val_acc=0.380, train_pa=0.998, val_auroc=0.621, val_metric=0.411 (best=0.553, proto=full)
+       per_class: H88=1.00 H99=0.17 HRJ=0.93 HYZ=1.00 RJD=0.85 YJD=0.00
+       radii:     H88=raw0.083/sph0.005 H99=raw0.127/sph0.012 HRJ=raw0.074/sph0.004 HRY=raw0.070/sph0.004 HYX=raw0.033/sph0.002 HYZ=raw0.112/sph0.008 RJD=raw0.062/sph0.005 YJD=raw0.120/sph0.010
+       confusion (row=true, col=pred):
+                H88   H99   HRJ   HRY   HYX   HYZ   RJD   YJD
+          H88 [    2     0     0     0     0     0     0     0]
+          H99 [   54    12     0     5     0     0     0     0]
+          HRJ [    0     0    27     2     0     0     0     0]
+          HRY [    0     0     0     0     0     0     0     0]
+          HYX [    0     0     0     0     0     0     0     0]
+          HYZ [    0     0     0     0     0    27     0     0]
+          RJD [    0     0     0     1     0     1    11     0]
+          YJD [    0     0     0     0     0     0    66     0]
+  Epoch 91/120  supcon=1.280 cls=0.010 adv=3.373 proto=0.483 hardpair=0.000 total=1.823
+  Epoch 92/120  supcon=1.249 cls=0.007 adv=3.361 proto=0.496 hardpair=0.001 total=1.803
+  Epoch 93/120  supcon=1.310 cls=0.016 adv=3.370 proto=0.482 hardpair=0.001 total=1.855
+  Epoch 94/120  supcon=1.267 cls=0.009 adv=3.356 proto=0.489 hardpair=0.000 total=1.816
+  Epoch 95/120  supcon=1.256 cls=0.005 adv=3.366 proto=0.481 hardpair=0.001 total=1.796
+  Epoch 96/120  supcon=1.243 cls=0.006 adv=3.361 proto=0.489 hardpair=0.001 total=1.790
+  Epoch 97/120  supcon=1.280 cls=0.008 adv=3.358 proto=0.480 hardpair=0.000 total=1.819
+  Epoch 98/120  supcon=1.266 cls=0.004 adv=3.376 proto=0.481 hardpair=0.000 total=1.803
+  Epoch 99/120  supcon=1.273 cls=0.002 adv=3.367 proto=0.476 hardpair=0.000 total=1.806
+  Epoch 100/120  supcon=1.247 cls=0.002 adv=3.358 proto=0.486 hardpair=0.000 total=1.790
+    -> validating: build full prototypes ...
+    -> val_acc=0.409, train_pa=0.998, val_auroc=0.525, val_metric=0.435 (best=0.553, proto=full)
+       per_class: H88=1.00 H99=0.24 HRJ=0.97 HYZ=1.00 RJD=0.85 YJD=0.00
+       radii:     H88=raw0.079/sph0.006 H99=raw0.122/sph0.011 HRJ=raw0.065/sph0.003 HRY=raw0.067/sph0.003 HYX=raw0.030/sph0.001 HYZ=raw0.097/sph0.005 RJD=raw0.072/sph0.004 YJD=raw0.108/sph0.008
+       confusion (row=true, col=pred):
+                H88   H99   HRJ   HRY   HYX   HYZ   RJD   YJD
+          H88 [    2     0     0     0     0     0     0     0]
+          H99 [   49    17     0     4     0     0     1     0]
+          HRJ [    0     0    28     1     0     0     0     0]
+          HRY [    0     0     0     0     0     0     0     0]
+          HYX [    0     0     0     0     0     0     0     0]
+          HYZ [    0     0     0     0     0    27     0     0]
+          RJD [    0     0     0     1     0     1    11     0]
+          YJD [    0     0     0     0     0     0    66     0]
+  Epoch 101/120  supcon=1.271 cls=0.002 adv=3.361 proto=0.478 hardpair=0.000 total=1.804
+  Epoch 102/120  supcon=1.252 cls=0.002 adv=3.366 proto=0.480 hardpair=0.000 total=1.788
+  Epoch 103/120  supcon=1.276 cls=0.006 adv=3.374 proto=0.478 hardpair=0.000 total=1.812
+  Epoch 104/120  supcon=1.260 cls=0.002 adv=3.368 proto=0.489 hardpair=0.000 total=1.805
+  Epoch 105/120  supcon=1.264 cls=0.004 adv=3.368 proto=0.480 hardpair=0.002 total=1.802
+  Epoch 106/120  supcon=1.246 cls=0.007 adv=3.363 proto=0.488 hardpair=0.001 total=1.792
+  Epoch 107/120  supcon=1.246 cls=0.001 adv=3.370 proto=0.487 hardpair=0.000 total=1.789
+  Epoch 108/120  supcon=1.249 cls=0.001 adv=3.357 proto=0.488 hardpair=0.000 total=1.793
+  Epoch 109/120  supcon=1.249 cls=0.005 adv=3.373 proto=0.490 hardpair=0.000 total=1.795
+  Epoch 110/120  supcon=1.255 cls=0.006 adv=3.364 proto=0.485 hardpair=0.000 total=1.797
+    -> validating: build full prototypes ...
+    -> val_acc=0.404, train_pa=0.999, val_auroc=0.528, val_metric=0.430 (best=0.553, proto=full)
+       per_class: H88=1.00 H99=0.24 HRJ=0.93 HYZ=1.00 RJD=0.85 YJD=0.00
+       radii:     H88=raw0.078/sph0.004 H99=raw0.129/sph0.011 HRJ=raw0.062/sph0.003 HRY=raw0.062/sph0.002 HYX=raw0.034/sph0.001 HYZ=raw0.090/sph0.004 RJD=raw0.058/sph0.002 YJD=raw0.097/sph0.007
+       confusion (row=true, col=pred):
+                H88   H99   HRJ   HRY   HYX   HYZ   RJD   YJD
+          H88 [    2     0     0     0     0     0     0     0]
+          H99 [   50    17     0     4     0     0     0     0]
+          HRJ [    0     0    27     2     0     0     0     0]
+          HRY [    0     0     0     0     0     0     0     0]
+          HYX [    0     0     0     0     0     0     0     0]
+          HYZ [    0     0     0     0     0    27     0     0]
+          RJD [    0     0     0     1     0     1    11     0]
+          YJD [    0     0     0     0     0     0    66     0]
+  Epoch 111/120  supcon=1.252 cls=0.003 adv=3.356 proto=0.486 hardpair=0.000 total=1.794
+  Epoch 112/120  supcon=1.267 cls=0.002 adv=3.370 proto=0.478 hardpair=0.000 total=1.800
+  Epoch 113/120  supcon=1.250 cls=0.003 adv=3.371 proto=0.483 hardpair=0.000 total=1.789
+  Epoch 114/120  supcon=1.278 cls=0.001 adv=3.359 proto=0.475 hardpair=0.000 total=1.808
+  Epoch 115/120  supcon=1.268 cls=0.004 adv=3.363 proto=0.479 hardpair=0.000 total=1.804
+  Epoch 116/120  supcon=1.286 cls=0.012 adv=3.361 proto=0.485 hardpair=0.001 total=1.832
+  Epoch 117/120  supcon=1.261 cls=0.005 adv=3.365 proto=0.482 hardpair=0.000 total=1.800
+  Epoch 118/120  supcon=1.283 cls=0.012 adv=3.364 proto=0.487 hardpair=0.000 total=1.831
+  Epoch 119/120  supcon=1.269 cls=0.005 adv=3.373 proto=0.481 hardpair=0.000 total=1.806
+  Epoch 120/120  supcon=1.269 cls=0.002 adv=3.371 proto=0.477 hardpair=0.000 total=1.801
+    -> validating: build full prototypes ...
+    -> val_acc=0.389, train_pa=0.999, val_auroc=0.553, val_metric=0.417 (best=0.553, proto=full)
+       per_class: H88=1.00 H99=0.20 HRJ=0.93 HYZ=1.00 RJD=0.85 YJD=0.00
+       radii:     H88=raw0.075/sph0.004 H99=raw0.119/sph0.009 HRJ=raw0.067/sph0.003 HRY=raw0.062/sph0.002 HYX=raw0.031/sph0.001 HYZ=raw0.093/sph0.005 RJD=raw0.059/sph0.002 YJD=raw0.097/sph0.006
+       confusion (row=true, col=pred):
+                H88   H99   HRJ   HRY   HYX   HYZ   RJD   YJD
+          H88 [    2     0     0     0     0     0     0     0]
+          H99 [   53    14     0     4     0     0     0     0]
+          HRJ [    0     0    27     2     0     0     0     0]
+          HRY [    0     0     0     0     0     0     0     0]
+          HYX [    0     0     0     0     0     0     0     0]
+          HYZ [    0     0     0     0     0    27     0     0]
+          RJD [    0     0     0     1     0     1    11     0]
+          YJD [    0     0     0     0     0     0    66     0]
+原型库: 8 个产品 (球面调整已启用)
+  H88: radius=0.2529, proto_norm=0.9837, sph_norm=1.0000
+  H99: radius=0.2145, proto_norm=0.9895, sph_norm=1.0000
+  HRJ: radius=0.1558, proto_norm=0.9896, sph_norm=1.0000
+  HRY: radius=0.1144, proto_norm=0.9967, sph_norm=1.0000
+  HYX: radius=0.0474, proto_norm=0.9992, sph_norm=1.0000
+  HYZ: radius=0.2106, proto_norm=0.9902, sph_norm=1.0000
+  RJD: radius=0.1383, proto_norm=0.9967, sph_norm=1.0000
+  YJD: radius=0.2926, proto_norm=0.9891, sph_norm=1.0000
+
+模型已保存到 /home/ubuntu/sunlong/gcms_consistency_old/new_outputs/run_20260701_101312/final_model
+  最佳验证准确率: 0.5337
