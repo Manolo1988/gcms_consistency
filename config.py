@@ -47,7 +47,7 @@ class Config:
         Path(__file__).resolve().parent / "dataset"
     )
     output_dir: str = str(
-        Path(__file__).resolve().parent / "new_outputs"
+        Path(__file__).resolve().parent / "new_outputs" / "run_20260701_101312"
     )
     prepared_dir: str = str(
         Path(__file__).resolve().parent / "new_prepared_data"
