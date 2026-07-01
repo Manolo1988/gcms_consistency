@@ -944,6 +944,8 @@ def train_single_model(cfg: Config):
     model_dir.mkdir(parents=True, exist_ok=True)
     torch.save(_model_state_dict_for_save(model), model_dir / "model.pt")
     proto_store.save(model_dir / "prototypes")
+    with open(model_dir / "split.json", "w") as f:
+        json.dump(split, f, indent=2, ensure_ascii=False)
     if input_pca_model is not None:
         from input_pca import save_rt_axis_pca
 

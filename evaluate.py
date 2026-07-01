@@ -1011,15 +1011,22 @@ def evaluate_single_model(cfg):
     from register import PrototypeStore
 
     device = get_device()
-    split = load_data_split(cfg)
+    out_dir = Path(cfg.output_dir)
+    model_dir = out_dir / "final_model"
+    split_snapshot = model_dir / "split.json"
+    if split_snapshot.exists():
+        with open(split_snapshot) as f:
+            split = json.load(f)
+        print(f"  [Split] 使用模型快照: {split_snapshot}")
+    else:
+        split = load_data_split(cfg)
+        print(f"  [Split] 使用全局 split: {Path(cfg.prepared_dir) / 'split.json'}")
     metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
     product_col = ("product_fine" if cfg.product_granularity == "fine"
                    else "product_coarse")
-    out_dir = Path(cfg.output_dir)
     viz_dir = out_dir / "visualizations"
 
     # ── 加载模型 ──
-    model_dir = out_dir / "final_model"
     if not (model_dir / "model.pt").exists():
         print("未找到 final_model/model.pt, 请先运行 python main.py train")
         return

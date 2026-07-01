@@ -15,80 +15,80 @@ import torch
 from config import Config
 
 
+class _TeeStream:
+    """Write console output to both terminal and a run-local log file."""
+
+    def __init__(self, stream, log_file):
+        self.stream = stream
+        self.log_file = log_file
+
+    def write(self, s):
+        self.stream.write(s)
+        self.log_file.write(s)
+        self.log_file.flush()
+
+    def flush(self):
+        self.stream.flush()
+        self.log_file.flush()
+
+
+def _run_with_log(cfg, log_name, fn):
+    """Run a command and save stdout/stderr into cfg.output_dir/log_name."""
+    log_path = Path(cfg.output_dir) / log_name
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    orig_stdout, orig_stderr = sys.stdout, sys.stderr
+    with open(log_path, "w", encoding="utf-8") as log_f:
+        sys.stdout = _TeeStream(orig_stdout, log_f)
+        sys.stderr = _TeeStream(orig_stderr, log_f)
+        try:
+            return fn()
+        finally:
+            sys.stdout = orig_stdout
+            sys.stderr = orig_stderr
+            print(f"日志已保存到 {log_path}")
+
+
 def cmd_prepare(cfg):
-    from data_prepare import scan_dataset, convert_all, _build_tensor_paths
-    from dataset import create_data_split
-    import numpy as np
+    def _impl():
+        from data_prepare import scan_dataset, convert_all, _build_tensor_paths
+        from dataset import create_data_split
+        import numpy as np
 
-    metadata = scan_dataset(cfg.dataset_root)
-    print("\n产品分布:")
-    print(metadata["code"].value_counts().to_string())
+        metadata = scan_dataset(cfg.dataset_root)
+        print("\n产品分布:")
+        print(metadata["code"].value_counts().to_string())
 
-    # ── Step 1: 先保存 metadata.csv + 创建 split ──
-    out_dir = Path(cfg.prepared_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    tensor_dir = out_dir / "tensors"
-    tensor_dir.mkdir(parents=True, exist_ok=True)
+        # ── Step 1: 先保存 metadata.csv + 创建 split ──
+        out_dir = Path(cfg.prepared_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        tensor_dir = out_dir / "tensors"
+        tensor_dir.mkdir(parents=True, exist_ok=True)
 
-    metadata = metadata.copy()
-    metadata["tensor_path"] = _build_tensor_paths(metadata, tensor_dir, cfg)
-    metadata_csv = str(out_dir / "metadata.csv")
-    metadata.to_csv(metadata_csv, index=False, encoding="utf-8-sig")
+        metadata = metadata.copy()
+        metadata["tensor_path"] = _build_tensor_paths(metadata, tensor_dir, cfg)
+        metadata_csv = str(out_dir / "metadata.csv")
+        metadata.to_csv(metadata_csv, index=False, encoding="utf-8-sig")
 
-    product_col = ("product_fine" if cfg.product_granularity == "fine"
-                   else "product_coarse")
-    split = create_data_split(metadata_csv, cfg, product_col=product_col)
+        product_col = ("product_fine" if cfg.product_granularity == "fine"
+                       else "product_coarse")
+        split = create_data_split(metadata_csv, cfg, product_col=product_col)
 
-    # ── Step 2: PCA 仅用训练集拟合, 全部样本转换 ──
-    convert_all(metadata, cfg.prepared_dir, cfg, fit_indices=split["train_idx"])
+        # ── Step 2: PCA 仅用训练集拟合, 全部样本转换 ──
+        convert_all(metadata, cfg.prepared_dir, cfg, fit_indices=split["train_idx"])
+
+    return _run_with_log(cfg, "prepare.log", _impl)
 
 
 def cmd_train(cfg):
     """训练单一最终模型。"""
-    import sys as _sys
     from train import train_single_model
-    log_path = Path(cfg.output_dir) / "train.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    _orig_stdout = _sys.stdout
-    with open(log_path, "w", encoding="utf-8") as _log_f:
-        class _Tee:
-            def write(self, s):
-                _orig_stdout.write(s)
-                _log_f.write(s)
-                _log_f.flush()
-            def flush(self):
-                _orig_stdout.flush()
-                _log_f.flush()
-        _sys.stdout = _Tee()
-        try:
-            train_single_model(cfg)
-        finally:
-            _sys.stdout = _orig_stdout
-    print(f"训练日志已保存到 {log_path}")
+    return _run_with_log(cfg, "train.log", lambda: train_single_model(cfg))
 
 
 def cmd_evaluate(cfg):
     """加载已保存模型, 运行 Setting A/B/C 评估。"""
-    import sys as _sys
     from evaluate import evaluate_single_model
-    log_path = Path(cfg.output_dir) / "eval.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    _orig_stdout = _sys.stdout
-    with open(log_path, "w", encoding="utf-8") as _log_f:
-        class _Tee:
-            def write(self, s):
-                _orig_stdout.write(s)
-                _log_f.write(s)
-                _log_f.flush()
-            def flush(self):
-                _orig_stdout.flush()
-                _log_f.flush()
-        _sys.stdout = _Tee()
-        try:
-            evaluate_single_model(cfg)
-        finally:
-            _sys.stdout = _orig_stdout
-    print(f"评估日志已保存到 {log_path}")
+    return _run_with_log(cfg, "eval.log", lambda: evaluate_single_model(cfg))
 
 
 def cmd_register(cfg, new_data_dir):
@@ -276,6 +276,8 @@ def main():
                         help="对比方法 (逗号分隔), 默认全部运行")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="输出目录。train 默认会在该目录下创建 run_时间戳 子目录")
+    parser.add_argument("--prepared_dir", type=str, default=None,
+                        help="prepared data 目录，默认 new_prepared_data")
     parser.add_argument("--seed", type=int, default=None,
                         help="随机种子")
     parser.add_argument("--epochs", type=int, default=None,
@@ -323,6 +325,8 @@ def main():
 
     if args.output_dir:
         cfg.output_dir = str(Path(args.output_dir))
+    if args.prepared_dir:
+        cfg.prepared_dir = str(Path(args.prepared_dir))
     for name in (
         "seed", "epochs", "batch_size", "lr",
         "lambda_hard_pair", "hard_pair_margin",
@@ -362,8 +366,10 @@ def main():
             raise ValueError(f"m/z 范围非法: mz_min={mz_min}, mz_max={mz_max}")
         cfg.mz_range = (float(mz_min), float(mz_max))
 
-    # train 自动创建时间戳子目录；evaluate 使用传入的 output_dir
-    if args.command == "train":
+    # prepare/train 自动创建时间戳子目录；evaluate 使用传入的 run 目录
+    if args.command == "evaluate" and Path(cfg.output_dir).name == "final_model":
+        cfg.output_dir = str(Path(cfg.output_dir).parent)
+    if args.command in ("prepare", "train"):
         import time as _time
         _ts = _time.strftime("%Y%m%d_%H%M%S")
         cfg.output_dir = str(Path(cfg.output_dir) / f"run_{_ts}")

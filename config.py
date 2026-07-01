@@ -81,10 +81,10 @@ class Config:
         Path(__file__).resolve().parent / "dataset"
     )
     output_dir: str = str(
-        Path(__file__).resolve().parent / "outputs"
+        Path(__file__).resolve().parent / "new_outputs"
     )
     prepared_dir: str = str(
-        Path(__file__).resolve().parent / "prepared_data"
+        Path(__file__).resolve().parent / "new_prepared_data"
     )
 
     # ── RT × m/z 网格 ────────────────────────────────────
@@ -120,7 +120,7 @@ class Config:
     # ── 主算法选择 (默认回到 README 主模型) ─────────────────
     primary_model: str = "deep_consistency"   # deep_consistency / raw_pca_mlp
     input_raw_pca_enabled: bool = True         # 仅 deep_consistency: raw -> PCA -> model
-    input_raw_pca_components: int = 128
+    input_raw_pca_components: int = 256
     raw_pca_components: int = 128
     raw_pca_hidden: str = "128,64"
     raw_pca_max_iter: int = 300
@@ -131,20 +131,20 @@ class Config:
     raw_fewshot_c_3shot: float = 2.0
 
     # ── 训练 (单阶段) ──────────────────────────────────────
-    epochs: int = 200
-    batch_size: int = 8
+    epochs: int = 100
+    batch_size: int = 32
     lr: float = 3e-4
     weight_decay: float = 1e-4
     eval_interval: int = 10                # 兼容开关: 未启用分阶段验证时使用
     eval_interval_search: int = 10         # 搜索阶段验证间隔
-    eval_interval_final: int = 5           # 收敛阶段验证间隔(更密)
+    eval_interval_final: int = 10          # 收敛阶段验证间隔
     eval_final_start_ratio: float = 0.7    # 从总训练进度该比例起切到收敛阶段
     early_stop_patience: int = 0           # 早停耐心(验证次数), 0=关闭
     min_epochs_before_early_stop: int = 0  # 早停前最少训练 epoch, 0=按比例自动计算
     min_epoch_ratio_before_early_stop: float = 0.6  # 早停前最少训练比例
     early_stop_min_lr_ratio: float = 0.2   # 仅当 lr <= 初始lr*ratio 才允许早停
     early_stop_min_delta: float = 5e-4     # 判定“有提升”的最小 metric 增量
-    proto_val_subset_ratio: float = 0.35   # 训练中期验证: 原型构建使用训练子集比例
+    proto_val_subset_ratio: float = 0.5    # 训练中期验证: 原型构建使用训练子集比例
     proto_val_subset_min_samples: int = 256
     proto_val_subset_max_samples: int = 1024
     proto_val_full_every: int = 3          # 每隔 N 次验证做一次全量原型验证
@@ -158,15 +158,26 @@ class Config:
     # L = L_supcon + λ₁·L_adv + λ₂·L_proto + λ_recon·L_recon
     # 无 softmax 分类损失: 类别数不写入网络权重, 支持注册即用
     lambda_supcon: float = 1.0                # 监督对比损失 (类间可分)
-    lambda_adv: float = 0.1                   # λ₁ 批次对抗 (去批次)
-    lambda_proto: float = 0.5                 # λ₂ 原型紧凑 (类内紧凑)
+    lambda_adv: float = 0.0                   # λ₁ 批次对抗 (当前稳定路线关闭)
+    lambda_proto: float = 1.0                 # λ₂ 原型紧凑 (类内紧凑)
     lambda_recon: float = 0.2                 # 重建正则
-    supcon_temperature: float = 0.07          # SupCon 温度参数
-    proto_margin: float = 1.0                 # 原型损失推斥间距
+    lambda_cls: float = 0.5                   # CE 分类辅助头权重
+    lambda_hard_pair: float = 0.05            # 易混产品对边界约束
+    supcon_temperature: float = 0.10          # SupCon 温度参数
+    proto_margin: float = 1.5                 # 原型损失推斥间距
+    hard_pair_margin: float = 0.35            # 易混对最近异类原型至少远出该距离
+    hard_pair_names: Tuple[Tuple[str, str], ...] = (
+        ("H88", "H99"),
+        ("RJD", "YJD"),
+    )
 
     # ── 一致性与原型 ─────────────────────────────────────
     accept_percentile: float = 95.0           # 一致性径阈值百分位
     reject_threshold_factor: float = 2.0      # 拒识: dist > factor * radius
+    use_spherical_prototypes: bool = True
+    open_score_base_weight: float = 1.0       # 开集分数: base score 权重
+    open_score_margin_weight: float = 0.0     # 开集分数: 最近邻间隔权重
+    evaluate_readme_baselines: bool = True    # 完整评估时是否重跑 README baselines
 
     # ── 增量注册微调 ─────────────────────────────────────
     finetune_epochs: int = 20                 # 微调轮数
@@ -188,8 +199,14 @@ class Config:
     holdout_product_min_batches: int = 8      # 留出产品的最少批次覆盖
     holdout_batch_min_samples: int = 60       # 留出批次的最少样本数(已知类)
     holdout_batch_min_classes: int = 5        # 留出批次最少覆盖的已知产品数
-    preferred_holdout_products: Tuple[str, ...] = ()
-    preferred_holdout_batches: Tuple[str, ...] = ()
+    preferred_holdout_products: Tuple[str, ...] = ("HMD", "XCJ")
+    preferred_holdout_batches: Tuple[str, ...] = ("20250905", "20250912", "20250920")
+    preferred_val_batches: Tuple[str, ...] = ("20250926", "20250828")
+    avoid_val_batches: Tuple[str, ...] = ("20260306",)
+    stress_test_batches: Tuple[str, ...] = ("20260306",)
+    val_batch_max_product_frac: float = 0.55
+    val_batch_min_hard_pair_samples: int = 2
+    auto_create_split_on_train: bool = True
     val_ratio: float = 0.1                    # train_batches 内伪验证批次比例
     split_seed: int = 42                      # 数据划分随机种子
 
