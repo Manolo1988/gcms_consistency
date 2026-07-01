@@ -45,14 +45,50 @@ def cmd_prepare(cfg):
 
 def cmd_train(cfg):
     """训练单一最终模型。"""
+    import sys as _sys
     from train import train_single_model
-    train_single_model(cfg)
+    log_path = Path(cfg.output_dir) / "train.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    _orig_stdout = _sys.stdout
+    with open(log_path, "w", encoding="utf-8") as _log_f:
+        class _Tee:
+            def write(self, s):
+                _orig_stdout.write(s)
+                _log_f.write(s)
+                _log_f.flush()
+            def flush(self):
+                _orig_stdout.flush()
+                _log_f.flush()
+        _sys.stdout = _Tee()
+        try:
+            train_single_model(cfg)
+        finally:
+            _sys.stdout = _orig_stdout
+    print(f"训练日志已保存到 {log_path}")
 
 
 def cmd_evaluate(cfg):
     """加载已保存模型, 运行 Setting A/B/C 评估。"""
+    import sys as _sys
     from evaluate import evaluate_single_model
-    evaluate_single_model(cfg)
+    log_path = Path(cfg.output_dir) / "eval.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    _orig_stdout = _sys.stdout
+    with open(log_path, "w", encoding="utf-8") as _log_f:
+        class _Tee:
+            def write(self, s):
+                _orig_stdout.write(s)
+                _log_f.write(s)
+                _log_f.flush()
+            def flush(self):
+                _orig_stdout.flush()
+                _log_f.flush()
+        _sys.stdout = _Tee()
+        try:
+            evaluate_single_model(cfg)
+        finally:
+            _sys.stdout = _orig_stdout
+    print(f"评估日志已保存到 {log_path}")
 
 
 def cmd_register(cfg, new_data_dir):
