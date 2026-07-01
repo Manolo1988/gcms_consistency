@@ -11,18 +11,16 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 
 def get_device():
-    
     """自动选择最佳可用设备: CUDA > MPS > CPU。
     
     MPS 上的部分算子 (ConvTranspose2d backward 等) 存在兼容问题，
     通过试运行检测实际可用性。
     """
     import torch
-    return torch.device("cuda:1")
-    if torch.cuda.is_available():
+    if torch.version.cuda is not None and torch.cuda.is_available():
         visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
         if visible:
-            return torch.device("cuda:1")
+            return torch.device("cuda")
 
         try:
             cmd = [
@@ -175,8 +173,8 @@ class Config:
     accept_percentile: float = 95.0           # 一致性径阈值百分位
     reject_threshold_factor: float = 2.0      # 拒识: dist > factor * radius
     use_spherical_prototypes: bool = True
-    open_score_base_weight: float = 1.0       # 开集分数: base score 权重
-    open_score_margin_weight: float = 0.0     # 开集分数: 最近邻间隔权重
+    open_score_base_weight: float = 0.2       # 开集分数: base score 权重
+    open_score_margin_weight: float = 0.8     # 开集分数: 最近邻间隔权重
     evaluate_readme_baselines: bool = True    # 完整评估时是否重跑 README baselines
 
     # ── 增量注册微调 ─────────────────────────────────────

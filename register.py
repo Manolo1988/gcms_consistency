@@ -131,6 +131,8 @@ class PrototypeStore:
         self.spherical_prototypes = {}  # 球面调整后的原型
         self.spherical_radii = {}  # 球面空间半径(与余弦距离匹配)
         self._class_embeddings = {}  # 运行时缓存: 用于重估球面半径
+        self.open_score_base_weight = 0.2
+        self.open_score_margin_weight = 0.8
 
     def register(self, class_name, embeddings, percentile=95.0):
         """
@@ -317,6 +319,8 @@ class PrototypeStore:
             "spherical_radii": {
                 k: float(v) for k, v in self.spherical_radii.items()
             },
+            "open_score_base_weight": float(self.open_score_base_weight),
+            "open_score_margin_weight": float(self.open_score_margin_weight),
         }
         with open(path / "proto_meta.json", "w") as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)
@@ -338,6 +342,12 @@ class PrototypeStore:
             meta = json.load(f)
 
         self.class_names = meta["class_names"]
+        self.open_score_base_weight = float(
+            meta.get("open_score_base_weight", self.open_score_base_weight)
+        )
+        self.open_score_margin_weight = float(
+            meta.get("open_score_margin_weight", self.open_score_margin_weight)
+        )
         self.radii = {k: float(v) for k, v in meta["radii"].items()}
         if "spherical_radii" in meta:
             self.spherical_radii = {

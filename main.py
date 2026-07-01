@@ -50,31 +50,18 @@ def _run_with_log(cfg, log_name, fn):
 
 def cmd_prepare(cfg):
     def _impl():
-        from data_prepare import scan_dataset, convert_all, _build_tensor_paths
+        from data_prepare import scan_dataset, convert_all
         from dataset import create_data_split
-        import numpy as np
-
         metadata = scan_dataset(cfg.dataset_root)
         print("\n产品分布:")
         print(metadata["code"].value_counts().to_string())
+        convert_all(metadata, cfg.prepared_dir, cfg)
 
-        # ── Step 1: 先保存 metadata.csv + 创建 split ──
-        out_dir = Path(cfg.prepared_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        tensor_dir = out_dir / "tensors"
-        tensor_dir.mkdir(parents=True, exist_ok=True)
-
-        metadata = metadata.copy()
-        metadata["tensor_path"] = _build_tensor_paths(metadata, tensor_dir, cfg)
-        metadata_csv = str(out_dir / "metadata.csv")
-        metadata.to_csv(metadata_csv, index=False, encoding="utf-8-sig")
-
+        # 创建固定数据划分
+        metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
         product_col = ("product_fine" if cfg.product_granularity == "fine"
                        else "product_coarse")
-        split = create_data_split(metadata_csv, cfg, product_col=product_col)
-
-        # ── Step 2: PCA 仅用训练集拟合, 全部样本转换 ──
-        convert_all(metadata, cfg.prepared_dir, cfg, fit_indices=split["train_idx"])
+        create_data_split(metadata_csv, cfg, product_col=product_col)
 
     return _run_with_log(cfg, "prepare.log", _impl)
 
@@ -275,9 +262,9 @@ def main():
     parser.add_argument("--methods", type=str, default=None,
                         help="对比方法 (逗号分隔), 默认全部运行")
     parser.add_argument("--output_dir", type=str, default=None,
-                        help="输出目录。train 默认会在该目录下创建 run_时间戳 子目录")
+                        help="输出目录。prepare/train 默认会在该目录下创建 run_时间戳 子目录")
     parser.add_argument("--prepared_dir", type=str, default=None,
-                        help="prepared data 目录，默认 new_prepared_data")
+                        help="prepared data 目录")
     parser.add_argument("--seed", type=int, default=None,
                         help="随机种子")
     parser.add_argument("--epochs", type=int, default=None,
@@ -297,11 +284,11 @@ def main():
     parser.add_argument("--eval_interval", type=int, default=None,
                         help="验证间隔 epoch")
     parser.add_argument("--stress_test_batches", type=str, default=None,
-                        help="额外压力测试批次, 逗号分隔；默认 20260306")
+                        help="额外压力测试批次, 逗号分隔")
     parser.add_argument("--no_auto_create_split_on_train", action="store_true",
                         help="训练前不自动刷新 split.json")
     parser.add_argument("--skip_readme_baselines", action="store_true",
-                        help="评估时跳过 README baselines, 只跑主模型 Setting A/B/C")
+                        help="评估时跳过 README baselines")
 
     # 数据准备选项
     parser.add_argument("--save_plot", dest="save_prepare_plots",
@@ -366,13 +353,13 @@ def main():
             raise ValueError(f"m/z 范围非法: mz_min={mz_min}, mz_max={mz_max}")
         cfg.mz_range = (float(mz_min), float(mz_max))
 
-    # prepare/train 自动创建时间戳子目录；evaluate 使用传入的 run 目录
     if args.command == "evaluate" and Path(cfg.output_dir).name == "final_model":
         cfg.output_dir = str(Path(cfg.output_dir).parent)
     if args.command in ("prepare", "train"):
         import time as _time
-        _ts = _time.strftime("%Y%m%d_%H%M%S")
-        cfg.output_dir = str(Path(cfg.output_dir) / f"run_{_ts}")
+        cfg.output_dir = str(
+            Path(cfg.output_dir) / f"run_{_time.strftime('%Y%m%d_%H%M%S')}"
+        )
 
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
 

@@ -292,6 +292,18 @@ def open_set_metrics(known_records, unknown_records):
     return result
 
 
+def apply_open_score_blend(records, base_weight=0.75, margin_weight=0.25):
+    """Apply configured base/margin blend to records in-place for open-set metrics."""
+    weight_sum = max(float(base_weight) + float(margin_weight), 1e-8)
+    bw = float(base_weight) / weight_sum
+    mw = float(margin_weight) / weight_sum
+    for r in records:
+        base = float(r.get("base_score", r.get("open_set_score", 0.0)))
+        margin = float(r.get("margin_score", 0.0))
+        r["open_set_score"] = bw * base + mw * margin
+    return bw, mw
+
+
 def open_set_score_blend_diagnostics(known_records, unknown_records):
     """Grid-search base/margin score blends for open-set diagnostics."""
     if not known_records or not unknown_records:
@@ -945,10 +957,22 @@ def evaluate_setting_b(model, proto_store, loader_known, loader_unknown,
         model, loader_unknown, proto_store, device,
         reject_factor=cfg.reject_threshold_factor)
 
+    base_weight, margin_weight = apply_open_score_blend(
+        known_records,
+        base_weight=getattr(cfg, "open_score_base_weight", 0.75),
+        margin_weight=getattr(cfg, "open_score_margin_weight", 0.25),
+    )
+    apply_open_score_blend(
+        unknown_records,
+        base_weight=base_weight,
+        margin_weight=margin_weight,
+    )
+
     osm = open_set_metrics(known_records, unknown_records)
     blend_diag = open_set_score_blend_diagnostics(known_records, unknown_records)
 
     print(f"\n── Setting B [{fold_name}] ──")
+    print(f"  Score blend:     base={base_weight:.2f}, margin={margin_weight:.2f}")
     print(f"  Open-set AUROC:  {osm['open_set_AUROC']:.4f}")
     print(f"  FPR@95TPR:       {osm['FPR_at_95TPR']:.4f}")
     print(f"  Known mean:      {osm['known_score_mean']:.4f}")
@@ -1078,6 +1102,17 @@ def evaluate_single_model(cfg):
     proto_dir = model_dir / "prototypes"
     if proto_dir.exists():
         proto_store.load(proto_dir)
+    proto_store.open_score_base_weight = float(
+        getattr(cfg, "open_score_base_weight", proto_store.open_score_base_weight)
+    )
+    proto_store.open_score_margin_weight = float(
+        getattr(cfg, "open_score_margin_weight", proto_store.open_score_margin_weight)
+    )
+    print(
+        "  [OpenScore] "
+        f"base={proto_store.open_score_base_weight:.2f}, "
+        f"margin={proto_store.open_score_margin_weight:.2f}"
+    )
 
     def _make_loader_main(indices):
         ds = GCMSDataset(metadata_csv, product_col=product_col,
