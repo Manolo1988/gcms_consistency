@@ -252,6 +252,10 @@ def main():
                         help="易混产品对 hard margin 权重")
     parser.add_argument("--hard_pair_margin", type=float, default=None,
                         help="易混产品对 hard margin 距离")
+    parser.add_argument("--open_score_base_weight", type=float, default=None,
+                        help="开集分数 base score 权重")
+    parser.add_argument("--open_score_margin_weight", type=float, default=None,
+                        help="开集分数 margin score 权重")
     parser.add_argument("--eval_interval", type=int, default=None,
                         help="验证间隔 epoch")
     parser.add_argument("--stress_test_batches", type=str, default=None,
@@ -284,6 +288,7 @@ def main():
     for name in (
         "seed", "epochs", "batch_size", "lr",
         "lambda_hard_pair", "hard_pair_margin",
+        "open_score_base_weight", "open_score_margin_weight",
     ):
         value = getattr(args, name)
         if value is not None:

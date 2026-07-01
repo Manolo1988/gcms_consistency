@@ -93,10 +93,14 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
         for i in range(x.size(0)):
             pred_idx = result["pred_idx"][i].item()
             score = result["scores"][i].item()
+            base_score = result["base_scores"][i].item()
+            margin_score = result["margin_scores"][i].item()
             min_dist = result["min_dists"][i].item()
+            second_dist = result["second_dists"][i].item()
+            pred_class_name = str(result["pred_class"][i])
+            radius = float(proto_store.radii.get(pred_class_name, 1.0))
             true_label = batch["product"][i].item()
             true_class_name = label_name_map.get(int(true_label), str(int(true_label)))
-            pred_class_name = str(result["pred_class"][i])
 
             # 拒识判定
             is_known = proto_store.is_known(
@@ -114,7 +118,10 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
                 "pred_class": pred_class_name,
                 "consistency_score": score,
                 "open_set_score": result["scores"][i].item(),
-                "margin_score": result["margin_scores"][i].item(),
+                "base_score": base_score,
+                "margin_score": margin_score,
+                "second_dist": second_dist,
+                "radius_norm": float(min_dist / max(radius, 1e-8)),
                 "min_dist": min_dist,
                 "is_known": bool(is_known),
                 "correct": pred_class_name == true_class_name,
@@ -283,6 +290,61 @@ def open_set_metrics(known_records, unknown_records):
     result["known_score_mean"] = float(known_scores.mean()) if len(known_scores) else float(np.nan)
     result["unknown_score_mean"] = float(unknown_scores.mean()) if len(unknown_scores) else float(np.nan)
     return result
+
+
+def open_set_score_blend_diagnostics(known_records, unknown_records):
+    """Grid-search base/margin score blends for open-set diagnostics."""
+    if not known_records or not unknown_records:
+        return {}
+
+    labels = np.concatenate([
+        np.ones(len(known_records), dtype=np.int64),
+        np.zeros(len(unknown_records), dtype=np.int64),
+    ])
+    known_base = np.array([r.get("base_score", r.get("open_set_score", 0.0)) for r in known_records])
+    unknown_base = np.array([r.get("base_score", r.get("open_set_score", 0.0)) for r in unknown_records])
+    known_margin = np.array([r.get("margin_score", 0.0) for r in known_records])
+    unknown_margin = np.array([r.get("margin_score", 0.0) for r in unknown_records])
+
+    base_all = np.concatenate([known_base, unknown_base])
+    margin_all = np.concatenate([known_margin, unknown_margin])
+
+    candidates = []
+    for base_weight in np.linspace(0.0, 1.0, 11):
+        margin_weight = 1.0 - float(base_weight)
+        scores = float(base_weight) * base_all + margin_weight * margin_all
+        if len(np.unique(labels)) <= 1:
+            auroc = float(np.nan)
+            fpr95 = float(np.nan)
+        else:
+            auroc = float(roc_auc_score(labels, scores))
+            fpr, tpr, _thresholds = roc_curve(labels, scores)
+            idx_95 = np.searchsorted(tpr, 0.95)
+            fpr95 = float(fpr[min(idx_95, len(fpr) - 1)])
+        candidates.append({
+            "base_weight": float(base_weight),
+            "margin_weight": float(margin_weight),
+            "open_set_AUROC": auroc,
+            "FPR_at_95TPR": fpr95,
+            "known_score_mean": float(scores[labels == 1].mean()),
+            "unknown_score_mean": float(scores[labels == 0].mean()),
+        })
+
+    finite = [
+        c for c in candidates
+        if np.isfinite(c["open_set_AUROC"]) and np.isfinite(c["FPR_at_95TPR"])
+    ]
+    best = None
+    if finite:
+        best = sorted(
+            finite,
+            key=lambda c: (c["FPR_at_95TPR"], -c["open_set_AUROC"])
+        )[0]
+
+    return {
+        "best": best or {},
+        "candidates": candidates,
+    }
 
 
 def _records_from_arrays(preds, scores, embeddings, true_labels, batch_labels,
@@ -721,7 +783,8 @@ def few_shot_evaluate(model, dataset, ref_idx, test_idx, label_names,
     # 用参考样本注册
     proto_store, _, _ = register_from_loader(
         model, ref_loader, label_names, device,
-        percentile=cfg.accept_percentile
+        percentile=cfg.accept_percentile,
+        cfg=cfg,
     )
 
     # 在测试集上评估
@@ -883,14 +946,23 @@ def evaluate_setting_b(model, proto_store, loader_known, loader_unknown,
         reject_factor=cfg.reject_threshold_factor)
 
     osm = open_set_metrics(known_records, unknown_records)
+    blend_diag = open_set_score_blend_diagnostics(known_records, unknown_records)
 
     print(f"\n── Setting B [{fold_name}] ──")
     print(f"  Open-set AUROC:  {osm['open_set_AUROC']:.4f}")
     print(f"  FPR@95TPR:       {osm['FPR_at_95TPR']:.4f}")
     print(f"  Known mean:      {osm['known_score_mean']:.4f}")
     print(f"  Unknown mean:    {osm['unknown_score_mean']:.4f}")
+    if blend_diag.get("best"):
+        best = blend_diag["best"]
+        print(
+            "  Best blend diag: "
+            f"base={best['base_weight']:.2f}, margin={best['margin_weight']:.2f}, "
+            f"AUROC={best['open_set_AUROC']:.4f}, "
+            f"FPR95={best['FPR_at_95TPR']:.4f}"
+        )
 
-    return {"open_set": osm}
+    return {"open_set": osm, "score_blend_diagnostics": blend_diag}
 
 
 def evaluate_setting_c(model, unknown_dataset, unknown_idx_splits,
@@ -1254,6 +1326,10 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
         summary["setting_b"] = {
             k: _s(v) for k, v in result_b["open_set"].items()
         }
+        if result_b.get("score_blend_diagnostics"):
+            summary["setting_b_score_blend_diagnostics"] = _s_recursive(
+                result_b["score_blend_diagnostics"]
+            )
 
     if result_c:
         summary["setting_c"] = {

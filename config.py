@@ -141,6 +141,8 @@ class Config:
     accept_percentile: float = 95.0           # 一致性径阈值百分位
     reject_threshold_factor: float = 2.0      # 拒识: dist > factor * radius
     use_spherical_prototypes: bool = True     # 球面重分布平衡各类半径 (分类/注册必须)
+    open_score_base_weight: float = 0.75      # 开集分数: base score 权重
+    open_score_margin_weight: float = 0.25    # 开集分数: 最近邻间隔权重
 
     # ── 增量注册微调 ─────────────────────────────────────
     finetune_epochs: int = 20                 # 微调轮数

@@ -260,7 +260,12 @@ class PrototypeStore:
             second_dists = min_dists
             margin_scores = torch.ones_like(min_dists)
 
-        scores = 0.75 * base_scores + 0.25 * margin_scores
+        base_weight = float(getattr(self, "open_score_base_weight", 0.75))
+        margin_weight = float(getattr(self, "open_score_margin_weight", 0.25))
+        weight_sum = max(base_weight + margin_weight, 1e-8)
+        base_weight = base_weight / weight_sum
+        margin_weight = margin_weight / weight_sum
+        scores = base_weight * base_scores + margin_weight * margin_scores
 
         pred_class = [self.class_names[i] for i in pred_idx.cpu().tolist()]
 
@@ -270,6 +275,8 @@ class PrototypeStore:
             "scores": scores,
             "base_scores": base_scores,
             "margin_scores": margin_scores,
+            "open_score_base_weight": base_weight,
+            "open_score_margin_weight": margin_weight,
             "second_dists": second_dists,
             "min_dists": min_dists,
             "all_dists": all_dists,
@@ -415,7 +422,8 @@ def compute_prototypes(model, dataloader, device, percentile=95.0):
 
 
 def register_from_loader(model, dataloader, label_names, device,
-                         percentile=95.0, use_spherical=True):
+                         percentile=95.0, use_spherical=True,
+                         cfg=None):
     """
     从 DataLoader 注册所有类原型。
 
@@ -425,6 +433,13 @@ def register_from_loader(model, dataloader, label_names, device,
     all_z, all_labels, unique_labels, store = compute_prototypes(
         model, dataloader, device, percentile
     )
+    if cfg is not None:
+        store.open_score_base_weight = float(
+            getattr(cfg, "open_score_base_weight", 0.75)
+        )
+        store.open_score_margin_weight = float(
+            getattr(cfg, "open_score_margin_weight", 0.25)
+        )
 
     for lbl in unique_labels:
         mask = all_labels == lbl

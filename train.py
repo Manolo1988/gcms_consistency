@@ -416,6 +416,7 @@ def validate_with_prototypes(model, train_loader_noaug, val_loader,
     proto_store, train_z, train_labels = register_from_loader(
         model, train_loader_noaug, label_names, device,
         percentile=cfg.accept_percentile,
+        cfg=cfg,
         use_spherical=getattr(cfg, "use_spherical_prototypes", True))
 
     # ── 训练集自检: train_proto_acc ──
@@ -701,7 +702,8 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
     # 注册最终原型
     proto_store, all_z, all_labels = register_from_loader(
         model, loader_train_noaug, label_names, device,
-        percentile=cfg.accept_percentile
+        percentile=cfg.accept_percentile,
+        cfg=cfg,
     )
     proto_store.summary()
 
@@ -933,6 +935,7 @@ def train_single_model(cfg: Config):
     proto_store, all_z, all_labels = register_from_loader(
         model, loader_train_noaug, label_names, device,
         percentile=cfg.accept_percentile,
+        cfg=cfg,
         use_spherical=getattr(cfg, "use_spherical_prototypes", True))
     proto_store.summary()
 
