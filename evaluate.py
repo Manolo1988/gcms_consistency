@@ -830,6 +830,48 @@ def evaluate_setting_a(model, loader_train_noaug, loader_val, proto_store,
     }
 
 
+def evaluate_stress_batches(model, loader_train_noaug, make_loader, split,
+                            metadata_csv, product_col, proto_store,
+                            device, cfg):
+    """Evaluate known products on configured stress batches outside model selection."""
+    import pandas as pd
+
+    stress_batches = tuple(str(b) for b in getattr(cfg, "stress_test_batches", ()) or ())
+    if not stress_batches:
+        return {}
+
+    df = pd.read_csv(metadata_csv)
+    if "product_fine" in df.columns:
+        df = df[df["product_fine"] != "BLANK"]
+    if "is_special" in df.columns:
+        df = df[~df["is_special"]]
+    df = df.reset_index(drop=True)
+    if "batch_name" not in df.columns:
+        return {}
+    df = df.copy()
+    df["batch_name"] = df["batch_name"].astype(str)
+
+    known_products = set(str(p) for p in split.get("known_products", []))
+    results = {}
+    for batch_name in stress_batches:
+        idx = df.index[
+            df[product_col].astype(str).isin(known_products)
+            & (df["batch_name"] == batch_name)
+        ].tolist()
+        idx = [int(i) for i in idx]
+        if not idx:
+            print(f"\n── Stress [{batch_name}]: 无已知产品样本 ──")
+            continue
+        _ds_stress, loader_stress = make_loader(idx)
+        result = evaluate_setting_a(
+            model, loader_train_noaug, loader_stress, proto_store,
+            device, cfg, f"stress batch {batch_name}")
+        result["batch_name"] = batch_name
+        result["n_samples"] = len(idx)
+        results[batch_name] = result
+    return results
+
+
 def evaluate_setting_b(model, proto_store, loader_known, loader_unknown,
                        device, cfg, fold_name=""):
     """Setting B: 开放集 — 已知类 vs 未知类判别。"""
@@ -1018,6 +1060,11 @@ def evaluate_single_model(cfg):
         result_a = None
         print("\n── Setting A: 无留出批次测试数据 ──")
 
+    # ═══ Stress Test: 指定困难批次，不参与选模，只做诊断 ═══
+    stress_results = evaluate_stress_batches(
+        model, loader_train, _make_loader_main, split,
+        metadata_csv, product_col, proto_store, device, cfg)
+
     # ═══ Setting B: 开集检测 ═══
     if split["test_unknown_idx"]:
         # 已知类采用 val + 留出批次并集，降低单一批次分布偏差
@@ -1062,16 +1109,17 @@ def evaluate_single_model(cfg):
 
     # ═══ 汇总打印 ═══
     _print_single_summary(result_a, result_b, result_c, cfg,
-                          baselines_readme=baselines_readme)
+                          baselines_readme=baselines_readme,
+                          stress_results=stress_results)
     _save_single_summary(result_a, result_b, result_c, split, out_dir,
                          baselines_readme=baselines_readme,
-                         cfg=cfg)
+                         cfg=cfg, stress_results=stress_results)
 
     return result_a, result_b, result_c
 
 
 def _print_single_summary(result_a, result_b, result_c, cfg,
-                          baselines_readme=None):
+                          baselines_readme=None, stress_results=None):
     """打印单模型评估汇总。"""
     print(f"\n{'='*60}")
     print("单模型评估汇总")
@@ -1107,6 +1155,17 @@ def _print_single_summary(result_a, result_b, result_c, cfg,
             acc = m.get("accuracy", float("nan"))
             f1 = m.get("macro_f1", float("nan"))
             print(f"  {n_shot:2d}-shot: acc={acc:.4f}, f1={f1:.4f}")
+
+    if stress_results:
+        print("\nStress batches (困难批次诊断，不参与选模):")
+        for batch_name, result in stress_results.items():
+            pid = result["product_identification"]
+            rob = result["batch_robustness"]
+            print(
+                f"  {batch_name}: n={result.get('n_samples', 0)}, "
+                f"acc={pid['accuracy']:.4f}, macroF1={pid['macro_f1']:.4f}, "
+                f"batch_pred={rob['batch_predictability']:.4f}"
+            )
 
     if baselines_readme:
         print("\nREADME Baselines 对比:")
@@ -1148,7 +1207,8 @@ def _print_single_summary(result_a, result_b, result_c, cfg,
 
 
 def _save_single_summary(result_a, result_b, result_c, split, out_dir,
-                         baselines_readme=None, cfg=None):
+                         baselines_readme=None, cfg=None,
+                         stress_results=None):
     """保存单模型评估结果到 JSON。"""
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1200,6 +1260,23 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
             str(k): {kk: _s(vv) for kk, vv in v.items()}
             for k, v in result_c["few_shot"].items()
         }
+
+    if stress_results:
+        summary["stress_batches"] = {}
+        for batch_name, result in stress_results.items():
+            summary["stress_batches"][str(batch_name)] = {
+                "n_samples": int(result.get("n_samples", 0)),
+                "product_identification": {
+                    k: _s(v) for k, v in result["product_identification"].items()
+                    if k not in ("confusion", "report")
+                },
+                "consistency_scoring": {
+                    k: _s(v) for k, v in result["consistency_scoring"].items()
+                },
+                "batch_robustness": {
+                    k: _s(v) for k, v in result["batch_robustness"].items()
+                },
+            }
 
     if baselines_readme:
         summary["baselines_readme"] = {}

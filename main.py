@@ -238,6 +238,26 @@ def main():
                         help="新产品数据目录 (register 命令使用)")
     parser.add_argument("--methods", type=str, default=None,
                         help="对比方法 (逗号分隔), 默认全部运行")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="输出目录。train 默认会在该目录下创建 run_时间戳 子目录")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="随机种子")
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="训练 epoch 数")
+    parser.add_argument("--batch_size", type=int, default=None,
+                        help="训练/评估 batch size")
+    parser.add_argument("--lr", type=float, default=None,
+                        help="学习率")
+    parser.add_argument("--lambda_hard_pair", type=float, default=None,
+                        help="易混产品对 hard margin 权重")
+    parser.add_argument("--hard_pair_margin", type=float, default=None,
+                        help="易混产品对 hard margin 距离")
+    parser.add_argument("--eval_interval", type=int, default=None,
+                        help="验证间隔 epoch")
+    parser.add_argument("--stress_test_batches", type=str, default=None,
+                        help="额外压力测试批次, 逗号分隔；默认 20260306")
+    parser.add_argument("--no_auto_create_split_on_train", action="store_true",
+                        help="训练前不自动刷新 split.json")
 
     # 数据准备选项
     parser.add_argument("--save_plot", dest="save_prepare_plots",
@@ -258,6 +278,27 @@ def main():
     args = parser.parse_args()
 
     cfg = Config()
+
+    if args.output_dir:
+        cfg.output_dir = str(Path(args.output_dir))
+    for name in (
+        "seed", "epochs", "batch_size", "lr",
+        "lambda_hard_pair", "hard_pair_margin",
+    ):
+        value = getattr(args, name)
+        if value is not None:
+            setattr(cfg, name, value)
+    if args.eval_interval is not None:
+        cfg.eval_interval = int(args.eval_interval)
+        cfg.eval_interval_search = int(args.eval_interval)
+        cfg.eval_interval_final = int(args.eval_interval)
+    if args.stress_test_batches is not None:
+        cfg.stress_test_batches = tuple(
+            b.strip() for b in args.stress_test_batches.split(",")
+            if b.strip()
+        )
+    if args.no_auto_create_split_on_train:
+        cfg.auto_create_split_on_train = False
 
     cfg.save_prepare_plots = bool(args.save_prepare_plots)
     cfg.save_prepare_tables = bool(args.save_prepare_tables)

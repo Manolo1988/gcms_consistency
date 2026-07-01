@@ -47,7 +47,7 @@ class Config:
         Path(__file__).resolve().parent / "dataset"
     )
     output_dir: str = str(
-        Path(__file__).resolve().parent / "new_outputs" / "run_20260701_113442"
+        Path(__file__).resolve().parent / "new_outputs"
     )
     prepared_dir: str = str(
         Path(__file__).resolve().parent / "new_prepared_data"
@@ -97,7 +97,7 @@ class Config:
     raw_fewshot_c_3shot: float = 2.0
 
     # ── 训练 (单阶段) ──────────────────────────────────────
-    epochs: int = 120
+    epochs: int = 100
     batch_size: int = 32
     lr: float = 3e-4
     weight_decay: float = 1e-4
@@ -166,6 +166,7 @@ class Config:
     preferred_holdout_batches: Tuple[str, ...] = ("20250905", "20250912", "20250920")
     preferred_val_batches: Tuple[str, ...] = ("20250926", "20250828")
     avoid_val_batches: Tuple[str, ...] = ("20260306",)
+    stress_test_batches: Tuple[str, ...] = ("20260306",)
     val_batch_max_product_frac: float = 0.55  # 单个产品占比过高的批次不做常规选模验证
     val_batch_min_hard_pair_samples: int = 2  # 验证批次中每个易混产品至少出现的样本数
     auto_create_split_on_train: bool = True   # 训练前按当前配置刷新 split.json

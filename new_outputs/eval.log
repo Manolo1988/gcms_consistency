@@ -1,0 +1,76 @@
+
+============================================================
+单模型评估
+============================================================
+/home/ubuntu/anaconda3/envs/seas/lib/python3.9/site-packages/sklearn/metrics/_classification.py:2399: UserWarning: y_pred contains classes not in y_true
+  warnings.warn("y_pred contains classes not in y_true")
+
+── Setting A [留出批次 ['20250905', '20250912', '20250920']] ──
+  Accuracy:       0.8393
+  Macro-F1:       0.5531
+  Cross-batch Δ:  0.1531
+  Score AUROC:    0.7698
+  Cohen's d:      1.1532
+  Sil(product):   0.5611
+  Sil(batch):     -0.0109
+  Batch pred:     0.6161
+
+── Setting B [留出产品 ['HMD', 'XCJ']] ──
+  Open-set AUROC:  0.6884
+  FPR@95TPR:       0.8722
+  Known mean:      0.5307
+  Unknown mean:    0.3702
+
+── Setting C [留出产品 ['HMD', 'XCJ']] ──
+  1-shot: acc=0.4809, f1=0.3247
+  3-shot: acc=0.9606, f1=0.9606
+  5-shot: acc=0.9431, f1=0.9430
+  10-shot: acc=0.9381, f1=0.9376
+/home/ubuntu/anaconda3/envs/seas/lib/python3.9/site-packages/sklearn/metrics/_classification.py:2399: UserWarning: y_pred contains classes not in y_true
+  warnings.warn("y_pred contains classes not in y_true")
+
+============================================================
+单模型评估汇总
+============================================================
+
+Setting A (批次一致性 — 已知产品 × 留出批次):
+  Accuracy:          0.8393
+  Macro-F1:          0.5531
+  Cross-batch Δ:     0.1531
+  Score AUROC:       0.7698
+  Cohen's d:         1.1532
+  Sil(product):      0.5611
+  Sil(batch):        -0.0109
+  Batch pred:        0.6161
+
+Setting B (开集检测 — 已知类 vs 留出产品类):
+  Open-set AUROC:    0.6884
+  FPR@95TPR:         0.8722
+  Known score mean:  0.5307
+  Unknown score mean:0.3702
+
+Setting C (少样本 — 留出产品类 N-shot 注册):
+   1-shot: acc=0.4809, f1=0.3247
+   3-shot: acc=0.9606, f1=0.9606
+   5-shot: acc=0.9431, f1=0.9430
+  10-shot: acc=0.9381, f1=0.9376
+
+README Baselines 对比:
+  [PCA+Mahalanobis] feature=raw
+    Setting B: AUROC=0.1295, FPR95=0.9925
+    Setting C 3-shot: acc=0.8661, f1=0.8653
+    Main-Baseline: d_AUROC=0.5589, d_FPR95=-0.1203, d_3shot=0.0945
+  [PLS-DA] feature=raw
+    Setting B: AUROC=0.6262, FPR95=0.7744
+    Setting C 3-shot: acc=0.8819, f1=0.8812
+    Main-Baseline: d_AUROC=0.0622, d_FPR95=0.0977, d_3shot=0.0787
+  [SVM-RBF] feature=raw
+    Setting B: AUROC=0.5451, FPR95=1.0000
+    Setting C 3-shot: acc=0.8189, f1=0.8152
+    Main-Baseline: d_AUROC=0.1433, d_FPR95=-0.1278, d_3shot=0.1417
+  [TIC+PCA+MLP] feature=tic
+    Setting B: AUROC=0.7328, FPR95=0.8346
+    Setting C 3-shot: acc=0.8346, f1=0.8320
+    Main-Baseline: d_AUROC=-0.0444, d_FPR95=0.0376, d_3shot=0.1260
+
+评估结果已保存到 /home/ubuntu/sunlong/gcms_consistency_old/new_outputs/evaluation_summary.json

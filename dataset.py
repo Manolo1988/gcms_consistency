@@ -122,6 +122,8 @@ class GCMSDataset(Dataset):
                  augmentation=None, exclude_blanks=True,
                  exclude_special=True, indices=None,
                  input_transform=None):
+        self.metadata_csv = Path(metadata_csv)
+        self.tensor_root = self.metadata_csv.parent / "tensors"
         df = pd.read_csv(metadata_csv)
 
         if exclude_blanks:
@@ -154,9 +156,23 @@ class GCMSDataset(Dataset):
     def __len__(self):
         return len(self.df)
 
+    def _resolve_tensor_path(self, tensor_path):
+        path = Path(tensor_path)
+        if path.exists():
+            return path
+
+        parts = path.parts
+        if "tensors" in parts:
+            rel = Path(*parts[parts.index("tensors") + 1:])
+            relocated = self.tensor_root / rel
+            if relocated.exists():
+                return relocated
+
+        return path
+
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        data = np.load(row["tensor_path"])
+        data = np.load(self._resolve_tensor_path(row["tensor_path"]))
         x = data["tensor"].astype(np.float32)
 
         if self.input_transform is not None:
