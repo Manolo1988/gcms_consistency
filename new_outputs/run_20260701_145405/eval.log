@@ -1,0 +1,75 @@
+
+============================================================
+单模型评估
+============================================================
+
+── Setting A [留出批次 ['20250905', '20250912', '20250920']] ──
+  Accuracy:       0.7054
+  Macro-F1:       0.2440
+  Cross-batch Δ:  -0.1744
+  Score AUROC:    0.8745
+  Cohen's d:      1.6962
+  Sil(product):   0.2990
+  Sil(batch):     -0.0077
+  Batch pred:     0.6458
+
+── Setting B [留出产品 ['HMD', 'XCJ']] ──
+  Open-set AUROC:  0.6987
+  FPR@95TPR:       0.8947
+  Known mean:      0.2828
+  Unknown mean:    0.1544
+  Best blend diag: base=0.00, margin=1.00, AUROC=0.7028, FPR95=0.8947
+
+── Setting C [留出产品 ['HMD', 'XCJ']] ──
+  1-shot: acc=0.3359, f1=0.2598
+  3-shot: acc=0.8583, f1=0.8582
+  5-shot: acc=0.8862, f1=0.8862
+  10-shot: acc=0.8496, f1=0.8484
+/home/ubuntu/anaconda3/envs/seas/lib/python3.9/site-packages/sklearn/metrics/_classification.py:2399: UserWarning: y_pred contains classes not in y_true
+  warnings.warn("y_pred contains classes not in y_true")
+
+============================================================
+单模型评估汇总
+============================================================
+
+Setting A (批次一致性 — 已知产品 × 留出批次):
+  Accuracy:          0.7054
+  Macro-F1:          0.2440
+  Cross-batch Δ:     -0.1744
+  Score AUROC:       0.8745
+  Cohen's d:         1.6962
+  Sil(product):      0.2990
+  Sil(batch):        -0.0077
+  Batch pred:        0.6458
+
+Setting B (开集检测 — 已知类 vs 留出产品类):
+  Open-set AUROC:    0.6987
+  FPR@95TPR:         0.8947
+  Known score mean:  0.2828
+  Unknown score mean:0.1544
+
+Setting C (少样本 — 留出产品类 N-shot 注册):
+   1-shot: acc=0.3359, f1=0.2598
+   3-shot: acc=0.8583, f1=0.8582
+   5-shot: acc=0.8862, f1=0.8862
+  10-shot: acc=0.8496, f1=0.8484
+
+README Baselines 对比:
+  [PCA+Mahalanobis] feature=raw
+    Setting B: AUROC=0.7380, FPR95=0.9398
+    Setting C 3-shot: acc=0.8268, f1=0.8243
+    Main-Baseline: d_AUROC=-0.0392, d_FPR95=-0.0451, d_3shot=0.0315
+  [PLS-DA] feature=raw
+    Setting B: AUROC=0.9011, FPR95=0.8797
+    Setting C 3-shot: acc=0.8583, f1=0.8568
+    Main-Baseline: d_AUROC=-0.2024, d_FPR95=0.0150, d_3shot=0.0000
+  [SVM-RBF] feature=raw
+    Setting B: AUROC=0.7561, FPR95=0.9850
+    Setting C 3-shot: acc=0.8189, f1=0.8143
+    Main-Baseline: d_AUROC=-0.0574, d_FPR95=-0.0902, d_3shot=0.0394
+  [TIC+PCA+MLP] feature=tic
+    Setting B: AUROC=0.7963, FPR95=0.9474
+    Setting C 3-shot: acc=0.8268, f1=0.8236
+    Main-Baseline: d_AUROC=-0.0976, d_FPR95=-0.0526, d_3shot=0.0315
+
+评估结果已保存到 new_outputs/run_20260701_145405/evaluation_summary.json

@@ -1,0 +1,95 @@
+[Device] Selected CUDA device 0 (mem_used=18 MiB, util=0%)
+  [Split] 使用模型快照: /home/ubuntu/sunlong/gcms_consistency_old/new_outputs/run_seed43_20260701_191146/run_20260701_191147/final_model/split.json
+  [OpenScore] base=0.20, margin=0.80
+
+============================================================
+单模型评估
+============================================================
+/home/ubuntu/anaconda3/envs/seas/lib/python3.9/site-packages/sklearn/metrics/_classification.py:2399: UserWarning: y_pred contains classes not in y_true
+  warnings.warn("y_pred contains classes not in y_true")
+
+── Setting A [留出批次 ['20250905', '20250912', '20250920']] ──
+  Accuracy:       0.8363
+  Macro-F1:       0.5288
+  Cross-batch Δ:  0.1609
+  Score AUROC:    0.5623
+  Cohen's d:      0.5625
+  Sil(product):   0.5610
+  Sil(batch):     -0.0029
+  Batch pred:     0.6667
+
+── Setting A [stress batch 20260306] ──
+  Accuracy:       1.0000
+  Macro-F1:       1.0000
+  Cross-batch Δ:  -0.0028
+  Score AUROC:    nan
+  Cohen's d:      nan
+  Sil(product):   0.9181
+  Sil(batch):     nan
+  Batch pred:     nan
+
+── Setting B [留出产品 ['HMD', 'XCJ']] ──
+  Score blend:     base=0.20, margin=0.80
+  Open-set AUROC:  0.6965
+  FPR@95TPR:       0.8421
+  Known mean:      0.7381
+  Unknown mean:    0.6086
+  Best blend diag: base=0.00, margin=1.00, AUROC=0.7172, FPR95=0.8346
+
+── Setting C [留出产品 ['HMD', 'XCJ']] ──
+  1-shot: acc=0.4885, f1=0.3409
+  3-shot: acc=0.9843, f1=0.9843
+  5-shot: acc=0.9837, f1=0.9837
+  10-shot: acc=0.9912, f1=0.9911
+/home/ubuntu/anaconda3/envs/seas/lib/python3.9/site-packages/sklearn/metrics/_classification.py:2399: UserWarning: y_pred contains classes not in y_true
+  warnings.warn("y_pred contains classes not in y_true")
+
+============================================================
+单模型评估汇总
+============================================================
+
+Setting A (批次一致性 — 已知产品 × 留出批次):
+  Accuracy:          0.8363
+  Macro-F1:          0.5288
+  Cross-batch Δ:     0.1609
+  Score AUROC:       0.5623
+  Cohen's d:         0.5625
+  Sil(product):      0.5610
+  Sil(batch):        -0.0029
+  Batch pred:        0.6667
+
+Setting B (开集检测 — 已知类 vs 留出产品类):
+  Open-set AUROC:    0.6965
+  FPR@95TPR:         0.8421
+  Known score mean:  0.7381
+  Unknown score mean:0.6086
+
+Setting C (少样本 — 留出产品类 N-shot 注册):
+   1-shot: acc=0.4885, f1=0.3409
+   3-shot: acc=0.9843, f1=0.9843
+   5-shot: acc=0.9837, f1=0.9837
+  10-shot: acc=0.9912, f1=0.9911
+
+Stress batches (困难批次诊断，不参与选模):
+  20260306: n=169, acc=1.0000, macroF1=1.0000, batch_pred=nan
+
+README Baselines 对比:
+  [PCA+Mahalanobis] feature=raw
+    Setting B: AUROC=0.2126, FPR95=1.0000
+    Setting C 3-shot: acc=0.8661, f1=0.8653
+    Main-Baseline: d_AUROC=0.4840, d_FPR95=-0.1579, d_3shot=0.1181
+  [PLS-DA] feature=raw
+    Setting B: AUROC=0.7181, FPR95=0.7143
+    Setting C 3-shot: acc=0.8819, f1=0.8812
+    Main-Baseline: d_AUROC=-0.0215, d_FPR95=0.1278, d_3shot=0.1024
+  [SVM-RBF] feature=raw
+    Setting B: AUROC=0.5983, FPR95=0.9398
+    Setting C 3-shot: acc=0.8189, f1=0.8152
+    Main-Baseline: d_AUROC=0.0983, d_FPR95=-0.0977, d_3shot=0.1654
+  [TIC+PCA+MLP] feature=tic
+    Setting B: AUROC=0.8077, FPR95=0.7594
+    Setting C 3-shot: acc=0.8346, f1=0.8320
+    Main-Baseline: d_AUROC=-0.1111, d_FPR95=0.0827, d_3shot=0.1496
+
+评估结果已保存到 /home/ubuntu/sunlong/gcms_consistency_old/new_outputs/run_seed43_20260701_191146/run_20260701_191147/evaluation_summary.json
+日志已保存到 /home/ubuntu/sunlong/gcms_consistency_old/new_outputs/run_seed43_20260701_191146/run_20260701_191147/eval.log

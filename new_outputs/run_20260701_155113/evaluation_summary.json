@@ -40,7 +40,7 @@
   },
   "setting_a_robustness": {
     "silhouette_product": 0.5612212419509888,
-    "silhouette_batch": -0.0003853419912047684,
+    "silhouette_batch": -0.0003853420785162598,
     "batch_predictability": 0.625
   },
   "setting_b": {

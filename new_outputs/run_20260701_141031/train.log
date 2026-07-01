@@ -1,0 +1,18 @@
+Traceback (most recent call last):
+  File "/home/ubuntu/sunlong/gcms_consistency_old/main.py", line 360, in <module>
+    main()
+  File "/home/ubuntu/sunlong/gcms_consistency_old/main.py", line 243, in main
+    parser.add_argument("--output_dir", type=str, default=None,
+  File "/home/ubuntu/anaconda3/envs/seas/lib/python3.9/argparse.py", line 1440, in add_argument
+    return self._add_action(action)
+  File "/home/ubuntu/anaconda3/envs/seas/lib/python3.9/argparse.py", line 1805, in _add_action
+    self._optionals._add_action(action)
+  File "/home/ubuntu/anaconda3/envs/seas/lib/python3.9/argparse.py", line 1642, in _add_action
+    action = super(_ArgumentGroup, self)._add_action(action)
+  File "/home/ubuntu/anaconda3/envs/seas/lib/python3.9/argparse.py", line 1454, in _add_action
+    self._check_conflict(action)
+  File "/home/ubuntu/anaconda3/envs/seas/lib/python3.9/argparse.py", line 1591, in _check_conflict
+    conflict_handler(action, confl_optionals)
+  File "/home/ubuntu/anaconda3/envs/seas/lib/python3.9/argparse.py", line 1600, in _handle_conflict_error
+    raise ArgumentError(action, message % conflict_string)
+argparse.ArgumentError: argument --output_dir: conflicting option string: --output_dir

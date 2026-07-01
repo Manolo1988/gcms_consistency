@@ -1,0 +1,8 @@
+{
+  "num_batches": 28,
+  "num_products": 8,
+  "input_raw_pca_enabled": true,
+  "input_raw_pca_precomputed": true,
+  "input_raw_pca_components": 239,
+  "input_raw_pca_rt_bins": 1024
+}
