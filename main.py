@@ -276,6 +276,12 @@ def main():
             raise ValueError(f"m/z 范围非法: mz_min={mz_min}, mz_max={mz_max}")
         cfg.mz_range = (float(mz_min), float(mz_max))
 
+    # train 自动创建时间戳子目录；evaluate 使用传入的 output_dir
+    if args.command == "train":
+        import time as _time
+        _ts = _time.strftime("%Y%m%d_%H%M%S")
+        cfg.output_dir = str(Path(cfg.output_dir) / f"run_{_ts}")
+
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
 
     if args.command == "prepare":
