@@ -17,7 +17,12 @@ from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import LabelEncoder
 
 from config import Config
-from dataset import GCMSDataset, GCMSAugmentation, load_data_split
+from dataset import (
+    GCMSDataset,
+    GCMSAugmentation,
+    create_data_split,
+    load_data_split,
+)
 from models import GCMSConsistencyNet
 from losses import UnifiedLoss
 from register import register_from_loader
@@ -731,11 +736,15 @@ def train_single_model(cfg: Config):
     from config import get_device
     set_seed(cfg.seed)
 
-    split = load_data_split(cfg)
     device = get_device()
     metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
     product_col = ("product_fine" if cfg.product_granularity == "fine"
                    else "product_coarse")
+    if bool(getattr(cfg, "auto_create_split_on_train", True)):
+        print("  [Split] 按当前配置刷新 split.json")
+        split = create_data_split(metadata_csv, cfg, product_col=product_col)
+    else:
+        split = load_data_split(cfg)
 
     print(f"\n{'='*60}")
     print(f"训练单一模型, device = {device}")

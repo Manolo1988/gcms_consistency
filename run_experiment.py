@@ -79,6 +79,8 @@ def main():
     parser.add_argument("--dataloader_prefetch_factor", type=int, default=None)
     parser.add_argument("--disable_dataloader_pin_memory", action="store_true")
     parser.add_argument("--disable_dataloader_persistent_workers", action="store_true")
+    parser.add_argument("--no_auto_create_split_on_train", action="store_true",
+                        help="Use existing prepared split.json instead of refreshing it before training")
     parser.add_argument("--warmup_guard_enabled", action="store_true",
                         help="Enable warmup guard against current best strategy")
     parser.add_argument("--warmup_guard_epoch", type=int, default=None)
@@ -205,6 +207,8 @@ def main():
         cfg.dataloader_pin_memory = False
     if args.disable_dataloader_persistent_workers:
         cfg.dataloader_persistent_workers = False
+    if args.no_auto_create_split_on_train:
+        cfg.auto_create_split_on_train = False
     if args.warmup_guard_enabled:
         cfg.warmup_guard_enabled = True
     if args.warmup_guard_compare_best:

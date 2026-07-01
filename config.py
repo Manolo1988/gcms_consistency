@@ -128,7 +128,7 @@ class Config:
     lambda_proto: float = 1.0                 # λ₂ 原型紧凑 (类内紧凑)
     lambda_recon: float = 0.2                 # 重建正则
     lambda_cls: float = 0.5                   # CE 分类辅助头权重 (加速产品判别学习)
-    lambda_hard_pair: float = 0.25            # 易混产品对边界约束
+    lambda_hard_pair: float = 0.05            # 易混产品对边界约束(保守, 避免伤害开集)
     supcon_temperature: float = 0.10          # SupCon 温度参数
     proto_margin: float = 1.5                 # 原型损失推斥间距
     hard_pair_margin: float = 0.35            # 易混对最近异类原型至少远出该距离
@@ -168,6 +168,7 @@ class Config:
     avoid_val_batches: Tuple[str, ...] = ("20260306",)
     val_batch_max_product_frac: float = 0.55  # 单个产品占比过高的批次不做常规选模验证
     val_batch_min_hard_pair_samples: int = 2  # 验证批次中每个易混产品至少出现的样本数
+    auto_create_split_on_train: bool = True   # 训练前按当前配置刷新 split.json
     val_ratio: float = 0.1                    # train_batches 内伪验证批次比例
 
     # ── 数据增强 ──────────────────────────────────────────
