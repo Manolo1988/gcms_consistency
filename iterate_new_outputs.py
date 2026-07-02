@@ -1,9 +1,3 @@
-"""Unified auto-iteration entry for SCI-oriented GCMS search.
-
-This version is migrated to the current new_outputs + main.py pipeline.
-It prioritizes Setting B FPR95 reduction while guarding Setting A and few-shot metrics.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -13,6 +7,7 @@ import os
 import random
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -20,25 +15,9 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 OUTPUTS_DIR = PROJECT_ROOT / "new_outputs"
-PROGRESS_LOG = OUTPUTS_DIR / "PROJECT_PROGRESS.md"
-RESULTS_JSONL = OUTPUTS_DIR / "AUTO_SEARCH_RESULTS.jsonl"
-PRACTICAL_RESULTS_JSONL = OUTPUTS_DIR / "AUTO_PRACTICAL_CANDIDATES.jsonl"
+PROGRESS_LOG = OUTPUTS_DIR / "ITERATION_PROGRESS.md"
+RESULTS_JSONL = OUTPUTS_DIR / "ITERATION_RESULTS.jsonl"
 PYTHON = sys.executable
-SCRIPT_TAG = "AUTO3"
-
-TARGETS = {
-    "setting_b_open_set_AUROC_min": 0.88,
-    "setting_b_fpr95_max": 0.35,
-    "setting_c_1shot_acc_min": 0.70,
-    "setting_c_3shot_acc_min": 0.95,
-    "known_unknown_gap_min": 0.20,
-}
-
-SEARCH_GUARDS = {
-    "setting_a_accuracy_min": 0.84,
-    "setting_a_balanced_acc_min": 0.66,
-    "known_unknown_gap_min": 0.30,
-}
 
 FALLBACK_BASE = {
     "epochs": 100,
@@ -87,12 +66,10 @@ FALLBACK_BASE = {
     "rt_bins": 1024,
     "mz_bins": 239,
     "open_score_blend_objective": "fpr95",
-    "open_score_auto_blend": True,
-    "open_score_base_weight": 0.2,
-    "open_score_margin_weight": 0.8,
     "aug_peak_broaden_prob": 0.1,
     "aug_rt_warp_prob": 0.2,
 }
+
 
 KEYS_TO_LOAD = [
     "epochs",
@@ -141,19 +118,9 @@ KEYS_TO_LOAD = [
     "rt_bins",
     "mz_bins",
     "open_score_blend_objective",
-    "open_score_base_weight",
-    "open_score_margin_weight",
     "aug_peak_broaden_prob",
     "aug_rt_warp_prob",
 ]
-
-MAX_TRIALS = int(os.environ.get("AUTO3_MAX_TRIALS", "80"))
-POLL_SECONDS = int(os.environ.get("AUTO3_POLL_SECONDS", "15"))
-GPU_IDS = [s.strip() for s in os.environ.get("AUTO3_GPU_IDS", "0").split(",") if s.strip()]
-KEEP_ALL_RUN_DIRS = os.environ.get("AUTO_KEEP_ALL_RUN_DIRS", "1") != "0"
-WARMUP_GUARD_ENABLED = os.environ.get("AUTO3_WARMUP_GUARD", "1") != "0"
-WARMUP_GUARD_EPOCH = int(os.environ.get("AUTO3_WARMUP_EPOCH", "10"))
-WARMUP_GUARD_MIN_RATIO = float(os.environ.get("AUTO3_WARMUP_MIN_RATIO", "0.78"))
 
 
 def ts() -> str:
@@ -168,9 +135,9 @@ def append_progress(lines: list[str]) -> None:
             f.write(line + "\n")
 
 
-def append_jsonl(path: Path, obj: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
+def append_result(obj: dict[str, Any]) -> None:
+    RESULTS_JSONL.parent.mkdir(parents=True, exist_ok=True)
+    with open(RESULTS_JSONL, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
@@ -182,16 +149,6 @@ def read_json(path: Path) -> dict[str, Any] | None:
             return json.load(f)
     except Exception:
         return None
-
-
-def _safe_float(value: Any, default: float) -> float:
-    try:
-        result = float(value)
-        if math.isnan(result):
-            return default
-        return result
-    except Exception:
-        return default
 
 
 def _normalize_encoder_channels(value: Any) -> tuple[int, ...]:
@@ -206,21 +163,11 @@ def _normalize_encoder_channels(value: Any) -> tuple[int, ...]:
     return tuple(FALLBACK_BASE["encoder_channels"])
 
 
-def has_active_training() -> bool:
-    proc = subprocess.run(
-        ["bash", "-lc", "ps -ef | rg 'main.py train' | rg -v rg"],
-        capture_output=True,
-        text=True,
-    )
-    return bool(proc.stdout.strip())
-
-
 def extract_metrics(summary: dict[str, Any]) -> dict[str, Any]:
     sa = summary.get("setting_a", {})
     sb = summary.get("setting_b", {})
     sc1 = summary.get("setting_c", {}).get("1", {})
     sc3 = summary.get("setting_c", {}).get("3", {})
-    blend = summary.get("setting_b_score_blend_used", {}) or {}
 
     known_score_mean = sb.get("known_score_mean")
     unknown_score_mean = sb.get("unknown_score_mean")
@@ -230,6 +177,9 @@ def extract_metrics(summary: dict[str, Any]) -> dict[str, Any]:
             known_unknown_gap = float(known_score_mean) - float(unknown_score_mean)
         except Exception:
             known_unknown_gap = None
+
+    blend = summary.get("setting_b_score_blend_used", {}) or {}
+    backbone = summary.get("main_model_backbone", {}) or {}
 
     return {
         "setting_a_accuracy": sa.get("accuracy"),
@@ -241,21 +191,32 @@ def extract_metrics(summary: dict[str, Any]) -> dict[str, Any]:
         "shot3_acc": sc3.get("accuracy"),
         "blend_base_weight": blend.get("base_weight"),
         "blend_margin_weight": blend.get("margin_weight"),
+        "main_model_backbone": backbone,
     }
 
 
-def search_score(metrics: dict[str, Any]) -> tuple[float, float, float, float, float]:
-    fpr95 = _safe_float(metrics.get("FPR_at_95TPR"), 1e9)
-    auroc = _safe_float(metrics.get("open_set_AUROC"), -1.0)
-    gap = _safe_float(metrics.get("known_unknown_gap"), -1.0)
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        result = float(value)
+        if math.isnan(result):
+            return default
+        return result
+    except Exception:
+        return default
+
+
+def rank_key(metrics: dict[str, Any]) -> tuple[float, float, float, float, float]:
     a_acc = _safe_float(metrics.get("setting_a_accuracy"), -1.0)
     a_bal = _safe_float(metrics.get("setting_a_balanced_acc"), -1.0)
+    auroc = _safe_float(metrics.get("open_set_AUROC"), -1.0)
+    fpr95 = _safe_float(metrics.get("FPR_at_95TPR"), 1e9)
     shot1 = _safe_float(metrics.get("shot1_acc"), -1.0)
-    return (-fpr95, auroc, gap, a_acc + 0.4 * a_bal, shot1)
+    gap = _safe_float(metrics.get("known_unknown_gap"), -1.0)
+    return (-(fpr95), auroc, gap, a_acc + 0.35 * a_bal, shot1)
 
 
 def collect_runs() -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+    runs: list[dict[str, Any]] = []
     for summary_path in OUTPUTS_DIR.glob("**/evaluation_summary.json"):
         run_dir = summary_path.parent
         run_config_path = run_dir / "run_config.json"
@@ -267,7 +228,7 @@ def collect_runs() -> list[dict[str, Any]]:
         run_config = read_json(run_config_path) or {}
         cfg = run_config.get("config", {})
         metrics = extract_metrics(summary)
-        rows.append(
+        runs.append(
             {
                 "run_dir": run_dir,
                 "relative_name": str(run_dir.relative_to(OUTPUTS_DIR)),
@@ -277,18 +238,20 @@ def collect_runs() -> list[dict[str, Any]]:
                 "metrics": metrics,
             }
         )
-    rows.sort(key=lambda row: search_score(row["metrics"]), reverse=True)
-    return rows
+    runs.sort(key=lambda item: rank_key(item["metrics"]), reverse=True)
+    return runs
 
 
 def derive_base_config(best_run: dict[str, Any] | None) -> dict[str, Any]:
     base = dict(FALLBACK_BASE)
     if not best_run:
         return base
+
     cfg = best_run.get("config", {}) or {}
     for key in KEYS_TO_LOAD:
         if key in cfg and cfg[key] is not None:
             base[key] = cfg[key]
+
     base["encoder_channels"] = _normalize_encoder_channels(base.get("encoder_channels"))
     if isinstance(base.get("prepared_dir"), str) and not Path(base["prepared_dir"]).exists():
         base["prepared_dir"] = FALLBACK_BASE["prepared_dir"]
@@ -297,6 +260,10 @@ def derive_base_config(best_run: dict[str, Any] | None) -> dict[str, Any]:
 
 def next_auto_index() -> int:
     max_idx = 0
+    for run_dir in OUTPUTS_DIR.glob("**/run_*"):
+        name = run_dir.name
+        if name.startswith("run_"):
+            continue
     for path in OUTPUTS_DIR.glob("**"):
         name = path.name
         if not name.startswith("iter_auto"):
@@ -322,53 +289,22 @@ def choose_directive(best_metrics: dict[str, Any]) -> str:
     shot1 = _safe_float(best_metrics.get("shot1_acc"), 0.0)
     a_acc = _safe_float(best_metrics.get("setting_a_accuracy"), 0.0)
 
-    if fpr95 > 0.52:
-        return "fpr95_crisis"
-    if fpr95 > 0.45:
-        return "fpr95_hard"
-    if fpr95 > 0.40 or gap < 0.33:
-        return "fpr95_polish"
+    if fpr95 > 0.48:
+        return "tighten_fpr_hard"
+    if fpr95 > 0.42 or gap < 0.33:
+        return "tighten_fpr"
     if shot1 < 0.62:
-        return "recover_shot1"
+        return "raise_shot1"
     if a_acc < 0.86:
         return "recover_setting_a"
     return "balanced_polish"
 
 
-def choose_open_score_settings(directive: str, idx: int) -> tuple[bool, float | None, float | None, str]:
-    if directive == "fpr95_crisis":
-        pairs = [(False, 0.85, 0.15), (False, 0.90, 0.10), (True, None, None)]
-        auto, base_w, margin_w = pairs[idx % len(pairs)]
-        return auto, base_w, margin_w, "fpr95"
-    if directive == "fpr95_hard":
-        pairs = [(False, 0.80, 0.20), (False, 0.85, 0.15), (True, None, None)]
-        auto, base_w, margin_w = pairs[idx % len(pairs)]
-        return auto, base_w, margin_w, "fpr95"
-    if directive == "fpr95_polish":
-        pairs = [(True, None, None), (False, 0.75, 0.25), (False, 0.70, 0.30)]
-        auto, base_w, margin_w = pairs[idx % len(pairs)]
-        return auto, base_w, margin_w, "fpr95"
-    if directive == "recover_shot1":
-        return True, None, None, "balanced"
-    if directive == "recover_setting_a":
-        return True, None, None, "balanced"
-    return True, None, None, "fpr95"
-
-
 def build_candidate(base_cfg: dict[str, Any], idx: int, directive: str) -> dict[str, Any]:
     random.seed(20260702 + idx)
+
     presets = {
-        "fpr95_crisis": {
-            "lr_factors": [0.84, 0.88, 0.92],
-            "adv_shifts": [-0.04, -0.03, -0.02],
-            "proto_shifts": [-0.06, -0.04, -0.02],
-            "temp_shifts": [-0.015, -0.01, -0.005],
-            "accp_shifts": [-4.0, -3.0, -2.0],
-            "reject_shifts": [-0.25, -0.20, -0.10],
-            "batch_choices": [16, 16, 8],
-            "deepen_prob": 0.55,
-        },
-        "fpr95_hard": {
+        "tighten_fpr_hard": {
             "lr_factors": [0.88, 0.92, 0.96],
             "adv_shifts": [-0.03, -0.02, -0.01],
             "proto_shifts": [-0.04, -0.02, 0.0],
@@ -376,9 +312,9 @@ def build_candidate(base_cfg: dict[str, Any], idx: int, directive: str) -> dict[
             "accp_shifts": [-3.0, -2.0, -1.0],
             "reject_shifts": [-0.20, -0.10, 0.0],
             "batch_choices": [16, 16, 8],
-            "deepen_prob": 0.45,
+            "target_blend": "fpr95",
         },
-        "fpr95_polish": {
+        "tighten_fpr": {
             "lr_factors": [0.92, 0.96, 1.0],
             "adv_shifts": [-0.02, -0.01, 0.0],
             "proto_shifts": [-0.03, 0.0, 0.03],
@@ -386,9 +322,9 @@ def build_candidate(base_cfg: dict[str, Any], idx: int, directive: str) -> dict[
             "accp_shifts": [-2.0, -1.0, 0.0],
             "reject_shifts": [-0.10, 0.0, 0.10],
             "batch_choices": [16, 16, 8],
-            "deepen_prob": 0.35,
+            "target_blend": "fpr95",
         },
-        "recover_shot1": {
+        "raise_shot1": {
             "lr_factors": [0.94, 0.98, 1.02],
             "adv_shifts": [0.0, 0.01, 0.02],
             "proto_shifts": [0.02, 0.04, 0.06],
@@ -396,7 +332,7 @@ def build_candidate(base_cfg: dict[str, Any], idx: int, directive: str) -> dict[
             "accp_shifts": [0.0, 1.0, 2.0],
             "reject_shifts": [0.0, 0.10],
             "batch_choices": [16, 8],
-            "deepen_prob": 0.15,
+            "target_blend": "fpr95",
         },
         "recover_setting_a": {
             "lr_factors": [0.96, 1.0, 1.04],
@@ -406,7 +342,7 @@ def build_candidate(base_cfg: dict[str, Any], idx: int, directive: str) -> dict[
             "accp_shifts": [0.0, 1.0],
             "reject_shifts": [0.0, 0.10],
             "batch_choices": [16, 8],
-            "deepen_prob": 0.10,
+            "target_blend": "balanced",
         },
         "balanced_polish": {
             "lr_factors": [0.94, 0.98, 1.0],
@@ -416,34 +352,31 @@ def build_candidate(base_cfg: dict[str, Any], idx: int, directive: str) -> dict[
             "accp_shifts": [-1.0, 0.0, 1.0],
             "reject_shifts": [-0.10, 0.0, 0.10],
             "batch_choices": [16, 8],
-            "deepen_prob": 0.10,
+            "target_blend": "fpr95",
         },
     }
 
     preset = presets[directive]
-    auto_blend, base_weight, margin_weight, blend_objective = choose_open_score_settings(directive, idx)
-
-    lr = clip(float(base_cfg["lr"]) * random.choice(preset["lr_factors"]), 1.4e-4, 2.6e-4)
-    lambda_adv = clip(float(base_cfg["lambda_adv"]) + random.choice(preset["adv_shifts"]), 0.04, 0.18)
-    lambda_proto = clip(float(base_cfg["lambda_proto"]) + random.choice(preset["proto_shifts"]), 0.70, 0.96)
-    supcon_temperature = clip(float(base_cfg["supcon_temperature"]) + random.choice(preset["temp_shifts"]), 0.05, 0.08)
-    accept_percentile = clip(float(base_cfg["accept_percentile"]) + random.choice(preset["accp_shifts"]), 90.0, 98.5)
-    reject_threshold_factor = clip(float(base_cfg["reject_threshold_factor"]) + random.choice(preset["reject_shifts"]), 1.65, 2.2)
+    lr = clip(float(base_cfg["lr"]) * random.choice(preset["lr_factors"]), 1.5e-4, 2.6e-4)
+    lambda_adv = clip(float(base_cfg["lambda_adv"]) + random.choice(preset["adv_shifts"]), 0.05, 0.18)
+    lambda_proto = clip(float(base_cfg["lambda_proto"]) + random.choice(preset["proto_shifts"]), 0.72, 0.96)
+    supcon_temperature = clip(float(base_cfg["supcon_temperature"]) + random.choice(preset["temp_shifts"]), 0.055, 0.08)
+    accept_percentile = clip(float(base_cfg["accept_percentile"]) + random.choice(preset["accp_shifts"]), 91.0, 98.5)
+    reject_threshold_factor = clip(float(base_cfg["reject_threshold_factor"]) + random.choice(preset["reject_shifts"]), 1.7, 2.2)
     batch_size = int(random.choice(preset["batch_choices"]))
 
     blocks = int(base_cfg.get("blocks_per_stage", 2))
     channels = tuple(base_cfg.get("encoder_channels", FALLBACK_BASE["encoder_channels"]))
     dropout = float(base_cfg.get("dropout", 0.3))
-    deepen = random.random() < float(preset["deepen_prob"]) and blocks < 3
+    deepen = directive in {"tighten_fpr_hard", "tighten_fpr"} and random.random() < 0.35 and blocks < 3
     if deepen:
         blocks = 3
         channels = random.choice([(32, 64, 128, 320), (32, 64, 160, 320)])
         dropout = clip(dropout + 0.05, 0.25, 0.5)
 
-    warmup_name = f"{directive}_d{blocks}" if deepen else directive
     name = (
         f"iter_auto{idx:03d}_bs{batch_size}_lr{int(round(lr * 1e6))}"
-        f"_a{int(round(lambda_adv * 100))}_p{int(round(lambda_proto * 100))}_{warmup_name}"
+        f"_a{int(round(lambda_adv * 100))}_p{int(round(lambda_proto * 100))}_{directive}"
     )
 
     return {
@@ -457,10 +390,7 @@ def build_candidate(base_cfg: dict[str, Any], idx: int, directive: str) -> dict[
         "supcon_temperature": supcon_temperature,
         "accept_percentile": accept_percentile,
         "reject_threshold_factor": reject_threshold_factor,
-        "open_score_auto_blend": auto_blend,
-        "open_score_base_weight": base_weight,
-        "open_score_margin_weight": margin_weight,
-        "open_score_blend_objective": blend_objective,
+        "open_score_blend_objective": preset["target_blend"],
         "eval_interval": 10,
         "eval_interval_search": 10,
         "eval_interval_final": 5,
@@ -478,24 +408,11 @@ def build_candidate(base_cfg: dict[str, Any], idx: int, directive: str) -> dict[
 def build_candidate_batch(base_cfg: dict[str, Any], best_metrics: dict[str, Any], count: int) -> list[dict[str, Any]]:
     directive = choose_directive(best_metrics)
     idx = next_auto_index()
-    return [build_candidate(base_cfg, idx + offset, directive) for offset in range(count)]
-
-
-def summarize_top_runs(runs: list[dict[str, Any]], limit: int = 5) -> list[str]:
-    lines: list[str] = []
-    for idx, row in enumerate(runs[:limit], start=1):
-        m = row["metrics"]
-        lines.append(
-            f"{idx}. {row['relative_name']}: "
-            f"A_acc={_safe_float(m.get('setting_a_accuracy'), float('nan')):.4f}, "
-            f"A_bal={_safe_float(m.get('setting_a_balanced_acc'), float('nan')):.4f}, "
-            f"AUROC={_safe_float(m.get('open_set_AUROC'), float('nan')):.4f}, "
-            f"FPR95={_safe_float(m.get('FPR_at_95TPR'), float('nan')):.4f}, "
-            f"gap={_safe_float(m.get('known_unknown_gap'), float('nan')):.4f}, "
-            f"1shot={_safe_float(m.get('shot1_acc'), float('nan')):.4f}, "
-            f"3shot={_safe_float(m.get('shot3_acc'), float('nan')):.4f}"
-        )
-    return lines
+    candidates = []
+    for _ in range(count):
+        candidates.append(build_candidate(base_cfg, idx, directive))
+        idx += 1
+    return candidates
 
 
 def _run_command(cmd: list[str], env: dict[str, str], log_path: Path) -> int:
@@ -511,41 +428,13 @@ def _run_command(cmd: list[str], env: dict[str, str], log_path: Path) -> int:
         return proc.wait()
 
 
-def _warmup_guard_args(best_run: dict[str, Any] | None) -> list[str]:
-    if not WARMUP_GUARD_ENABLED or not best_run:
-        return []
-    run_config = best_run.get("run_config", {}) or {}
-    cfg = run_config.get("config", {}) or {}
-    ref = cfg.get("warmup_guard_best_at_epoch")
-    if ref in (None, 0, "0"):
-        return [
-            "--warmup_guard_enabled",
-            "--warmup_guard_epoch",
-            str(WARMUP_GUARD_EPOCH),
-            "--warmup_guard_min_ratio",
-            str(WARMUP_GUARD_MIN_RATIO),
-            "--warmup_guard_compare_best",
-        ]
-    return [
-        "--warmup_guard_enabled",
-        "--warmup_guard_epoch",
-        str(WARMUP_GUARD_EPOCH),
-        "--warmup_guard_best_at_epoch",
-        str(ref),
-        "--warmup_guard_min_ratio",
-        str(WARMUP_GUARD_MIN_RATIO),
-        "--warmup_guard_compare_best",
-    ]
-
-
-def launch_candidate(cfg: dict[str, Any], best_run: dict[str, Any] | None, gpu: str | None) -> dict[str, Any]:
+def launch_candidate(cfg: dict[str, Any], gpu: str | None) -> dict[str, Any]:
     run_dir = OUTPUTS_DIR / cfg["name"]
     run_dir.mkdir(parents=True, exist_ok=True)
-
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["GCMS_SHOW_PROGRESS"] = "0"
-    if gpu:
+    if gpu is not None:
         env["CUDA_VISIBLE_DEVICES"] = str(gpu)
 
     train_cmd = [
@@ -653,11 +542,6 @@ def launch_candidate(cfg: dict[str, Any], best_run: dict[str, Any] | None, gpu: 
         train_cmd.append("--enable_input_raw_pca")
     else:
         train_cmd.append("--disable_input_raw_pca")
-    if not cfg.get("open_score_auto_blend", True):
-        train_cmd.append("--no_auto_open_score_blend")
-        train_cmd.extend(["--open_score_base_weight", str(cfg["open_score_base_weight"])])
-        train_cmd.extend(["--open_score_margin_weight", str(cfg["open_score_margin_weight"])])
-    train_cmd.extend(_warmup_guard_args(best_run))
 
     eval_cmd = [
         PYTHON,
@@ -672,62 +556,41 @@ def launch_candidate(cfg: dict[str, Any], best_run: dict[str, Any] | None, gpu: 
         "--open_score_blend_objective",
         str(cfg["open_score_blend_objective"]),
     ]
-    if not cfg.get("open_score_auto_blend", True):
-        eval_cmd.append("--no_auto_open_score_blend")
-        eval_cmd.extend(["--open_score_base_weight", str(cfg["open_score_base_weight"])])
-        eval_cmd.extend(["--open_score_margin_weight", str(cfg["open_score_margin_weight"])])
 
     train_exit = _run_command(train_cmd, env, run_dir / "iter_train.log")
     eval_exit = -1
     if train_exit == 0:
         eval_exit = _run_command(eval_cmd, env, run_dir / "iter_eval.log")
 
-    return {"train_exit": train_exit, "eval_exit": eval_exit, "run_dir": str(run_dir)}
+    return {
+        "train_exit": train_exit,
+        "eval_exit": eval_exit,
+        "run_dir": str(run_dir),
+    }
 
 
-def meets_targets(metrics: dict[str, Any]) -> bool:
-    return (
-        _safe_float(metrics.get("open_set_AUROC"), -1.0) >= TARGETS["setting_b_open_set_AUROC_min"]
-        and _safe_float(metrics.get("FPR_at_95TPR"), 1e9) <= TARGETS["setting_b_fpr95_max"]
-        and _safe_float(metrics.get("shot1_acc"), -1.0) >= TARGETS["setting_c_1shot_acc_min"]
-        and _safe_float(metrics.get("shot3_acc"), -1.0) >= TARGETS["setting_c_3shot_acc_min"]
-        and _safe_float(metrics.get("known_unknown_gap"), -1.0) >= TARGETS["known_unknown_gap_min"]
-    )
-
-
-def is_practical_candidate(metrics: dict[str, Any]) -> bool:
-    return (
-        _safe_float(metrics.get("setting_a_accuracy"), -1.0) >= SEARCH_GUARDS["setting_a_accuracy_min"]
-        and _safe_float(metrics.get("setting_a_balanced_acc"), -1.0) >= SEARCH_GUARDS["setting_a_balanced_acc_min"]
-        and _safe_float(metrics.get("known_unknown_gap"), -1.0) >= SEARCH_GUARDS["known_unknown_gap_min"]
-    )
-
-
-def prune_old_runs(keep_names: set[str]) -> None:
-    if KEEP_ALL_RUN_DIRS:
-        return
-    for path in OUTPUTS_DIR.iterdir():
-        if not path.is_dir():
-            continue
-        if path.name in keep_names:
-            continue
-        if path.name.startswith("run_") or path.name.startswith("run_seed"):
-            continue
-        for child in path.iterdir():
-            if child.name in {"run_config.json", "evaluation_summary.json", "iter_train.log", "iter_eval.log"}:
-                continue
-            if child.is_dir():
-                subprocess.run(["rm", "-rf", str(child)], check=False)
-            else:
-                child.unlink(missing_ok=True)
+def summarize_top_runs(runs: list[dict[str, Any]], limit: int = 5) -> list[str]:
+    lines: list[str] = []
+    for idx, item in enumerate(runs[:limit], start=1):
+        m = item["metrics"]
+        lines.append(
+            f"{idx}. {item['relative_name']}: "
+            f"A_acc={_safe_float(m.get('setting_a_accuracy'), float('nan')):.4f}, "
+            f"A_bal={_safe_float(m.get('setting_a_balanced_acc'), float('nan')):.4f}, "
+            f"AUROC={_safe_float(m.get('open_set_AUROC'), float('nan')):.4f}, "
+            f"FPR95={_safe_float(m.get('FPR_at_95TPR'), float('nan')):.4f}, "
+            f"gap={_safe_float(m.get('known_unknown_gap'), float('nan')):.4f}, "
+            f"1shot={_safe_float(m.get('shot1_acc'), float('nan')):.4f}, "
+            f"3shot={_safe_float(m.get('shot3_acc'), float('nan')):.4f}"
+        )
+    return lines
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Unified SCI auto-iteration on new_outputs")
-    parser.add_argument("--count", type=int, default=4, help="Number of candidates per batch")
-    parser.add_argument("--max_trials", type=int, default=MAX_TRIALS, help="Max launched trials")
-    parser.add_argument("--gpu", type=str, default=(GPU_IDS[0] if GPU_IDS else None), help="CUDA_VISIBLE_DEVICES value")
-    parser.add_argument("--analyze_only", action="store_true", help="Only analyze recent results and print planned candidates")
+    parser = argparse.ArgumentParser(description="Iterate GCMS experiments from new_outputs")
+    parser.add_argument("--count", type=int, default=4, help="Number of candidate runs to generate")
+    parser.add_argument("--gpu", type=str, default=None, help="CUDA_VISIBLE_DEVICES value to use")
+    parser.add_argument("--analyze_only", action="store_true", help="Only analyze recent runs and print planned candidates")
     args = parser.parse_args()
 
     runs = collect_runs()
@@ -735,15 +598,12 @@ def main() -> int:
     base_cfg = derive_base_config(best_run)
     best_metrics = best_run["metrics"] if best_run else extract_metrics({})
     candidates = build_candidate_batch(base_cfg, best_metrics, max(int(args.count), 1))
-    directive = choose_directive(best_metrics)
 
     append_progress([
-        f"- [{ts()}] {SCRIPT_TAG} START",
-        f"  - outputs_dir={OUTPUTS_DIR}",
+        f"- [{ts()}] ITERATE START",
         f"  - discovered_runs={len(runs)}",
         f"  - best_run={(best_run['relative_name'] if best_run else 'fallback')}",
-        f"  - directive={directive}",
-        f"  - count={args.count}, max_trials={args.max_trials}, gpu={args.gpu}",
+        f"  - directive={choose_directive(best_metrics)}",
         *[f"  - top: {line}" for line in summarize_top_runs(runs, limit=3)],
     ])
 
@@ -758,51 +618,35 @@ def main() -> int:
             f"adv={cfg['lambda_adv']:.3f}, proto={cfg['lambda_proto']:.3f}, "
             f"temp={cfg['supcon_temperature']:.3f}, accp={cfg['accept_percentile']:.1f}, "
             f"reject={cfg['reject_threshold_factor']:.2f}, blocks={cfg['blocks_per_stage']}, "
-            f"dropout={cfg['dropout']:.2f}, auto_blend={cfg['open_score_auto_blend']}, "
-            f"blend_obj={cfg['open_score_blend_objective']}"
+            f"dropout={cfg['dropout']:.2f}, blend_obj={cfg['open_score_blend_objective']}"
         )
 
     if args.analyze_only:
         return 0
 
-    launched = 0
     for cfg in candidates:
-        if launched >= int(args.max_trials):
-            break
-        while has_active_training():
-            append_progress([
-                f"- [{ts()}] {SCRIPT_TAG} WAIT",
-                "  - detected active main.py train process, waiting before next candidate",
-            ])
-            import time
-            time.sleep(POLL_SECONDS)
-
         append_progress([
-            f"- [{ts()}] {SCRIPT_TAG} RUN {cfg['name']}",
+            f"- [{ts()}] ITERATE RUN {cfg['name']}",
             f"  - search_directive={cfg['search_directive']}",
             f"  - epochs={cfg['epochs']}, batch_size={cfg['batch_size']}, lr={cfg['lr']}",
             f"  - lambda_adv={cfg['lambda_adv']}, lambda_proto={cfg['lambda_proto']}, lambda_recon={cfg['lambda_recon']}",
             f"  - accept_percentile={cfg['accept_percentile']}, reject_threshold_factor={cfg['reject_threshold_factor']}",
-            f"  - auto_blend={cfg['open_score_auto_blend']}, base={cfg.get('open_score_base_weight')}, margin={cfg.get('open_score_margin_weight')}, objective={cfg['open_score_blend_objective']}",
             f"  - backbone={cfg['main_backbone']}, encoder_channels={cfg['encoder_channels']}, blocks={cfg['blocks_per_stage']}, dropout={cfg['dropout']}",
         ])
-        result = launch_candidate(cfg, best_run, args.gpu)
+        result = launch_candidate(cfg, args.gpu)
         summary = read_json(Path(result["run_dir"]) / "evaluation_summary.json")
         metrics = extract_metrics(summary) if summary else {}
-        record = {
-            "timestamp": ts(),
-            "phase": SCRIPT_TAG,
-            "name": cfg["name"],
-            "status": "done" if result["train_exit"] == 0 and result["eval_exit"] == 0 else "failed",
-            "config": cfg,
-            "result": result,
-            "metrics": metrics,
-        }
-        append_jsonl(RESULTS_JSONL, record)
-        if is_practical_candidate(metrics):
-            append_jsonl(PRACTICAL_RESULTS_JSONL, record)
+        append_result(
+            {
+                "timestamp": ts(),
+                "name": cfg["name"],
+                "config": cfg,
+                "result": result,
+                "metrics": metrics,
+            }
+        )
         append_progress([
-            f"- [{ts()}] {SCRIPT_TAG} DONE {cfg['name']}",
+            f"- [{ts()}] ITERATE DONE {cfg['name']}",
             f"  - train_exit={result['train_exit']}, eval_exit={result['eval_exit']}",
             f"  - setting_a_accuracy={metrics.get('setting_a_accuracy')}",
             f"  - setting_a_balanced_acc={metrics.get('setting_a_balanced_acc')}",
@@ -810,23 +654,8 @@ def main() -> int:
             f"  - FPR_at_95TPR={metrics.get('FPR_at_95TPR')}",
             f"  - known_unknown_gap={metrics.get('known_unknown_gap')}",
             f"  - shot1_acc={metrics.get('shot1_acc')}, shot3_acc={metrics.get('shot3_acc')}",
-            f"  - meets_targets={meets_targets(metrics)}",
         ])
-        launched += 1
 
-        runs = collect_runs()
-        best_run = runs[0] if runs else best_run
-        if best_run:
-            best_metrics = best_run["metrics"]
-        if meets_targets(metrics):
-            append_progress([
-                f"- [{ts()}] {SCRIPT_TAG} TARGET REACHED {cfg['name']}",
-                f"  - best_run={(best_run['relative_name'] if best_run else cfg['name'])}",
-            ])
-            break
-
-    keep_names = {row["run_dir"].name for row in collect_runs()[: max(int(args.count), 3)]}
-    prune_old_runs(keep_names)
     return 0
 
 

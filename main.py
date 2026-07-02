@@ -8,11 +8,19 @@ CLI 入口: 数据准备 → 训练 → 评估 → 解释 → 对比
   python main.py compare
 """
 import argparse, json, sys
+from datetime import datetime
 from pathlib import Path
 import numpy as np
 import torch
 
 from config import Config
+
+
+def _parse_int_tuple(value: str):
+        parts = [p.strip() for p in str(value).split(",") if p.strip()]
+        if not parts:
+                raise ValueError("encoder_channels 不能为空")
+        return tuple(int(p) for p in parts)
 
 
 class _TeeStream:
@@ -46,6 +54,31 @@ def _run_with_log(cfg, log_name, fn):
             sys.stdout = orig_stdout
             sys.stderr = orig_stderr
             print(f"日志已保存到 {log_path}")
+
+
+def _persist_run_metadata(cfg, args):
+    out_dir = Path(cfg.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    run_config_path = out_dir / "run_config.json"
+    timestamp = datetime.now().isoformat(timespec="seconds")
+
+    if args.command == "evaluate" and run_config_path.exists():
+        with open(run_config_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        payload["last_evaluate"] = {
+            "timestamp": timestamp,
+            "args": vars(args),
+        }
+    else:
+        payload = {
+            "command": args.command,
+            "timestamp": timestamp,
+            "args": vars(args),
+            "config": cfg.__dict__,
+        }
+
+    with open(run_config_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
 def cmd_prepare(cfg):
@@ -331,10 +364,26 @@ def main():
                         help="训练/评估 batch size")
     parser.add_argument("--lr", type=float, default=None,
                         help="学习率")
+    parser.add_argument("--weight_decay", type=float, default=None,
+                        help="权重衰减")
+    parser.add_argument("--lambda_adv", type=float, default=None,
+                        help="批次对抗损失权重")
+    parser.add_argument("--lambda_proto", type=float, default=None,
+                        help="原型紧凑损失权重")
+    parser.add_argument("--lambda_recon", type=float, default=None,
+                        help="重建正则损失权重")
+    parser.add_argument("--lambda_cls", type=float, default=None,
+                        help="分类辅助头损失权重")
     parser.add_argument("--lambda_hard_pair", type=float, default=None,
                         help="易混产品对 hard margin 权重")
+    parser.add_argument("--supcon_temperature", type=float, default=None,
+                        help="SupCon 温度参数")
     parser.add_argument("--hard_pair_margin", type=float, default=None,
                         help="易混产品对 hard margin 距离")
+    parser.add_argument("--accept_percentile", type=float, default=None,
+                        help="一致性半径百分位")
+    parser.add_argument("--reject_threshold_factor", type=float, default=None,
+                        help="开集拒识半径倍率")
     parser.add_argument("--open_score_base_weight", type=float, default=None,
                         help="开集分数 base score 权重")
     parser.add_argument("--open_score_margin_weight", type=float, default=None,
@@ -343,12 +392,108 @@ def main():
                         help="关闭Setting B自动选择最佳open-score混合")
     parser.add_argument("--eval_interval", type=int, default=None,
                         help="验证间隔 epoch")
+    parser.add_argument("--eval_interval_search", type=int, default=None,
+                        help="搜索阶段验证间隔")
+    parser.add_argument("--eval_interval_final", type=int, default=None,
+                        help="后期收敛阶段验证间隔")
+    parser.add_argument("--eval_final_start_ratio", type=float, default=None,
+                        help="切换到后期收敛验证间隔的训练进度比例")
     parser.add_argument("--model_select_metric", type=str, default=None,
                         choices=["metric", "acc", "auroc", "auroc_correct"],
                         help="训练中 best checkpoint 的选择指标")
+    parser.add_argument("--early_stop_patience", type=int, default=None,
+                        help="早停耐心")
+    parser.add_argument("--min_epochs_before_early_stop", type=int, default=None,
+                        help="允许早停前最少训练 epoch")
+    parser.add_argument("--min_epoch_ratio_before_early_stop", type=float, default=None,
+                        help="允许早停前最少训练比例")
+    parser.add_argument("--early_stop_min_lr_ratio", type=float, default=None,
+                        help="仅当 lr 下降到初始 lr*ratio 后允许早停")
+    parser.add_argument("--early_stop_min_delta", type=float, default=None,
+                        help="判定提升的最小增量")
+    parser.add_argument("--proto_val_subset_ratio", type=float, default=None,
+                        help="训练中期验证时原型构建使用的训练子集比例")
+    parser.add_argument("--proto_val_subset_min_samples", type=int, default=None,
+                        help="训练中期验证原型子集最少样本数")
+    parser.add_argument("--proto_val_subset_max_samples", type=int, default=None,
+                        help="训练中期验证原型子集最多样本数")
+    parser.add_argument("--proto_val_full_every", type=int, default=None,
+                        help="每隔 N 次验证执行一次全量原型验证")
     parser.add_argument("--open_score_blend_objective", type=str, default=None,
                         choices=["fpr95", "auroc", "balanced"],
                         help="Setting B 自动 blend 的优化目标")
+    parser.add_argument("--warmup_guard_enabled", action="store_true",
+                        help="启用前期 warmup guard 淘汰")
+    parser.add_argument("--warmup_guard_epoch", type=int, default=None,
+                        help="warmup guard 对比轮次")
+    parser.add_argument("--warmup_guard_best_at_epoch", type=float, default=None,
+                        help="warmup guard 参考最优方案在指定轮次的 val_acc")
+    parser.add_argument("--warmup_guard_compare_best", action="store_true",
+                        help="warmup guard 直接对比当前最优运行")
+    parser.add_argument("--warmup_guard_no_compare_best", action="store_true",
+                        help="warmup guard 改为按比例阈值比较")
+    parser.add_argument("--warmup_guard_min_ratio", type=float, default=None,
+                        help="warmup guard 的最小比例阈值")
+    parser.add_argument("--dataloader_workers", type=int, default=None,
+                        help="DataLoader workers 数")
+    parser.add_argument("--dataloader_prefetch_factor", type=int, default=None,
+                        help="DataLoader prefetch factor")
+    parser.add_argument("--disable_dataloader_pin_memory", action="store_true",
+                        help="关闭 DataLoader pin_memory")
+    parser.add_argument("--disable_dataloader_persistent_workers", action="store_true",
+                        help="关闭 DataLoader persistent_workers")
+    parser.add_argument("--main_backbone", type=str, default=None,
+                        help="主干模型: gcms/transformer/resnet18/resnet50/wide_resnet50_2")
+    parser.add_argument("--main_backbone_model", type=str, default=None,
+                        help="主干模型预训练权重路径")
+    parser.add_argument("--main_feature_layers", type=str, default=None,
+                        help="主干特征层, 逗号分隔")
+    parser.add_argument("--main_feature_fuse", type=str, default=None,
+                        help="主干多层特征融合方式 concat/last")
+    parser.add_argument("--transformer_patch_size", type=int, default=None,
+                        help="Transformer patch size")
+    parser.add_argument("--transformer_embed_dim", type=int, default=None,
+                        help="Transformer token 维度")
+    parser.add_argument("--transformer_depth", type=int, default=None,
+                        help="Transformer block 层数")
+    parser.add_argument("--transformer_num_heads", type=int, default=None,
+                        help="Transformer 注意力头数")
+    parser.add_argument("--transformer_mlp_ratio", type=float, default=None,
+                        help="Transformer FFN 扩展比例")
+    parser.add_argument("--encoder_channels", type=str, default=None,
+                        help="编码器通道, 逗号分隔, 如 32,64,128,256")
+    parser.add_argument("--blocks_per_stage", type=int, default=None,
+                        help="每阶段 ResBlock 数")
+    parser.add_argument("--num_axial_heads", type=int, default=None,
+                        help="双轴注意力头数")
+    parser.add_argument("--dropout", type=float, default=None,
+                        help="主干 dropout")
+    parser.add_argument("--primary_model", type=str, default=None,
+                        help="主算法: deep_consistency/raw_pca_mlp")
+    parser.add_argument("--raw_pca_components", type=int, default=None,
+                        help="raw_pca_mlp 的 PCA 维度")
+    parser.add_argument("--raw_pca_hidden", type=str, default=None,
+                        help="raw_pca_mlp 隐藏层, 逗号分隔")
+    parser.add_argument("--raw_pca_max_iter", type=int, default=None,
+                        help="raw_pca_mlp 最大迭代次数")
+    parser.add_argument("--raw_pca_alpha", type=float, default=None,
+                        help="raw_pca_mlp alpha")
+    parser.add_argument("--raw_pca_lr_init", type=float, default=None,
+                        help="raw_pca_mlp 初始学习率")
+    parser.add_argument("--input_raw_pca_components", type=int, default=None,
+                        help="deep_consistency 输入 PCA 维度")
+    parser.add_argument("--enable_input_raw_pca", action="store_true",
+                        help="启用输入 PCA 通路")
+    parser.add_argument("--disable_input_raw_pca", action="store_true",
+                        help="关闭输入 PCA 通路")
+    parser.add_argument("--rt_bins", type=int, default=None,
+                        help="覆盖 RT bins")
+    parser.add_argument("--mz_bins", type=int, default=None,
+                        help="覆盖 m/z bins")
+    parser.add_argument("--aug_peak_broaden_prob", type=float, default=None,
+                        help="峰展宽增强触发概率")
+    parser.add_argument("--aug_rt_warp_prob", type=float, default=None,
+                        help="RT 扭曲增强触发概率")
     parser.add_argument("--sort_by", type=str, default="b_auroc",
                         choices=["a_acc", "a_macro", "b_auroc", "b_fpr95", "c3_acc"],
                         help="summarize_runs 排序指标")
@@ -386,9 +531,26 @@ def main():
     if args.prepared_dir:
         cfg.prepared_dir = str(Path(args.prepared_dir))
     for name in (
-        "seed", "epochs", "batch_size", "lr",
+        "seed", "epochs", "batch_size", "lr", "weight_decay",
+        "lambda_adv", "lambda_proto", "lambda_recon", "lambda_cls",
         "lambda_hard_pair", "hard_pair_margin",
+        "supcon_temperature", "accept_percentile", "reject_threshold_factor",
         "open_score_base_weight", "open_score_margin_weight",
+        "eval_interval_search", "eval_interval_final", "eval_final_start_ratio",
+        "early_stop_patience", "min_epochs_before_early_stop",
+        "min_epoch_ratio_before_early_stop", "early_stop_min_lr_ratio",
+        "early_stop_min_delta", "proto_val_subset_ratio",
+        "proto_val_subset_min_samples", "proto_val_subset_max_samples",
+        "proto_val_full_every", "dataloader_workers", "dataloader_prefetch_factor",
+        "warmup_guard_epoch", "warmup_guard_best_at_epoch", "warmup_guard_min_ratio",
+        "main_backbone", "main_backbone_model", "main_feature_layers", "main_feature_fuse",
+        "transformer_patch_size", "transformer_embed_dim", "transformer_depth",
+        "transformer_num_heads", "transformer_mlp_ratio",
+        "blocks_per_stage", "num_axial_heads", "dropout",
+        "primary_model", "raw_pca_components", "raw_pca_hidden",
+        "raw_pca_max_iter", "raw_pca_alpha", "raw_pca_lr_init",
+        "input_raw_pca_components", "rt_bins", "mz_bins",
+        "aug_peak_broaden_prob", "aug_rt_warp_prob",
     ):
         value = getattr(args, name)
         if value is not None:
@@ -412,6 +574,22 @@ def main():
         cfg.open_score_auto_blend = False
     if args.skip_readme_baselines:
         cfg.evaluate_readme_baselines = False
+    if args.enable_input_raw_pca:
+        cfg.input_raw_pca_enabled = True
+    if args.disable_input_raw_pca:
+        cfg.input_raw_pca_enabled = False
+    if args.disable_dataloader_pin_memory:
+        cfg.dataloader_pin_memory = False
+    if args.disable_dataloader_persistent_workers:
+        cfg.dataloader_persistent_workers = False
+    if args.warmup_guard_enabled:
+        cfg.warmup_guard_enabled = True
+    if args.warmup_guard_compare_best:
+        cfg.warmup_guard_compare_best = True
+    if args.warmup_guard_no_compare_best:
+        cfg.warmup_guard_compare_best = False
+    if args.encoder_channels is not None:
+        cfg.encoder_channels = _parse_int_tuple(args.encoder_channels)
 
     cfg.save_prepare_plots = bool(args.save_prepare_plots)
     cfg.save_prepare_tables = bool(args.save_prepare_tables)
@@ -433,7 +611,7 @@ def main():
     if args.command == "evaluate" and Path(cfg.output_dir).name == "final_model":
         cfg.output_dir = str(Path(cfg.output_dir).parent)
     output_name = Path(cfg.output_dir).name
-    explicit_run_dir = output_name.startswith("run_") or output_name.startswith("run_seed")
+    explicit_run_dir = bool(args.output_dir) or output_name.startswith("run_") or output_name.startswith("run_seed")
     if args.command in ("prepare", "train") and not explicit_run_dir:
         import time as _time
         cfg.output_dir = str(
@@ -441,6 +619,8 @@ def main():
         )
 
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
+    if args.command in ("prepare", "train", "evaluate"):
+        _persist_run_metadata(cfg, args)
 
     if args.command == "prepare":
         cmd_prepare(cfg)

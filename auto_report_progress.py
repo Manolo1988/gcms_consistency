@@ -1,50 +1,73 @@
-"""Auto reporter for iteration progress.
+"""Auto reporter for unified new_outputs iteration progress.
 
-Reads outputs/AUTO_SEARCH_RESULTS.jsonl and appends concise progress reports to
-outputs/ITERATION_PROGRESS.md for AUTO3 runs.
+Reads AUTO3 result streams from new_outputs and appends concise progress reports to
+new_outputs/ITERATION_PROGRESS.md.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+import math
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+OUTPUTS_DIR = PROJECT_ROOT / "new_outputs"
 RESULTS_JSONL = OUTPUTS_DIR / "AUTO_SEARCH_RESULTS.jsonl"
+PRACTICAL_RESULTS_JSONL = OUTPUTS_DIR / "AUTO_PRACTICAL_CANDIDATES.jsonl"
 REPORT_MD = OUTPUTS_DIR / "ITERATION_PROGRESS.md"
 STATE_JSON = OUTPUTS_DIR / ".auto_report_state.json"
 
 TARGETS = {
-    "auroc_min": 0.61,
-    "fpr95_max": 0.70,
-    "shot3_min": 0.85,
+    "setting_b_open_set_AUROC_min": 0.88,
+    "setting_b_fpr95_max": 0.35,
+    "setting_c_1shot_acc_min": 0.70,
+    "setting_c_3shot_acc_min": 0.95,
+    "known_unknown_gap_min": 0.20,
+}
+
+SEARCH_GUARDS = {
+    "setting_a_accuracy_min": 0.84,
+    "setting_a_balanced_acc_min": 0.66,
+    "known_unknown_gap_min": 0.30,
 }
 
 
-def _rank_metrics(m: dict) -> tuple:
-    auroc = m.get("open_set_AUROC")
-    fpr95 = m.get("FPR_at_95TPR")
-    shot3 = m.get("shot3_acc")
-    auroc_v = -1.0 if auroc is None else float(auroc)
-    fpr_v = 1e9 if fpr95 is None else float(fpr95)
-    shot3_v = -1.0 if shot3 is None else float(shot3)
-    return (auroc_v, -fpr_v, shot3_v)
-
-
-def _fmt_float(v):
-    if v is None:
-        return "NA"
+def _safe_float(value: Any, default: float) -> float:
     try:
-        return f"{float(v):.4f}"
+        result = float(value)
+        if math.isnan(result):
+            return default
+        return result
+    except Exception:
+        return default
+
+
+def _fmt_float(value: Any) -> str:
+    try:
+        result = float(value)
+        if math.isnan(result):
+            return "NA"
+        return f"{result:.4f}"
     except Exception:
         return "NA"
 
 
-def _load_state() -> dict:
+def _rank_metrics(metrics: dict[str, Any]) -> tuple[float, float, float, float, float]:
+    fpr95 = _safe_float(metrics.get("FPR_at_95TPR"), 1e9)
+    auroc = _safe_float(metrics.get("open_set_AUROC"), -1.0)
+    gap = _safe_float(metrics.get("known_unknown_gap"), -1.0)
+    a_acc = _safe_float(metrics.get("setting_a_accuracy"), -1.0)
+    a_bal = _safe_float(metrics.get("setting_a_balanced_acc"), -1.0)
+    shot1 = _safe_float(metrics.get("shot1_acc"), -1.0)
+    return (-fpr95, auroc, gap, a_acc + 0.4 * a_bal, shot1)
+
+
+def _load_state() -> dict[str, Any]:
     if not STATE_JSON.exists():
         return {"last_index": 0}
     try:
@@ -53,142 +76,160 @@ def _load_state() -> dict:
         return {"last_index": 0}
 
 
-def _save_state(state: dict) -> None:
+def _save_state(state: dict[str, Any]) -> None:
     STATE_JSON.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _load_lines() -> list[str]:
-    if not RESULTS_JSONL.exists():
+def _load_jsonl_lines(path: Path) -> list[str]:
+    if not path.exists():
         return []
-    return RESULTS_JSONL.read_text(encoding="utf-8").splitlines()
+    return path.read_text(encoding="utf-8").splitlines()
 
 
-def _parse_jsonl(lines: list[str]) -> list[dict]:
-    out = []
+def _parse_jsonl(lines: list[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     for line in lines:
-        line = line.strip()
-        if not line:
+        text = line.strip()
+        if not text:
             continue
         try:
-            out.append(json.loads(line))
+            rows.append(json.loads(text))
         except Exception:
             continue
-    return out
+    return rows
 
 
-def _collect_completed_metrics_from_summaries() -> list[tuple[str, dict]]:
-    pairs = []
-    for p in OUTPUTS_DIR.glob("iter*/evaluation_summary.json"):
-        run = p.parent.name
+def _collect_completed_metrics_from_summaries() -> list[tuple[str, dict[str, Any]]]:
+    pairs: list[tuple[str, dict[str, Any]]] = []
+    for path in OUTPUTS_DIR.glob("**/evaluation_summary.json"):
+        run_dir = path.parent
         try:
-            summary = json.loads(p.read_text(encoding="utf-8"))
+            summary = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        sb = summary.get("setting_b", {})
-        sc = summary.get("setting_c", {}).get("3", {})
-        m = {
+
+        sb = summary.get("setting_b", {}) or {}
+        sa = summary.get("setting_a", {}) or {}
+        sc1 = (summary.get("setting_c", {}) or {}).get("1", {}) or {}
+        sc3 = (summary.get("setting_c", {}) or {}).get("3", {}) or {}
+        known_mean = sb.get("known_score_mean")
+        unknown_mean = sb.get("unknown_score_mean")
+        gap = None
+        if known_mean is not None and unknown_mean is not None:
+            try:
+                gap = float(known_mean) - float(unknown_mean)
+            except Exception:
+                gap = None
+
+        metrics = {
+            "setting_a_accuracy": sa.get("accuracy"),
+            "setting_a_balanced_acc": sa.get("balanced_acc"),
             "open_set_AUROC": sb.get("open_set_AUROC"),
             "FPR_at_95TPR": sb.get("FPR_at_95TPR"),
-            "shot3_acc": sc.get("accuracy"),
+            "known_unknown_gap": gap,
+            "shot1_acc": sc1.get("accuracy"),
+            "shot3_acc": sc3.get("accuracy"),
         }
-        pairs.append((run, m))
+        pairs.append((str(run_dir.relative_to(OUTPUTS_DIR)), metrics))
     return pairs
 
 
-def _best_run_snapshot() -> tuple[str | None, dict | None]:
+def _best_run_snapshot() -> tuple[str | None, dict[str, Any] | None]:
     pairs = _collect_completed_metrics_from_summaries()
     if not pairs:
         return None, None
-    run, m = max(pairs, key=lambda x: _rank_metrics(x[1]))
-    return run, m
+    run_name, metrics = max(pairs, key=lambda item: _rank_metrics(item[1]))
+    return run_name, metrics
 
 
-def _progress_block(obj: dict) -> list[str]:
+def _gap_to_target(metrics: dict[str, Any]) -> dict[str, Any]:
+    auroc_gap = max(0.0, TARGETS["setting_b_open_set_AUROC_min"] - _safe_float(metrics.get("open_set_AUROC"), -1.0))
+    fpr_gap = max(0.0, _safe_float(metrics.get("FPR_at_95TPR"), 1e9) - TARGETS["setting_b_fpr95_max"])
+    shot1_gap = max(0.0, TARGETS["setting_c_1shot_acc_min"] - _safe_float(metrics.get("shot1_acc"), -1.0))
+    shot3_gap = max(0.0, TARGETS["setting_c_3shot_acc_min"] - _safe_float(metrics.get("shot3_acc"), -1.0))
+    gap_gap = max(0.0, TARGETS["known_unknown_gap_min"] - _safe_float(metrics.get("known_unknown_gap"), -1.0))
+    return {
+        "d_AUROC": auroc_gap,
+        "d_FPR95": fpr_gap,
+        "d_1shot": shot1_gap,
+        "d_3shot": shot3_gap,
+        "d_gap": gap_gap,
+    }
+
+
+def _guard_status(metrics: dict[str, Any]) -> str:
+    a_acc_ok = _safe_float(metrics.get("setting_a_accuracy"), -1.0) >= SEARCH_GUARDS["setting_a_accuracy_min"]
+    a_bal_ok = _safe_float(metrics.get("setting_a_balanced_acc"), -1.0) >= SEARCH_GUARDS["setting_a_balanced_acc_min"]
+    gap_ok = _safe_float(metrics.get("known_unknown_gap"), -1.0) >= SEARCH_GUARDS["known_unknown_gap_min"]
+    if a_acc_ok and a_bal_ok and gap_ok:
+        return "practical"
+    failed = []
+    if not a_acc_ok:
+        failed.append("A_acc")
+    if not a_bal_ok:
+        failed.append("A_bal")
+    if not gap_ok:
+        failed.append("gap")
+    return "guard_fail:" + ",".join(failed)
+
+
+def _candidate_summary(config: dict[str, Any]) -> str:
+    return (
+        f"dir={config.get('search_directive')}, "
+        f"bs={config.get('batch_size')}, lr={config.get('lr')}, "
+        f"adv={config.get('lambda_adv')}, proto={config.get('lambda_proto')}, "
+        f"temp={config.get('supcon_temperature')}, accp={config.get('accept_percentile')}, "
+        f"reject={config.get('reject_threshold_factor')}, blocks={config.get('blocks_per_stage')}, "
+        f"dropout={config.get('dropout')}, auto_blend={config.get('open_score_auto_blend')}, "
+        f"blend_obj={config.get('open_score_blend_objective')}"
+    )
+
+
+def _progress_block(obj: dict[str, Any]) -> list[str]:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     name = obj.get("name")
     status = obj.get("status")
-    m = obj.get("metrics") or {}
-
-    auroc = m.get("open_set_AUROC")
-    fpr95 = m.get("FPR_at_95TPR")
-    shot3 = m.get("shot3_acc")
-
-    b_auroc = m.get("baseline_open_set_AUROC")
-    b_fpr95 = m.get("baseline_FPR_at_95TPR")
-    b_shot3 = m.get("baseline_shot3_acc")
-
-    d_auroc = m.get("delta_vs_baseline_open_set_AUROC")
-    d_fpr95 = m.get("delta_vs_baseline_FPR_at_95TPR")
-    d_shot3 = m.get("delta_vs_baseline_shot3_acc")
-    readme_baselines = m.get("readme_baselines") or {}
-    readme_deltas = m.get("main_minus_readme_baselines") or {}
-    pretrained_info = m.get("pretrained_feature_extractor") or {}
-
-    delta_auroc = None if auroc is None else max(0.0, TARGETS["auroc_min"] - float(auroc))
-    delta_fpr95 = None if fpr95 is None else max(0.0, float(fpr95) - TARGETS["fpr95_max"])
-    delta_shot3 = None if shot3 is None else max(0.0, TARGETS["shot3_min"] - float(shot3))
-
-    best_run, best_m = _best_run_snapshot()
+    metrics = obj.get("metrics") or {}
+    config = obj.get("config") or {}
+    result = obj.get("result") or {}
+    best_run, best_metrics = _best_run_snapshot()
+    gap = _gap_to_target(metrics)
 
     lines = [
         "",
         f"- [{now}] REPORT {name}",
-        f"  - phase={obj.get('phase')}, status={status}",
+        f"  - phase={obj.get('phase')}, status={status}, guard={_guard_status(metrics)}",
+        f"  - candidate: {_candidate_summary(config)}",
         (
-            f"  - metrics: AUROC={_fmt_float(auroc)}, "
-            f"FPR95={_fmt_float(fpr95)}, 3-shot={_fmt_float(shot3)}"
+            f"  - metrics: A_acc={_fmt_float(metrics.get('setting_a_accuracy'))}, "
+            f"A_bal={_fmt_float(metrics.get('setting_a_balanced_acc'))}, "
+            f"AUROC={_fmt_float(metrics.get('open_set_AUROC'))}, "
+            f"FPR95={_fmt_float(metrics.get('FPR_at_95TPR'))}, "
+            f"gap={_fmt_float(metrics.get('known_unknown_gap'))}, "
+            f"1-shot={_fmt_float(metrics.get('shot1_acc'))}, "
+            f"3-shot={_fmt_float(metrics.get('shot3_acc'))}"
         ),
         (
-            f"  - gap_to_target: d_AUROC={_fmt_float(delta_auroc)}, "
-            f"d_FPR95={_fmt_float(delta_fpr95)}, d_3shot={_fmt_float(delta_shot3)}"
+            f"  - gap_to_target: d_AUROC={_fmt_float(gap['d_AUROC'])}, "
+            f"d_FPR95={_fmt_float(gap['d_FPR95'])}, d_1shot={_fmt_float(gap['d_1shot'])}, "
+            f"d_3shot={_fmt_float(gap['d_3shot'])}, d_gap={_fmt_float(gap['d_gap'])}"
+        ),
+        (
+            f"  - exits: train_exit={result.get('train_exit')}, "
+            f"eval_exit={result.get('eval_exit')}"
         ),
     ]
 
-    if any(v is not None for v in (b_auroc, b_fpr95, b_shot3)):
-        lines.append(
-            "  - baseline_tic_pca_mlp: "
-            + f"AUROC={_fmt_float(b_auroc)}, "
-            + f"FPR95={_fmt_float(b_fpr95)}, "
-            + f"3-shot={_fmt_float(b_shot3)}"
-        )
-
-    if any(v is not None for v in (d_auroc, d_fpr95, d_shot3)):
-        lines.append(
-            "  - main_minus_baseline: "
-            + f"d_AUROC={_fmt_float(d_auroc)}, "
-            + f"d_FPR95={_fmt_float(d_fpr95)}, "
-            + f"d_3shot={_fmt_float(d_shot3)}"
-        )
-
-    if pretrained_info:
-        lines.append(
-            "  - pretrained_feature_extractor: "
-            + f"enabled={pretrained_info.get('enabled')}, "
-            + f"arch={pretrained_info.get('arch')}, "
-            + f"model={pretrained_info.get('model_path')}"
-        )
-
-    for key in ["pca_mahalanobis", "pls_da", "svm_rbf", "tic_pca_mlp"]:
-        b = readme_baselines.get(key) or {}
-        d = readme_deltas.get(key) or {}
-        if not b:
-            continue
-        lines.append(
-            f"  - readme_baseline[{b.get('name', key)}|{b.get('feature_mode')}]: "
-            + f"AUROC={_fmt_float(b.get('open_set_AUROC'))}, "
-            + f"FPR95={_fmt_float(b.get('FPR_at_95TPR'))}, "
-            + f"3-shot={_fmt_float(b.get('shot3_acc'))}, "
-            + f"d_AUROC={_fmt_float(d.get('delta_open_set_AUROC'))}, "
-            + f"d_FPR95={_fmt_float(d.get('delta_FPR_at_95TPR'))}, "
-            + f"d_3shot={_fmt_float(d.get('delta_shot3_acc'))}"
-        )
-
-    if best_run and best_m:
+    if best_run and best_metrics:
         lines.append(
             "  - current_best: "
-            + f"{best_run} (AUROC={_fmt_float(best_m.get('open_set_AUROC'))}, "
-            + f"FPR95={_fmt_float(best_m.get('FPR_at_95TPR'))}, "
-            + f"3-shot={_fmt_float(best_m.get('shot3_acc'))})"
+            + f"{best_run} (A_acc={_fmt_float(best_metrics.get('setting_a_accuracy'))}, "
+            + f"A_bal={_fmt_float(best_metrics.get('setting_a_balanced_acc'))}, "
+            + f"AUROC={_fmt_float(best_metrics.get('open_set_AUROC'))}, "
+            + f"FPR95={_fmt_float(best_metrics.get('FPR_at_95TPR'))}, "
+            + f"gap={_fmt_float(best_metrics.get('known_unknown_gap'))}, "
+            + f"1-shot={_fmt_float(best_metrics.get('shot1_acc'))}, "
+            + f"3-shot={_fmt_float(best_metrics.get('shot3_acc'))})"
         )
 
     return lines
@@ -198,18 +239,19 @@ def process_once() -> int:
     state = _load_state()
     last_index = int(state.get("last_index", 0))
 
-    lines = _load_lines()
+    lines = _load_jsonl_lines(RESULTS_JSONL)
     if last_index >= len(lines):
+        _save_state({"last_index": len(_parse_jsonl(lines))})
         return 0
 
     objs = _parse_jsonl(lines)
     new_objs = objs[last_index:]
 
-    report_lines = []
+    report_lines: list[str] = []
     for obj in new_objs:
         if obj.get("phase") != "AUTO3":
             continue
-        if obj.get("status") not in {"done", "failed", "skip_exists"}:
+        if obj.get("status") not in {"done", "failed"}:
             continue
         report_lines.extend(_progress_block(obj))
 
@@ -222,13 +264,39 @@ def process_once() -> int:
     return len(report_lines)
 
 
-def main() -> int:
-    import argparse
+def summarize_practical_candidates(limit: int = 10) -> list[str]:
+    lines = _load_jsonl_lines(PRACTICAL_RESULTS_JSONL)
+    rows = _parse_jsonl(lines)
+    rows = [row for row in rows if row.get("phase") == "AUTO3"]
+    rows.sort(key=lambda row: _rank_metrics(row.get("metrics") or {}), reverse=True)
 
-    parser = argparse.ArgumentParser(description="Auto report iteration progress")
+    summary_lines: list[str] = []
+    for idx, row in enumerate(rows[:limit], start=1):
+        m = row.get("metrics") or {}
+        summary_lines.append(
+            f"{idx}. {row.get('name')}: "
+            f"A_acc={_fmt_float(m.get('setting_a_accuracy'))}, "
+            f"A_bal={_fmt_float(m.get('setting_a_balanced_acc'))}, "
+            f"AUROC={_fmt_float(m.get('open_set_AUROC'))}, "
+            f"FPR95={_fmt_float(m.get('FPR_at_95TPR'))}, "
+            f"gap={_fmt_float(m.get('known_unknown_gap'))}, "
+            f"1-shot={_fmt_float(m.get('shot1_acc'))}, "
+            f"3-shot={_fmt_float(m.get('shot3_acc'))}"
+        )
+    return summary_lines
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Auto report unified iteration progress")
     parser.add_argument("--watch", action="store_true", help="Run forever and poll periodically")
     parser.add_argument("--interval", type=int, default=30, help="Polling interval in seconds")
+    parser.add_argument("--show_practical", action="store_true", help="Print current practical candidate ranking")
     args = parser.parse_args()
+
+    if args.show_practical:
+        print("=== Practical Candidates ===")
+        for line in summarize_practical_candidates():
+            print(line)
 
     if not args.watch:
         process_once()

@@ -1,0 +1,22 @@
+[2026-07-02 17:16:17] start: python iterate_new_outputs.py --count 2 --gpu 0 --analyze_only
+=== Recent Top Runs ===
+1. run_seed41_20260701_180939/run_20260701_180940: A_acc=0.8661, A_bal=0.6775, AUROC=0.8829, FPR95=0.4511, gap=0.3462, 1shot=0.5802, 3shot=0.9764
+2. run_seed42_20260701_184101/run_20260701_184102: A_acc=0.8631, A_bal=0.8033, AUROC=0.8560, FPR95=0.4962, gap=0.3237, 1shot=0.6336, 3shot=0.9921
+3. run_20260701_113442: A_acc=0.8720, A_bal=0.6799, AUROC=0.8868, FPR95=0.6692, gap=0.3475, 1shot=0.5420, 3shot=0.9843
+4. run_20260701_124311: A_acc=0.8780, A_bal=0.6972, AUROC=0.7943, FPR95=0.7218, gap=0.2579, 1shot=0.5802, 3shot=0.9764
+5. run_20260701_130502: A_acc=0.8780, A_bal=0.6833, AUROC=0.8131, FPR95=0.7368, gap=0.2586, 1shot=0.3588, 3shot=0.9764
+
+=== Planned Candidates ===
+iter_auto001_bs16_lr200_a8_p85_tighten_fpr: bs=16, lr=0.000200, adv=0.080, proto=0.850, temp=0.070, accp=95.0, reject=1.90, blocks=3, dropout=0.35, blend_obj=fpr95
+iter_auto002_bs16_lr200_a8_p88_tighten_fpr: bs=16, lr=0.000200, adv=0.080, proto=0.880, temp=0.075, accp=95.0, reject=2.00, blocks=3, dropout=0.35, blend_obj=fpr95
+[2026-07-02 17:40:55] start: python auto_iterate_until_sci.py --count 2 --gpu 0 --analyze_only
+=== Recent Top Runs ===
+1. run_seed41_20260701_180939/run_20260701_180940: A_acc=0.8661, A_bal=0.6775, AUROC=0.8829, FPR95=0.4511, gap=0.3462, 1shot=0.5802, 3shot=0.9764
+2. run_seed42_20260701_184101/run_20260701_184102: A_acc=0.8631, A_bal=0.8033, AUROC=0.8560, FPR95=0.4962, gap=0.3237, 1shot=0.6336, 3shot=0.9921
+3. run_20260701_113442: A_acc=0.8720, A_bal=0.6799, AUROC=0.8868, FPR95=0.6692, gap=0.3475, 1shot=0.5420, 3shot=0.9843
+4. run_20260701_124311: A_acc=0.8780, A_bal=0.6972, AUROC=0.7943, FPR95=0.7218, gap=0.2579, 1shot=0.5802, 3shot=0.9764
+5. run_20260701_130502: A_acc=0.8780, A_bal=0.6833, AUROC=0.8131, FPR95=0.7368, gap=0.2586, 1shot=0.3588, 3shot=0.9764
+
+=== Planned Candidates ===
+iter_auto001_bs16_lr192_a7_p83_fpr95_hard_d3: bs=16, lr=0.000192, adv=0.070, proto=0.830, temp=0.065, accp=94.0, reject=1.80, blocks=3, dropout=0.35, auto_blend=False, blend_obj=fpr95
+iter_auto002_bs16_lr192_a7_p85_fpr95_hard_d3: bs=16, lr=0.000192, adv=0.070, proto=0.850, temp=0.070, accp=94.0, reject=1.90, blocks=3, dropout=0.35, auto_blend=True, blend_obj=fpr95
