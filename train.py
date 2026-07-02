@@ -92,6 +92,28 @@ def _resolve_eval_interval(cfg, epoch_num, total_epochs):
     return interval, in_final_stage
 
 
+def _select_checkpoint_score(val_m, cfg):
+    """Return the validation score used for best-checkpoint selection."""
+    mode = str(getattr(cfg, "model_select_metric", "metric") or "metric").lower()
+    aliases = {
+        "val_metric": "metric",
+        "val_acc": "acc",
+        "accuracy": "acc",
+        "acc": "acc",
+        "val_auroc": "auroc_correct",
+        "auroc": "auroc_correct",
+        "auroc_correct": "auroc_correct",
+    }
+    key = aliases.get(mode, mode)
+    if key not in val_m:
+        print(f"    -> unknown model_select_metric={mode!r}, fallback to metric")
+        key = "metric"
+    value = float(val_m.get(key, float("nan")))
+    if not np.isfinite(value):
+        value = -1e9
+    return value, key
+
+
 def _loader_runtime_kwargs(cfg, device):
     workers = max(int(getattr(cfg, "dataloader_workers", 0) or 0), 0)
     pin_memory_cfg = bool(getattr(cfg, "dataloader_pin_memory", True))
@@ -631,8 +653,9 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
             val_acc = float(val_m["acc"])
             val_metric = float(val_m["metric"])
             val_auroc = float(val_m["auroc_correct"])
-            if val_metric > (best_metric + early_stop_ctrl["min_delta"]):
-                best_metric = val_metric
+            select_score, select_key = _select_checkpoint_score(val_m, cfg)
+            if select_score > (best_metric + early_stop_ctrl["min_delta"]):
+                best_metric = select_score
                 best_acc = val_acc
                 best_state = {k: v.cpu().clone()
                               for k, v in _model_state_dict_for_save(model).items()}
@@ -651,7 +674,8 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
             print(
                 f"    -> val_acc={val_acc:.3f}, train_pa={train_pa:.3f}, "
                 f"val_auroc={val_auroc:.3f}, "
-                f"val_metric={val_metric:.3f} (best={best_metric:.3f}, "
+                f"val_metric={val_metric:.3f}, select={select_key}:{select_score:.3f} "
+                f"(best={best_metric:.3f}, "
                 f"proto={'full' if use_full_proto else 'subset'})"
                 f"\n       per_class: {pa_str}"
                 f"\n       radii:     {radii_str}"
@@ -863,8 +887,9 @@ def train_single_model(cfg: Config):
             val_acc = float(val_m["acc"])
             val_metric = float(val_m["metric"])
             val_auroc = float(val_m["auroc_correct"])
-            if val_metric > (best_metric + early_stop_ctrl["min_delta"]):
-                best_metric = val_metric
+            select_score, select_key = _select_checkpoint_score(val_m, cfg)
+            if select_score > (best_metric + early_stop_ctrl["min_delta"]):
+                best_metric = select_score
                 best_acc = val_acc
                 best_state = {k: v.cpu().clone()
                               for k, v in _model_state_dict_for_save(model).items()}
@@ -883,7 +908,8 @@ def train_single_model(cfg: Config):
             print(
                 f"    -> val_acc={val_acc:.3f}, train_pa={train_pa:.3f}, "
                 f"val_auroc={val_auroc:.3f}, "
-                f"val_metric={val_metric:.3f} (best={best_metric:.3f}, "
+                f"val_metric={val_metric:.3f}, select={select_key}:{select_score:.3f} "
+                f"(best={best_metric:.3f}, "
                 f"proto={'full' if use_full_proto else 'subset'})"
                 f"\n       per_class: {pa_str}"
                 f"\n       radii:     {radii_str}"
@@ -958,6 +984,9 @@ def train_single_model(cfg: Config):
         json.dump({
             "num_batches": int(num_batches),
             "num_products": int(ds_train.num_products),
+            "model_select_metric": str(getattr(cfg, "model_select_metric", "metric")),
+            "best_select_score": float(best_metric),
+            "best_val_acc": float(best_acc),
             "input_raw_pca_enabled": pca_enabled,
             "input_raw_pca_precomputed": pca_precomputed,
             "input_raw_pca_components": int(cfg.mz_bins),
@@ -965,7 +994,10 @@ def train_single_model(cfg: Config):
         }, f, indent=2)
 
     print(f"\n模型已保存到 {model_dir}")
-    print(f"  最佳验证准确率: {best_acc:.4f}")
+    print(
+        f"  选模指标: {getattr(cfg, 'model_select_metric', 'metric')} "
+        f"(best_score={best_metric:.4f}, best_val_acc={best_acc:.4f})"
+    )
 
     return model, proto_store, ds_train, ds_val
 

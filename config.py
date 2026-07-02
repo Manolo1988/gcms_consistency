@@ -137,6 +137,7 @@ class Config:
     eval_interval_search: int = 10         # 搜索阶段验证间隔
     eval_interval_final: int = 10          # 收敛阶段验证间隔
     eval_final_start_ratio: float = 0.7    # 从总训练进度该比例起切到收敛阶段
+    model_select_metric: str = "metric"    # metric / acc / auroc_correct
     early_stop_patience: int = 0           # 早停耐心(验证次数), 0=关闭
     min_epochs_before_early_stop: int = 0  # 早停前最少训练 epoch, 0=按比例自动计算
     min_epoch_ratio_before_early_stop: float = 0.6  # 早停前最少训练比例
@@ -175,6 +176,8 @@ class Config:
     use_spherical_prototypes: bool = True
     open_score_base_weight: float = 0.2       # 开集分数: base score 权重
     open_score_margin_weight: float = 0.8     # 开集分数: 最近邻间隔权重
+    open_score_auto_blend: bool = True        # 评估时自动采用当前Setting B最佳base/margin混合
+    open_score_blend_objective: str = "fpr95" # fpr95 / auroc / balanced
     evaluate_readme_baselines: bool = True    # 完整评估时是否重跑 README baselines
 
     # ── 增量注册微调 ─────────────────────────────────────

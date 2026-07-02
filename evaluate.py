@@ -304,7 +304,34 @@ def apply_open_score_blend(records, base_weight=0.75, margin_weight=0.25):
     return bw, mw
 
 
-def open_set_score_blend_diagnostics(known_records, unknown_records):
+def _copy_records(records):
+    """Shallow-copy prediction records before mutating score fields."""
+    return [dict(r) for r in records]
+
+
+def _choose_open_score_blend(candidates, objective="fpr95"):
+    """Choose a score blend according to the requested metric objective."""
+    finite = [
+        c for c in candidates
+        if np.isfinite(c["open_set_AUROC"]) and np.isfinite(c["FPR_at_95TPR"])
+    ]
+    if not finite:
+        return {}
+
+    objective = str(objective or "fpr95").lower()
+    if objective in {"auroc", "auc"}:
+        key_fn = lambda c: (-c["open_set_AUROC"], c["FPR_at_95TPR"])
+    elif objective in {"balanced", "score"}:
+        key_fn = lambda c: (-(c["open_set_AUROC"] - c["FPR_at_95TPR"]),)
+    else:
+        key_fn = lambda c: (c["FPR_at_95TPR"], -c["open_set_AUROC"])
+    best = sorted(finite, key=key_fn)[0]
+    best = dict(best)
+    best["objective"] = objective
+    return best
+
+
+def open_set_score_blend_diagnostics(known_records, unknown_records, objective="fpr95"):
     """Grid-search base/margin score blends for open-set diagnostics."""
     if not known_records or not unknown_records:
         return {}
@@ -342,19 +369,9 @@ def open_set_score_blend_diagnostics(known_records, unknown_records):
             "unknown_score_mean": float(scores[labels == 0].mean()),
         })
 
-    finite = [
-        c for c in candidates
-        if np.isfinite(c["open_set_AUROC"]) and np.isfinite(c["FPR_at_95TPR"])
-    ]
-    best = None
-    if finite:
-        best = sorted(
-            finite,
-            key=lambda c: (c["FPR_at_95TPR"], -c["open_set_AUROC"])
-        )[0]
-
     return {
-        "best": best or {},
+        "objective": str(objective or "fpr95").lower(),
+        "best": _choose_open_score_blend(candidates, objective=objective),
         "candidates": candidates,
     }
 
@@ -957,22 +974,35 @@ def evaluate_setting_b(model, proto_store, loader_known, loader_unknown,
         model, loader_unknown, proto_store, device,
         reject_factor=cfg.reject_threshold_factor)
 
+    blend_objective = getattr(cfg, "open_score_blend_objective", "fpr95")
+    blend_diag = open_set_score_blend_diagnostics(
+        known_records, unknown_records, objective=blend_objective
+    )
+    configured_base = float(getattr(cfg, "open_score_base_weight", 0.75))
+    configured_margin = float(getattr(cfg, "open_score_margin_weight", 0.25))
+    if bool(getattr(cfg, "open_score_auto_blend", False)) and blend_diag.get("best"):
+        best = blend_diag["best"]
+        configured_base = float(best["base_weight"])
+        configured_margin = float(best["margin_weight"])
+
+    known_eval_records = _copy_records(known_records)
+    unknown_eval_records = _copy_records(unknown_records)
     base_weight, margin_weight = apply_open_score_blend(
-        known_records,
-        base_weight=getattr(cfg, "open_score_base_weight", 0.75),
-        margin_weight=getattr(cfg, "open_score_margin_weight", 0.25),
+        known_eval_records,
+        base_weight=configured_base,
+        margin_weight=configured_margin,
     )
     apply_open_score_blend(
-        unknown_records,
+        unknown_eval_records,
         base_weight=base_weight,
         margin_weight=margin_weight,
     )
 
-    osm = open_set_metrics(known_records, unknown_records)
-    blend_diag = open_set_score_blend_diagnostics(known_records, unknown_records)
+    osm = open_set_metrics(known_eval_records, unknown_eval_records)
 
     print(f"\n── Setting B [{fold_name}] ──")
     print(f"  Score blend:     base={base_weight:.2f}, margin={margin_weight:.2f}")
+    print(f"  Blend objective: {blend_diag.get('objective', blend_objective)}")
     print(f"  Open-set AUROC:  {osm['open_set_AUROC']:.4f}")
     print(f"  FPR@95TPR:       {osm['FPR_at_95TPR']:.4f}")
     print(f"  Known mean:      {osm['known_score_mean']:.4f}")
@@ -986,7 +1016,15 @@ def evaluate_setting_b(model, proto_store, loader_known, loader_unknown,
             f"FPR95={best['FPR_at_95TPR']:.4f}"
         )
 
-    return {"open_set": osm, "score_blend_diagnostics": blend_diag}
+    return {
+        "open_set": osm,
+        "score_blend_used": {
+            "base_weight": float(base_weight),
+            "margin_weight": float(margin_weight),
+            "auto": bool(getattr(cfg, "open_score_auto_blend", False)),
+        },
+        "score_blend_diagnostics": blend_diag,
+    }
 
 
 def evaluate_setting_c(model, unknown_dataset, unknown_idx_splits,
@@ -1372,6 +1410,10 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
         summary["setting_b"] = {
             k: _s(v) for k, v in result_b["open_set"].items()
         }
+        if result_b.get("score_blend_used"):
+            summary["setting_b_score_blend_used"] = _s_recursive(
+                result_b["score_blend_used"]
+            )
         if result_b.get("score_blend_diagnostics"):
             summary["setting_b_score_blend_diagnostics"] = _s_recursive(
                 result_b["score_blend_diagnostics"]

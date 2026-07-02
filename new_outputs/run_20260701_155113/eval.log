@@ -1,39 +1,41 @@
   [Split] 使用模型快照: new_outputs/run_20260701_155113/final_model/split.json
+  [OpenScore] base=0.20, margin=0.80
 
 ============================================================
 单模型评估
 ============================================================
-/home/ubuntu/anaconda3/envs/seas/lib/python3.9/site-packages/sklearn/metrics/_classification.py:2399: UserWarning: y_pred contains classes not in y_true
+/opt/anaconda3/envs/yolov10/lib/python3.9/site-packages/sklearn/metrics/_classification.py:2524: UserWarning: y_pred contains classes not in y_true
   warnings.warn("y_pred contains classes not in y_true")
 
 ── Setting A [留出批次 ['20250905', '20250912', '20250920']] ──
   Accuracy:       0.8631
   Macro-F1:       0.6906
   Cross-batch Δ:  0.1258
-  Score AUROC:    0.5824
-  Cohen's d:      0.5196
+  Score AUROC:    0.7165
+  Cohen's d:      1.1038
   Sil(product):   0.5612
   Sil(batch):     -0.0004
   Batch pred:     0.6250
-/home/ubuntu/anaconda3/envs/seas/lib/python3.9/site-packages/sklearn/metrics/_classification.py:2399: UserWarning: y_pred contains classes not in y_true
+/opt/anaconda3/envs/yolov10/lib/python3.9/site-packages/sklearn/metrics/_classification.py:2524: UserWarning: y_pred contains classes not in y_true
   warnings.warn("y_pred contains classes not in y_true")
 
 ── Setting A [stress batch 20260306] ──
   Accuracy:       0.9704
   Macro-F1:       0.7681
   Cross-batch Δ:  0.0185
-  Score AUROC:    0.9841
-  Cohen's d:      3.5890
+  Score AUROC:    0.9329
+  Cohen's d:      2.8361
   Sil(product):   0.7631
   Sil(batch):     nan
   Batch pred:     nan
 
 ── Setting B [留出产品 ['HMD', 'XCJ']] ──
-  Open-set AUROC:  0.8027
-  FPR@95TPR:       0.5489
-  Known mean:      0.5912
-  Unknown mean:    0.3423
-  Best blend diag: base=0.20, margin=0.80, AUROC=0.8560, FPR95=0.4962
+  Score blend:     base=0.20, margin=0.80
+  Open-set AUROC:  0.8559
+  FPR@95TPR:       0.4962
+  Known mean:      0.7394
+  Unknown mean:    0.4158
+  Best blend diag: base=0.20, margin=0.80, AUROC=0.8559, FPR95=0.4962
 
 ── Setting C [留出产品 ['HMD', 'XCJ']] ──
   1-shot: acc=0.6336, f1=0.5893
@@ -51,17 +53,17 @@ Setting A (批次一致性 — 已知产品 × 留出批次):
   Accuracy:          0.8631
   Macro-F1:          0.6906
   Cross-batch Δ:     0.1258
-  Score AUROC:       0.5824
-  Cohen's d:         0.5196
+  Score AUROC:       0.7165
+  Cohen's d:         1.1038
   Sil(product):      0.5612
   Sil(batch):        -0.0004
   Batch pred:        0.6250
 
 Setting B (开集检测 — 已知类 vs 留出产品类):
-  Open-set AUROC:    0.8027
-  FPR@95TPR:         0.5489
-  Known score mean:  0.5912
-  Unknown score mean:0.3423
+  Open-set AUROC:    0.8559
+  FPR@95TPR:         0.4962
+  Known score mean:  0.7394
+  Unknown score mean:0.4158
 
 Setting C (少样本 — 留出产品类 N-shot 注册):
    1-shot: acc=0.6336, f1=0.5893

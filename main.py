@@ -78,6 +78,63 @@ def cmd_evaluate(cfg):
     return _run_with_log(cfg, "eval.log", lambda: evaluate_single_model(cfg))
 
 
+def cmd_summarize_runs(cfg, sort_by="b_auroc", limit=20):
+    """汇总多个 run 的 evaluation_summary.json, 方便按指标挑模型。"""
+    import glob
+
+    root = Path(cfg.output_dir)
+    patterns = [
+        str(root / "**" / "evaluation_summary.json"),
+        str(root / "**" / "final_model" / "evaluation_summary.json"),
+    ]
+    paths = sorted({p for pat in patterns for p in glob.glob(pat, recursive=True)})
+
+    rows = []
+    for p in paths:
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                s = json.load(f)
+        except Exception as exc:
+            print(f"[skip] {p}: {exc}")
+            continue
+
+        a = s.get("setting_a", {}) or {}
+        b = s.get("setting_b", {}) or {}
+        c = s.get("setting_c", {}) or {}
+        c3 = c.get("3", {}) or c.get(3, {}) or {}
+        blend = s.get("setting_b_score_blend_used", {}) or {}
+        run_dir = Path(p).parent
+        if run_dir.name == "final_model":
+            run_dir = run_dir.parent
+        rows.append({
+            "path": str(run_dir),
+            "a_acc": float(a.get("accuracy", float("nan"))),
+            "a_macro": float(a.get("macro_f1", float("nan"))),
+            "b_auroc": float(b.get("open_set_AUROC", float("nan"))),
+            "b_fpr95": float(b.get("FPR_at_95TPR", float("nan"))),
+            "c3_acc": float(c3.get("accuracy", float("nan"))),
+            "blend": f"{blend.get('base_weight', float('nan')):.2f}/"
+                     f"{blend.get('margin_weight', float('nan')):.2f}"
+                     if blend else "-",
+        })
+
+    sort_key = str(sort_by or "b_auroc").lower()
+    reverse = sort_key != "b_fpr95"
+    rows = [r for r in rows if sort_key in r and np.isfinite(r[sort_key])]
+    rows.sort(key=lambda r: r[sort_key], reverse=reverse)
+    rows = rows[:max(int(limit or 20), 1)]
+
+    print(f"\n共找到 {len(paths)} 个 evaluation_summary.json")
+    print(f"按 {sort_key} {'降序' if reverse else '升序'}展示前 {len(rows)} 个:")
+    print("rank  A_acc   A_F1    B_AUROC  B_FPR95  C_3shot  blend     run")
+    for i, r in enumerate(rows, 1):
+        print(
+            f"{i:>4d}  {r['a_acc']:.4f}  {r['a_macro']:.4f}  "
+            f"{r['b_auroc']:.4f}   {r['b_fpr95']:.4f}   "
+            f"{r['c3_acc']:.4f}   {r['blend']:>7s}   {r['path']}"
+        )
+
+
 def cmd_register(cfg, new_data_dir):
     """增量注册新产品: 微调编码器 + 球面重分布。
 
@@ -254,7 +311,8 @@ def main():
     )
     parser.add_argument("command",
                         choices=["prepare", "train", "evaluate",
-                                 "interpret", "compare", "register"])
+                                 "interpret", "compare", "register",
+                                 "summarize_runs"])
     parser.add_argument("--fold", type=int, default=0)
     parser.add_argument("--sample_idx", type=int, default=0)
     parser.add_argument("--new_data_dir", type=str, default=None,
@@ -281,8 +339,21 @@ def main():
                         help="开集分数 base score 权重")
     parser.add_argument("--open_score_margin_weight", type=float, default=None,
                         help="开集分数 margin score 权重")
+    parser.add_argument("--no_auto_open_score_blend", action="store_true",
+                        help="关闭Setting B自动选择最佳open-score混合")
     parser.add_argument("--eval_interval", type=int, default=None,
                         help="验证间隔 epoch")
+    parser.add_argument("--model_select_metric", type=str, default=None,
+                        choices=["metric", "acc", "auroc", "auroc_correct"],
+                        help="训练中 best checkpoint 的选择指标")
+    parser.add_argument("--open_score_blend_objective", type=str, default=None,
+                        choices=["fpr95", "auroc", "balanced"],
+                        help="Setting B 自动 blend 的优化目标")
+    parser.add_argument("--sort_by", type=str, default="b_auroc",
+                        choices=["a_acc", "a_macro", "b_auroc", "b_fpr95", "c3_acc"],
+                        help="summarize_runs 排序指标")
+    parser.add_argument("--limit", type=int, default=20,
+                        help="summarize_runs 展示条数")
     parser.add_argument("--stress_test_batches", type=str, default=None,
                         help="额外压力测试批次, 逗号分隔")
     parser.add_argument("--no_auto_create_split_on_train", action="store_true",
@@ -326,6 +397,10 @@ def main():
         cfg.eval_interval = int(args.eval_interval)
         cfg.eval_interval_search = int(args.eval_interval)
         cfg.eval_interval_final = int(args.eval_interval)
+    if args.model_select_metric is not None:
+        cfg.model_select_metric = args.model_select_metric
+    if args.open_score_blend_objective is not None:
+        cfg.open_score_blend_objective = args.open_score_blend_objective
     if args.stress_test_batches is not None:
         cfg.stress_test_batches = tuple(
             b.strip() for b in args.stress_test_batches.split(",")
@@ -333,6 +408,8 @@ def main():
         )
     if args.no_auto_create_split_on_train:
         cfg.auto_create_split_on_train = False
+    if args.no_auto_open_score_blend:
+        cfg.open_score_auto_blend = False
     if args.skip_readme_baselines:
         cfg.evaluate_readme_baselines = False
 
@@ -355,7 +432,9 @@ def main():
 
     if args.command == "evaluate" and Path(cfg.output_dir).name == "final_model":
         cfg.output_dir = str(Path(cfg.output_dir).parent)
-    if args.command in ("prepare", "train"):
+    output_name = Path(cfg.output_dir).name
+    explicit_run_dir = output_name.startswith("run_") or output_name.startswith("run_seed")
+    if args.command in ("prepare", "train") and not explicit_run_dir:
         import time as _time
         cfg.output_dir = str(
             Path(cfg.output_dir) / f"run_{_time.strftime('%Y%m%d_%H%M%S')}"
@@ -378,6 +457,8 @@ def main():
             print("错误: register 命令需要 --new_data_dir 参数")
             sys.exit(1)
         cmd_register(cfg, new_data_dir=args.new_data_dir)
+    elif args.command == "summarize_runs":
+        cmd_summarize_runs(cfg, sort_by=args.sort_by, limit=args.limit)
 
 
 def cmd_compare(cfg, methods=None):
