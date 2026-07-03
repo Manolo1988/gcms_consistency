@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -167,6 +168,13 @@ WARMUP_GUARD_ENABLED = os.environ.get("AUTO3_WARMUP_GUARD", "1") != "0"
 WARMUP_GUARD_EPOCH = int(os.environ.get("AUTO3_WARMUP_EPOCH", "10"))
 WARMUP_GUARD_MIN_RATIO = float(os.environ.get("AUTO3_WARMUP_MIN_RATIO", "0.78"))
 WARMUP_GUARD_COMPARE_BEST = os.environ.get("AUTO3_WARMUP_COMPARE_BEST", "0") == "1"
+
+
+def parse_gpu_list(value: str | None) -> list[str | None]:
+    if value is None:
+        return [None]
+    parts = [p.strip() for p in str(value).split(",") if p.strip()]
+    return parts or [None]
 
 
 def ts() -> str:
@@ -895,11 +903,63 @@ def prune_old_runs(keep_names: set[str]) -> None:
         _slim_run_dir(path)
 
 
+def record_completed_candidate(cfg: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    summary = read_json(Path(result["run_dir"]) / "evaluation_summary.json")
+    metrics = extract_metrics(summary) if summary else {}
+    record = {
+        "timestamp": ts(),
+        "phase": SCRIPT_TAG,
+        "name": cfg["name"],
+        "status": "done" if result["train_exit"] == 0 and result["eval_exit"] == 0 else "failed",
+        "config": cfg,
+        "result": result,
+        "metrics": metrics,
+    }
+    append_jsonl(RESULTS_JSONL, record)
+    if is_practical_candidate(metrics):
+        append_jsonl(PRACTICAL_RESULTS_JSONL, record)
+    append_progress([
+        f"- [{ts()}] {SCRIPT_TAG} DONE {cfg['name']}",
+        f"  - train_exit={result['train_exit']}, eval_exit={result['eval_exit']}",
+        f"  - setting_a_accuracy={metrics.get('setting_a_accuracy')}",
+        f"  - setting_a_balanced_acc={metrics.get('setting_a_balanced_acc')}",
+        f"  - setting_a_macro_f1={metrics.get('setting_a_macro_f1')}",
+        f"  - open_set_AUROC={metrics.get('open_set_AUROC')}",
+        f"  - FPR_at_95TPR={metrics.get('FPR_at_95TPR')}",
+        f"  - known_unknown_gap={metrics.get('known_unknown_gap')}",
+        f"  - shot1_acc={metrics.get('shot1_acc')}, shot3_acc={metrics.get('shot3_acc')}",
+        f"  - meets_targets={meets_targets(metrics)}",
+    ])
+    return record
+
+
+def log_candidate_start(cfg: dict[str, Any], gpu: str | None) -> None:
+    append_progress([
+        f"- [{ts()}] {SCRIPT_TAG} RUN {cfg['name']}",
+        f"  - gpu={gpu}",
+        f"  - search_directive={cfg['search_directive']}",
+        f"  - epochs={cfg['epochs']}, batch_size={cfg['batch_size']}, lr={cfg['lr']}",
+        f"  - lambda_adv={cfg['lambda_adv']}, lambda_proto={cfg['lambda_proto']}, lambda_recon={cfg['lambda_recon']}",
+        f"  - accept_percentile={cfg['accept_percentile']}, reject_threshold_factor={cfg['reject_threshold_factor']}",
+        f"  - auto_blend={cfg['open_score_auto_blend']}, base={cfg.get('open_score_base_weight')}, margin={cfg.get('open_score_margin_weight')}, objective={cfg['open_score_blend_objective']}",
+        f"  - backbone={cfg['main_backbone']}, encoder_channels={cfg['encoder_channels']}, blocks={cfg['blocks_per_stage']}, dropout={cfg['dropout']}",
+        f"  - feature_dim={cfg['feature_dim']}, proj_dim={cfg['proj_dim']}, input_raw_pca_components={cfg['input_raw_pca_components']}",
+    ])
+
+
+def run_candidate_job(cfg: dict[str, Any], best_run: dict[str, Any] | None, gpu: str | None) -> tuple[dict[str, Any], dict[str, Any]]:
+    log_candidate_start(cfg, gpu)
+    result = launch_candidate(cfg, best_run, gpu)
+    return cfg, result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Unified SCI auto-iteration on new_outputs")
     parser.add_argument("--count", type=int, default=4, help="Number of candidates per batch")
     parser.add_argument("--max_trials", type=int, default=MAX_TRIALS, help="Max launched trials")
     parser.add_argument("--gpu", type=str, default=(GPU_IDS[0] if GPU_IDS else None), help="CUDA_VISIBLE_DEVICES value")
+    parser.add_argument("--concurrent", type=int, default=int(os.environ.get("AUTO3_MAX_CONCURRENT", "1")),
+                        help="Number of candidate runs to execute at the same time")
     parser.add_argument("--analyze_only", action="store_true", help="Only analyze recent results and print planned candidates")
     args = parser.parse_args()
 
@@ -917,7 +977,7 @@ def main() -> int:
         f"  - discovered_runs={len(runs)}",
         f"  - best_run={(best_run['relative_name'] if best_run else 'fallback')}",
         f"  - directive={directive}",
-        f"  - count={args.count}, max_trials={args.max_trials}, gpu={args.gpu}",
+        f"  - count={args.count}, max_trials={args.max_trials}, gpu={args.gpu}, concurrent={args.concurrent}",
         *[f"  - top: {line}" for line in summarize_top_runs(runs, limit=3)],
     ])
 
@@ -941,68 +1001,59 @@ def main() -> int:
     if args.analyze_only:
         return 0
 
-    launched = 0
-    for cfg in candidates:
-        if launched >= int(args.max_trials):
-            break
+    max_trials = max(int(args.max_trials), 1)
+    concurrent = max(int(args.concurrent or 1), 1)
+    to_run = candidates[:max_trials]
+    gpu_list = parse_gpu_list(args.gpu)
+
+    if concurrent <= 1:
+        for cfg in to_run:
+            while has_active_training():
+                append_progress([
+                    f"- [{ts()}] {SCRIPT_TAG} WAIT",
+                    "  - detected active main.py train process, waiting before next candidate",
+                ])
+                import time
+                time.sleep(POLL_SECONDS)
+
+            _cfg, result = run_candidate_job(cfg, best_run, gpu_list[0])
+            record = record_completed_candidate(_cfg, result)
+            runs = collect_runs()
+            write_best_snapshot(runs, limit=20)
+            best_run = runs[0] if runs else best_run
+            if best_run:
+                best_metrics = best_run["metrics"]
+            if meets_targets(record["metrics"]):
+                append_progress([
+                    f"- [{ts()}] {SCRIPT_TAG} TARGET REACHED {_cfg['name']}",
+                    f"  - best_run={(best_run['relative_name'] if best_run else _cfg['name'])}",
+                ])
+                break
+    else:
         while has_active_training():
             append_progress([
                 f"- [{ts()}] {SCRIPT_TAG} WAIT",
-                "  - detected active main.py train process, waiting before next candidate",
+                "  - detected active main.py train process before concurrent batch",
             ])
             import time
             time.sleep(POLL_SECONDS)
 
-        append_progress([
-            f"- [{ts()}] {SCRIPT_TAG} RUN {cfg['name']}",
-            f"  - search_directive={cfg['search_directive']}",
-            f"  - epochs={cfg['epochs']}, batch_size={cfg['batch_size']}, lr={cfg['lr']}",
-            f"  - lambda_adv={cfg['lambda_adv']}, lambda_proto={cfg['lambda_proto']}, lambda_recon={cfg['lambda_recon']}",
-            f"  - accept_percentile={cfg['accept_percentile']}, reject_threshold_factor={cfg['reject_threshold_factor']}",
-            f"  - auto_blend={cfg['open_score_auto_blend']}, base={cfg.get('open_score_base_weight')}, margin={cfg.get('open_score_margin_weight')}, objective={cfg['open_score_blend_objective']}",
-            f"  - backbone={cfg['main_backbone']}, encoder_channels={cfg['encoder_channels']}, blocks={cfg['blocks_per_stage']}, dropout={cfg['dropout']}",
-            f"  - feature_dim={cfg['feature_dim']}, proj_dim={cfg['proj_dim']}, input_raw_pca_components={cfg['input_raw_pca_components']}",
-        ])
-        result = launch_candidate(cfg, best_run, args.gpu)
-        summary = read_json(Path(result["run_dir"]) / "evaluation_summary.json")
-        metrics = extract_metrics(summary) if summary else {}
-        record = {
-            "timestamp": ts(),
-            "phase": SCRIPT_TAG,
-            "name": cfg["name"],
-            "status": "done" if result["train_exit"] == 0 and result["eval_exit"] == 0 else "failed",
-            "config": cfg,
-            "result": result,
-            "metrics": metrics,
-        }
-        append_jsonl(RESULTS_JSONL, record)
-        if is_practical_candidate(metrics):
-            append_jsonl(PRACTICAL_RESULTS_JSONL, record)
-        append_progress([
-            f"- [{ts()}] {SCRIPT_TAG} DONE {cfg['name']}",
-            f"  - train_exit={result['train_exit']}, eval_exit={result['eval_exit']}",
-            f"  - setting_a_accuracy={metrics.get('setting_a_accuracy')}",
-            f"  - setting_a_balanced_acc={metrics.get('setting_a_balanced_acc')}",
-            f"  - setting_a_macro_f1={metrics.get('setting_a_macro_f1')}",
-            f"  - open_set_AUROC={metrics.get('open_set_AUROC')}",
-            f"  - FPR_at_95TPR={metrics.get('FPR_at_95TPR')}",
-            f"  - known_unknown_gap={metrics.get('known_unknown_gap')}",
-            f"  - shot1_acc={metrics.get('shot1_acc')}, shot3_acc={metrics.get('shot3_acc')}",
-            f"  - meets_targets={meets_targets(metrics)}",
-        ])
-        launched += 1
+        with ThreadPoolExecutor(max_workers=min(concurrent, len(to_run))) as pool:
+            futures = []
+            for i, cfg in enumerate(to_run):
+                gpu = gpu_list[i % len(gpu_list)]
+                futures.append(pool.submit(run_candidate_job, cfg, best_run, gpu))
 
-        runs = collect_runs()
-        write_best_snapshot(runs, limit=20)
-        best_run = runs[0] if runs else best_run
-        if best_run:
-            best_metrics = best_run["metrics"]
-        if meets_targets(metrics):
-            append_progress([
-                f"- [{ts()}] {SCRIPT_TAG} TARGET REACHED {cfg['name']}",
-                f"  - best_run={(best_run['relative_name'] if best_run else cfg['name'])}",
-            ])
-            break
+            for fut in as_completed(futures):
+                _cfg, result = fut.result()
+                record = record_completed_candidate(_cfg, result)
+                runs = collect_runs()
+                write_best_snapshot(runs, limit=20)
+                if meets_targets(record["metrics"]):
+                    append_progress([
+                        f"- [{ts()}] {SCRIPT_TAG} TARGET REACHED {_cfg['name']}",
+                        "  - concurrent batch will finish already launched candidates",
+                    ])
 
     runs = collect_runs()
     write_best_snapshot(runs, limit=20)

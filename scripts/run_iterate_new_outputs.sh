@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 GPU_ID="${GPU_ID:-0}"
 COUNT="${COUNT:-4}"
+CONCURRENT="${CONCURRENT:-1}"
 LOG_PATH="${LOG_PATH:-$ROOT_DIR/new_outputs/iterate_new_outputs_runner.log}"
 ANALYZE_ONLY="${ANALYZE_ONLY:-0}"
 
@@ -16,6 +17,7 @@ cmd=(
   "$PYTHON_BIN"
   auto_iterate_until_sci.py
   --count "$COUNT"
+  --concurrent "$CONCURRENT"
   --gpu "$GPU_ID"
 )
 

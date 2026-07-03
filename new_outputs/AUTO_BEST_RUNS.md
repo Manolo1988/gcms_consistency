@@ -1,6 +1,6 @@
 # AUTO Best Runs
 
-Updated: 2026-07-03 11:00:10
+Updated: 2026-07-03 11:27:21
 
 | Rank | Run | A_acc | A_bal | A_f1 | B_AUROC | B_FPR95 | Gap | 1-shot | 3-shot | Key params |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
