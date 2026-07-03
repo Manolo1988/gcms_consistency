@@ -600,6 +600,16 @@ class GCMSConsistencyNet(nn.Module):
             )
         dim = self.encoder.out_dim
         feat_map_dim = getattr(self.encoder, "feat_map_dim", dim)
+        target_dim = int(getattr(cfg, "feature_dim", dim) or dim)
+        if target_dim > 0 and target_dim != dim:
+            self.embed_head = nn.Sequential(
+                nn.Linear(dim, target_dim),
+                nn.LayerNorm(target_dim),
+                nn.GELU(),
+            )
+            dim = target_dim
+        else:
+            self.embed_head = nn.Identity()
 
         # 对比学习投影头 (仅训练)
         self.proj_head = ProjectionHead(dim, cfg.proj_dim)
@@ -613,7 +623,8 @@ class GCMSConsistencyNet(nn.Module):
         )
 
     def forward(self, x, return_feat_map=False):
-        z_raw, feat_map = self.encoder(x)
+        enc_raw, feat_map = self.encoder(x)
+        z_raw = self.embed_head(enc_raw)
 
         # 归一化嵌入 (度量学习标准做法)
         if self.embed_normalize:
@@ -640,7 +651,8 @@ class GCMSConsistencyNet(nn.Module):
 
     def encode(self, x):
         """仅提取嵌入向量 (推理用)。"""
-        z_raw, _ = self.encoder(x)
+        enc_raw, _ = self.encoder(x)
+        z_raw = self.embed_head(enc_raw)
         if self.embed_normalize:
             return F.normalize(z_raw, dim=1)
         return z_raw

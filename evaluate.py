@@ -1086,6 +1086,7 @@ def evaluate_single_model(cfg):
     metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
     product_col = ("product_fine" if cfg.product_granularity == "fine"
                    else "product_coarse")
+    viz_enabled = bool(getattr(cfg, "evaluate_save_visualizations", False))
     viz_dir = out_dir / "visualizations"
 
     # ── 加载模型 ──
@@ -1122,6 +1123,8 @@ def evaluate_single_model(cfg):
             train_meta = json.load(f)
         num_batches_model = train_meta["num_batches"]
         num_products_model = train_meta.get("num_products", None)
+        cfg.feature_dim = int(train_meta.get("feature_dim", getattr(cfg, "feature_dim", 256)))
+        cfg.proj_dim = int(train_meta.get("proj_dim", getattr(cfg, "proj_dim", 128)))
         if bool(train_meta.get("input_raw_pca_enabled", False)):
             cfg.mz_bins = int(train_meta.get("input_raw_pca_components", cfg.mz_bins))
         cfg.rt_bins = int(train_meta.get("input_raw_pca_rt_bins", cfg.rt_bins))
@@ -1198,7 +1201,7 @@ def evaluate_single_model(cfg):
             model, loader_train, loader_test_batch, proto_store,
             device, cfg, f"留出批次 {split['holdout_batches']}")
 
-        if result_a.get("records"):
+        if viz_enabled and result_a.get("records"):
             plot_embedding_tsne(
                 result_a["records"],
                 viz_dir / "tsne_product_settingA.png", color_by="product")
@@ -1517,6 +1520,7 @@ def evaluate_all_settings(fold_results, split_info, cfg):
     from config import get_device
     device = get_device()
     out_dir = Path(cfg.output_dir)
+    viz_enabled = bool(getattr(cfg, "evaluate_save_visualizations", False))
     viz_dir = out_dir / "visualizations"
 
     metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
@@ -1602,7 +1606,7 @@ def evaluate_all_settings(fold_results, split_info, cfg):
         all_c.append(c)
 
         # 可视化
-        if a.get("records"):
+        if viz_enabled and a.get("records"):
             plot_embedding_tsne(
                 a["records"],
                 viz_dir / f"tsne_product_{fold_name}.png",

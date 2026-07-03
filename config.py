@@ -271,6 +271,7 @@ class Config:
 
     # ── 数据准备可视化 ────────────────────────────────────
     save_prepare_plots: bool = True
+    evaluate_save_visualizations: bool = False
     prepare_plot_max_samples: Optional[int] = None
     prepare_plot_dpi: int = 120
     tag_output_with_batch_and_product: bool = True

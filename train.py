@@ -114,6 +114,36 @@ def _select_checkpoint_score(val_m, cfg):
     return value, key
 
 
+def _warmup_guard_stop(val_acc, epoch_num, guard_epoch, cfg):
+    """Return whether warmup guard should stop this run."""
+    guard_enabled = bool(getattr(cfg, "warmup_guard_enabled", False))
+    if not guard_enabled or epoch_num != guard_epoch:
+        return False
+
+    guard_ref = float(getattr(cfg, "warmup_guard_best_at_epoch", 0.0) or 0.0)
+    if guard_ref <= 0:
+        print("    -> warmup guard skipped: missing warmup reference")
+        return False
+
+    guard_compare_best = bool(getattr(cfg, "warmup_guard_compare_best", True))
+    guard_ratio = float(getattr(cfg, "warmup_guard_min_ratio", 1.0) or 1.0)
+    guard_ratio = float(min(max(guard_ratio, 0.0), 1.0))
+    min_allowed = guard_ref if guard_compare_best else (guard_ref * guard_ratio)
+    if val_acc >= min_allowed:
+        return False
+
+    rule_info = (
+        f"absolute_ref@{guard_epoch}"
+        if guard_compare_best
+        else f"ref@{guard_epoch}*ratio={guard_ratio:.2f}"
+    )
+    print(
+        f"    -> warmup guard stop: val_acc={val_acc:.3f} < "
+        f"{min_allowed:.3f} (ref={guard_ref:.3f}, {rule_info})"
+    )
+    return True
+
+
 def _loader_runtime_kwargs(cfg, device):
     workers = max(int(getattr(cfg, "dataloader_workers", 0) or 0), 0)
     pin_memory_cfg = bool(getattr(cfg, "dataloader_pin_memory", True))
@@ -683,24 +713,8 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
             )
 
             # 规则: 前N轮若显著落后于当前最佳方案, 直接淘汰该策略
-            guard_enabled = bool(getattr(cfg, "warmup_guard_enabled", False))
-            guard_ref = float(getattr(cfg, "warmup_guard_best_at_epoch", 0.0) or 0.0)
-            guard_compare_best = bool(getattr(cfg, "warmup_guard_compare_best", True))
-            guard_ratio = float(getattr(cfg, "warmup_guard_min_ratio", 1.0) or 1.0)
-            if guard_enabled and guard_ref > 0 and epoch_num == guard_epoch:
-                min_allowed = guard_ref if guard_compare_best else (guard_ref * guard_ratio)
-                if val_acc < min_allowed:
-                    rule_info = (
-                        f"compare_to_best@{guard_epoch}"
-                        if guard_compare_best
-                        else f"ratio={guard_ratio:.2f}"
-                    )
-                    print(
-                        f"    -> warmup guard stop: val_acc={val_acc:.3f} < "
-                        f"{min_allowed:.3f} (best@{guard_epoch}={guard_ref:.3f}, "
-                        f"{rule_info})"
-                    )
-                    break
+            if _warmup_guard_stop(val_acc, epoch_num, guard_epoch, cfg):
+                break
 
             if early_stop_ctrl["enabled"] and no_improve_checks >= early_stop_ctrl["patience"]:
                 current_lr = float(optimizer.param_groups[0].get("lr", cfg.lr))
@@ -917,24 +931,8 @@ def train_single_model(cfg: Config):
             )
 
             # 规则: 前N轮若显著落后于当前最佳方案, 直接淘汰该策略
-            guard_enabled = bool(getattr(cfg, "warmup_guard_enabled", False))
-            guard_ref = float(getattr(cfg, "warmup_guard_best_at_epoch", 0.0) or 0.0)
-            guard_compare_best = bool(getattr(cfg, "warmup_guard_compare_best", True))
-            guard_ratio = float(getattr(cfg, "warmup_guard_min_ratio", 1.0) or 1.0)
-            if guard_enabled and guard_ref > 0 and epoch_num == guard_epoch:
-                min_allowed = guard_ref if guard_compare_best else (guard_ref * guard_ratio)
-                if val_acc < min_allowed:
-                    rule_info = (
-                        f"compare_to_best@{guard_epoch}"
-                        if guard_compare_best
-                        else f"ratio={guard_ratio:.2f}"
-                    )
-                    print(
-                        f"    -> warmup guard stop: val_acc={val_acc:.3f} < "
-                        f"{min_allowed:.3f} (best@{guard_epoch}={guard_ref:.3f}, "
-                        f"{rule_info})"
-                    )
-                    break
+            if _warmup_guard_stop(val_acc, epoch_num, guard_epoch, cfg):
+                break
 
             if early_stop_ctrl["enabled"] and no_improve_checks >= early_stop_ctrl["patience"]:
                 current_lr = float(optimizer.param_groups[0].get("lr", cfg.lr))
@@ -987,6 +985,8 @@ def train_single_model(cfg: Config):
             "model_select_metric": str(getattr(cfg, "model_select_metric", "metric")),
             "best_select_score": float(best_metric),
             "best_val_acc": float(best_acc),
+            "feature_dim": int(getattr(cfg, "feature_dim", 256)),
+            "proj_dim": int(getattr(cfg, "proj_dim", 128)),
             "input_raw_pca_enabled": pca_enabled,
             "input_raw_pca_precomputed": pca_precomputed,
             "input_raw_pca_components": int(cfg.mz_bins),

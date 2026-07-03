@@ -23,6 +23,9 @@ REPORT_MD = OUTPUTS_DIR / "ITERATION_PROGRESS.md"
 STATE_JSON = OUTPUTS_DIR / ".auto_report_state.json"
 
 TARGETS = {
+    "setting_a_accuracy_min": 0.90,
+    "setting_a_balanced_acc_min": 0.75,
+    "setting_a_macro_f1_min": 0.75,
     "setting_b_open_set_AUROC_min": 0.88,
     "setting_b_fpr95_max": 0.35,
     "setting_c_1shot_acc_min": 0.70,
@@ -124,6 +127,7 @@ def _collect_completed_metrics_from_summaries() -> list[tuple[str, dict[str, Any
         metrics = {
             "setting_a_accuracy": sa.get("accuracy"),
             "setting_a_balanced_acc": sa.get("balanced_acc"),
+            "setting_a_macro_f1": sa.get("macro_f1"),
             "open_set_AUROC": sb.get("open_set_AUROC"),
             "FPR_at_95TPR": sb.get("FPR_at_95TPR"),
             "known_unknown_gap": gap,
@@ -144,11 +148,17 @@ def _best_run_snapshot() -> tuple[str | None, dict[str, Any] | None]:
 
 def _gap_to_target(metrics: dict[str, Any]) -> dict[str, Any]:
     auroc_gap = max(0.0, TARGETS["setting_b_open_set_AUROC_min"] - _safe_float(metrics.get("open_set_AUROC"), -1.0))
+    a_acc_gap = max(0.0, TARGETS["setting_a_accuracy_min"] - _safe_float(metrics.get("setting_a_accuracy"), -1.0))
+    a_bal_gap = max(0.0, TARGETS["setting_a_balanced_acc_min"] - _safe_float(metrics.get("setting_a_balanced_acc"), -1.0))
+    a_f1_gap = max(0.0, TARGETS["setting_a_macro_f1_min"] - _safe_float(metrics.get("setting_a_macro_f1"), -1.0))
     fpr_gap = max(0.0, _safe_float(metrics.get("FPR_at_95TPR"), 1e9) - TARGETS["setting_b_fpr95_max"])
     shot1_gap = max(0.0, TARGETS["setting_c_1shot_acc_min"] - _safe_float(metrics.get("shot1_acc"), -1.0))
     shot3_gap = max(0.0, TARGETS["setting_c_3shot_acc_min"] - _safe_float(metrics.get("shot3_acc"), -1.0))
     gap_gap = max(0.0, TARGETS["known_unknown_gap_min"] - _safe_float(metrics.get("known_unknown_gap"), -1.0))
     return {
+        "d_A_acc": a_acc_gap,
+        "d_A_bal": a_bal_gap,
+        "d_A_f1": a_f1_gap,
         "d_AUROC": auroc_gap,
         "d_FPR95": fpr_gap,
         "d_1shot": shot1_gap,
@@ -178,6 +188,8 @@ def _candidate_summary(config: dict[str, Any]) -> str:
         f"dir={config.get('search_directive')}, "
         f"bs={config.get('batch_size')}, lr={config.get('lr')}, "
         f"adv={config.get('lambda_adv')}, proto={config.get('lambda_proto')}, "
+        f"bb={config.get('main_backbone')}, embed={config.get('feature_dim')}, "
+        f"proj={config.get('proj_dim')}, pca={config.get('input_raw_pca_components')}, "
         f"temp={config.get('supcon_temperature')}, accp={config.get('accept_percentile')}, "
         f"reject={config.get('reject_threshold_factor')}, blocks={config.get('blocks_per_stage')}, "
         f"dropout={config.get('dropout')}, auto_blend={config.get('open_score_auto_blend')}, "
@@ -203,6 +215,7 @@ def _progress_block(obj: dict[str, Any]) -> list[str]:
         (
             f"  - metrics: A_acc={_fmt_float(metrics.get('setting_a_accuracy'))}, "
             f"A_bal={_fmt_float(metrics.get('setting_a_balanced_acc'))}, "
+            f"A_f1={_fmt_float(metrics.get('setting_a_macro_f1'))}, "
             f"AUROC={_fmt_float(metrics.get('open_set_AUROC'))}, "
             f"FPR95={_fmt_float(metrics.get('FPR_at_95TPR'))}, "
             f"gap={_fmt_float(metrics.get('known_unknown_gap'))}, "
@@ -210,7 +223,9 @@ def _progress_block(obj: dict[str, Any]) -> list[str]:
             f"3-shot={_fmt_float(metrics.get('shot3_acc'))}"
         ),
         (
-            f"  - gap_to_target: d_AUROC={_fmt_float(gap['d_AUROC'])}, "
+            f"  - gap_to_target: d_A_acc={_fmt_float(gap['d_A_acc'])}, "
+            f"d_A_bal={_fmt_float(gap['d_A_bal'])}, d_A_f1={_fmt_float(gap['d_A_f1'])}, "
+            f"d_AUROC={_fmt_float(gap['d_AUROC'])}, "
             f"d_FPR95={_fmt_float(gap['d_FPR95'])}, d_1shot={_fmt_float(gap['d_1shot'])}, "
             f"d_3shot={_fmt_float(gap['d_3shot'])}, d_gap={_fmt_float(gap['d_gap'])}"
         ),
@@ -225,6 +240,7 @@ def _progress_block(obj: dict[str, Any]) -> list[str]:
             "  - current_best: "
             + f"{best_run} (A_acc={_fmt_float(best_metrics.get('setting_a_accuracy'))}, "
             + f"A_bal={_fmt_float(best_metrics.get('setting_a_balanced_acc'))}, "
+            + f"A_f1={_fmt_float(best_metrics.get('setting_a_macro_f1'))}, "
             + f"AUROC={_fmt_float(best_metrics.get('open_set_AUROC'))}, "
             + f"FPR95={_fmt_float(best_metrics.get('FPR_at_95TPR'))}, "
             + f"gap={_fmt_float(best_metrics.get('known_unknown_gap'))}, "
@@ -277,6 +293,7 @@ def summarize_practical_candidates(limit: int = 10) -> list[str]:
             f"{idx}. {row.get('name')}: "
             f"A_acc={_fmt_float(m.get('setting_a_accuracy'))}, "
             f"A_bal={_fmt_float(m.get('setting_a_balanced_acc'))}, "
+            f"A_f1={_fmt_float(m.get('setting_a_macro_f1'))}, "
             f"AUROC={_fmt_float(m.get('open_set_AUROC'))}, "
             f"FPR95={_fmt_float(m.get('FPR_at_95TPR'))}, "
             f"gap={_fmt_float(m.get('known_unknown_gap'))}, "

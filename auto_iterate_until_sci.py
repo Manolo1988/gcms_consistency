@@ -11,6 +11,8 @@ import json
 import math
 import os
 import random
+import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -23,10 +25,15 @@ OUTPUTS_DIR = PROJECT_ROOT / "new_outputs"
 PROGRESS_LOG = OUTPUTS_DIR / "PROJECT_PROGRESS.md"
 RESULTS_JSONL = OUTPUTS_DIR / "AUTO_SEARCH_RESULTS.jsonl"
 PRACTICAL_RESULTS_JSONL = OUTPUTS_DIR / "AUTO_PRACTICAL_CANDIDATES.jsonl"
+BEST_JSON = OUTPUTS_DIR / "AUTO_BEST_RUNS.json"
+BEST_MD = OUTPUTS_DIR / "AUTO_BEST_RUNS.md"
 PYTHON = sys.executable
 SCRIPT_TAG = "AUTO3"
 
 TARGETS = {
+    "setting_a_accuracy_min": 0.90,
+    "setting_a_balanced_acc_min": 0.75,
+    "setting_a_macro_f1_min": 0.75,
     "setting_b_open_set_AUROC_min": 0.88,
     "setting_b_fpr95_max": 0.35,
     "setting_c_1shot_acc_min": 0.70,
@@ -67,6 +74,8 @@ FALLBACK_BASE = {
     "proto_val_full_every": 3,
     "dataloader_workers": 4,
     "dataloader_prefetch_factor": 2,
+    "feature_dim": 256,
+    "proj_dim": 128,
     "main_backbone": "gcms",
     "main_backbone_model": "",
     "main_feature_layers": "layer4",
@@ -121,6 +130,8 @@ KEYS_TO_LOAD = [
     "proto_val_full_every",
     "dataloader_workers",
     "dataloader_prefetch_factor",
+    "feature_dim",
+    "proj_dim",
     "main_backbone",
     "main_backbone_model",
     "main_feature_layers",
@@ -150,10 +161,12 @@ KEYS_TO_LOAD = [
 MAX_TRIALS = int(os.environ.get("AUTO3_MAX_TRIALS", "80"))
 POLL_SECONDS = int(os.environ.get("AUTO3_POLL_SECONDS", "15"))
 GPU_IDS = [s.strip() for s in os.environ.get("AUTO3_GPU_IDS", "0").split(",") if s.strip()]
-KEEP_ALL_RUN_DIRS = os.environ.get("AUTO_KEEP_ALL_RUN_DIRS", "1") != "0"
+KEEP_ALL_RUN_DIRS = os.environ.get("AUTO_KEEP_ALL_RUN_DIRS", "0") != "0"
+KEEP_TOP_N = int(os.environ.get("AUTO_KEEP_TOP_N", "5"))
 WARMUP_GUARD_ENABLED = os.environ.get("AUTO3_WARMUP_GUARD", "1") != "0"
 WARMUP_GUARD_EPOCH = int(os.environ.get("AUTO3_WARMUP_EPOCH", "10"))
 WARMUP_GUARD_MIN_RATIO = float(os.environ.get("AUTO3_WARMUP_MIN_RATIO", "0.78"))
+WARMUP_GUARD_COMPARE_BEST = os.environ.get("AUTO3_WARMUP_COMPARE_BEST", "0") == "1"
 
 
 def ts() -> str:
@@ -234,6 +247,7 @@ def extract_metrics(summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "setting_a_accuracy": sa.get("accuracy"),
         "setting_a_balanced_acc": sa.get("balanced_acc"),
+        "setting_a_macro_f1": sa.get("macro_f1"),
         "open_set_AUROC": sb.get("open_set_AUROC"),
         "FPR_at_95TPR": sb.get("FPR_at_95TPR"),
         "known_unknown_gap": known_unknown_gap,
@@ -250,8 +264,10 @@ def search_score(metrics: dict[str, Any]) -> tuple[float, float, float, float, f
     gap = _safe_float(metrics.get("known_unknown_gap"), -1.0)
     a_acc = _safe_float(metrics.get("setting_a_accuracy"), -1.0)
     a_bal = _safe_float(metrics.get("setting_a_balanced_acc"), -1.0)
+    a_macro = _safe_float(metrics.get("setting_a_macro_f1"), -1.0)
     shot1 = _safe_float(metrics.get("shot1_acc"), -1.0)
-    return (-fpr95, auroc, gap, a_acc + 0.4 * a_bal, shot1)
+    a_score = 0.45 * a_acc + 0.35 * a_bal + 0.20 * a_macro
+    return (-fpr95, auroc, gap, a_score, shot1)
 
 
 def collect_runs() -> list[dict[str, Any]]:
@@ -321,11 +337,15 @@ def choose_directive(best_metrics: dict[str, Any]) -> str:
     gap = _safe_float(best_metrics.get("known_unknown_gap"), 0.0)
     shot1 = _safe_float(best_metrics.get("shot1_acc"), 0.0)
     a_acc = _safe_float(best_metrics.get("setting_a_accuracy"), 0.0)
+    a_bal = _safe_float(best_metrics.get("setting_a_balanced_acc"), 0.0)
+    a_macro = _safe_float(best_metrics.get("setting_a_macro_f1"), 0.0)
 
     if fpr95 > 0.52:
         return "fpr95_crisis"
     if fpr95 > 0.45:
         return "fpr95_hard"
+    if a_acc < 0.88 or a_bal < 0.72 or a_macro < 0.70:
+        return "recover_setting_a"
     if fpr95 > 0.40 or gap < 0.33:
         return "fpr95_polish"
     if shot1 < 0.62:
@@ -431,6 +451,15 @@ def build_candidate(base_cfg: dict[str, Any], idx: int, directive: str) -> dict[
     reject_threshold_factor = clip(float(base_cfg["reject_threshold_factor"]) + random.choice(preset["reject_shifts"]), 1.65, 2.2)
     batch_size = int(random.choice(preset["batch_choices"]))
 
+    feature_dim = int(random.choice([192, 256, 320]))
+    proj_dim = int(random.choice([128, 192, 256]))
+    input_raw_pca_components = int(random.choice([192, 239, 256]))
+    main_backbone = str(base_cfg.get("main_backbone", "gcms") or "gcms")
+    if directive == "recover_setting_a" and random.random() < 0.25:
+        main_backbone = random.choice(["gcms", "resnet18"])
+    else:
+        main_backbone = random.choice([main_backbone, "gcms"])
+
     blocks = int(base_cfg.get("blocks_per_stage", 2))
     channels = tuple(base_cfg.get("encoder_channels", FALLBACK_BASE["encoder_channels"]))
     dropout = float(base_cfg.get("dropout", 0.3))
@@ -443,7 +472,8 @@ def build_candidate(base_cfg: dict[str, Any], idx: int, directive: str) -> dict[
     warmup_name = f"{directive}_d{blocks}" if deepen else directive
     name = (
         f"iter_auto{idx:03d}_bs{batch_size}_lr{int(round(lr * 1e6))}"
-        f"_a{int(round(lambda_adv * 100))}_p{int(round(lambda_proto * 100))}_{warmup_name}"
+        f"_a{int(round(lambda_adv * 100))}_p{int(round(lambda_proto * 100))}"
+        f"_e{feature_dim}_q{proj_dim}_pca{input_raw_pca_components}_{main_backbone}_{warmup_name}"
     )
 
     return {
@@ -454,6 +484,8 @@ def build_candidate(base_cfg: dict[str, Any], idx: int, directive: str) -> dict[
         "lr": lr,
         "lambda_adv": lambda_adv,
         "lambda_proto": lambda_proto,
+        "feature_dim": feature_dim,
+        "proj_dim": proj_dim,
         "supcon_temperature": supcon_temperature,
         "accept_percentile": accept_percentile,
         "reject_threshold_factor": reject_threshold_factor,
@@ -471,6 +503,9 @@ def build_candidate(base_cfg: dict[str, Any], idx: int, directive: str) -> dict[
         "encoder_channels": channels,
         "blocks_per_stage": blocks,
         "dropout": dropout,
+        "input_raw_pca_components": input_raw_pca_components,
+        "mz_bins": input_raw_pca_components,
+        "main_backbone": main_backbone,
         "search_directive": directive,
     }
 
@@ -478,7 +513,18 @@ def build_candidate(base_cfg: dict[str, Any], idx: int, directive: str) -> dict[
 def build_candidate_batch(base_cfg: dict[str, Any], best_metrics: dict[str, Any], count: int) -> list[dict[str, Any]]:
     directive = choose_directive(best_metrics)
     idx = next_auto_index()
-    return [build_candidate(base_cfg, idx + offset, directive) for offset in range(count)]
+    candidates = [build_candidate(base_cfg, idx, directive)]
+
+    a_acc = _safe_float(best_metrics.get("setting_a_accuracy"), 0.0)
+    a_bal = _safe_float(best_metrics.get("setting_a_balanced_acc"), 0.0)
+    a_macro = _safe_float(best_metrics.get("setting_a_macro_f1"), 0.0)
+    needs_a_push = a_acc < TARGETS["setting_a_accuracy_min"] or a_bal < TARGETS["setting_a_balanced_acc_min"] or a_macro < TARGETS["setting_a_macro_f1_min"]
+    if needs_a_push and directive != "recover_setting_a" and len(candidates) < count:
+        candidates.append(build_candidate(base_cfg, idx + len(candidates), "recover_setting_a"))
+
+    while len(candidates) < count:
+        candidates.append(build_candidate(base_cfg, idx + len(candidates), directive))
+    return candidates
 
 
 def summarize_top_runs(runs: list[dict[str, Any]], limit: int = 5) -> list[str]:
@@ -489,6 +535,7 @@ def summarize_top_runs(runs: list[dict[str, Any]], limit: int = 5) -> list[str]:
             f"{idx}. {row['relative_name']}: "
             f"A_acc={_safe_float(m.get('setting_a_accuracy'), float('nan')):.4f}, "
             f"A_bal={_safe_float(m.get('setting_a_balanced_acc'), float('nan')):.4f}, "
+            f"A_f1={_safe_float(m.get('setting_a_macro_f1'), float('nan')):.4f}, "
             f"AUROC={_safe_float(m.get('open_set_AUROC'), float('nan')):.4f}, "
             f"FPR95={_safe_float(m.get('FPR_at_95TPR'), float('nan')):.4f}, "
             f"gap={_safe_float(m.get('known_unknown_gap'), float('nan')):.4f}, "
@@ -496,6 +543,68 @@ def summarize_top_runs(runs: list[dict[str, Any]], limit: int = 5) -> list[str]:
             f"3shot={_safe_float(m.get('shot3_acc'), float('nan')):.4f}"
         )
     return lines
+
+
+def _compact_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "search_directive", "seed", "epochs", "batch_size", "lr", "weight_decay",
+        "lambda_adv", "lambda_proto", "lambda_recon", "lambda_cls",
+        "supcon_temperature", "accept_percentile", "reject_threshold_factor",
+        "feature_dim", "proj_dim", "input_raw_pca_components",
+        "main_backbone", "encoder_channels", "blocks_per_stage", "dropout",
+        "open_score_auto_blend", "open_score_base_weight",
+        "open_score_margin_weight", "open_score_blend_objective",
+    ]
+    return {k: cfg.get(k) for k in keys if k in cfg}
+
+
+def write_best_snapshot(runs: list[dict[str, Any]], limit: int = 20) -> None:
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    top = runs[:max(int(limit), 1)]
+    payload = []
+    for rank, row in enumerate(top, start=1):
+        payload.append({
+            "rank": rank,
+            "run": row["relative_name"],
+            "run_dir": str(row["run_dir"]),
+            "metrics": row["metrics"],
+            "config": _compact_config(row.get("config", {}) or {}),
+        })
+
+    with open(BEST_JSON, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    lines = [
+        "# AUTO Best Runs",
+        "",
+        f"Updated: {ts()}",
+        "",
+        "| Rank | Run | A_acc | A_bal | A_f1 | B_AUROC | B_FPR95 | Gap | 1-shot | 3-shot | Key params |",
+        "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in payload:
+        m = row["metrics"]
+        c = row["config"]
+        params = (
+            f"bb={c.get('main_backbone')}, e={c.get('feature_dim')}, "
+            f"q={c.get('proj_dim')}, pca={c.get('input_raw_pca_components')}, "
+            f"bs={c.get('batch_size')}, lr={c.get('lr')}, "
+            f"adv={c.get('lambda_adv')}, proto={c.get('lambda_proto')}, "
+            f"blend={c.get('open_score_base_weight')}/{c.get('open_score_margin_weight')}"
+        )
+        lines.append(
+            f"| {row['rank']} | {row['run']} | "
+            f"{_safe_float(m.get('setting_a_accuracy'), float('nan')):.4f} | "
+            f"{_safe_float(m.get('setting_a_balanced_acc'), float('nan')):.4f} | "
+            f"{_safe_float(m.get('setting_a_macro_f1'), float('nan')):.4f} | "
+            f"{_safe_float(m.get('open_set_AUROC'), float('nan')):.4f} | "
+            f"{_safe_float(m.get('FPR_at_95TPR'), float('nan')):.4f} | "
+            f"{_safe_float(m.get('known_unknown_gap'), float('nan')):.4f} | "
+            f"{_safe_float(m.get('shot1_acc'), float('nan')):.4f} | "
+            f"{_safe_float(m.get('shot3_acc'), float('nan')):.4f} | "
+            f"{params} |"
+        )
+    BEST_MD.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _run_command(cmd: list[str], env: dict[str, str], log_path: Path) -> int:
@@ -511,22 +620,57 @@ def _run_command(cmd: list[str], env: dict[str, str], log_path: Path) -> int:
         return proc.wait()
 
 
-def _warmup_guard_args(best_run: dict[str, Any] | None) -> list[str]:
-    if not WARMUP_GUARD_ENABLED or not best_run:
-        return []
+def _parse_warmup_val_acc(log_path: Path, epoch: int) -> float | None:
+    if not log_path.exists():
+        return None
+    epoch_pat = re.compile(rf"\bEpoch\s+{int(epoch)}/")
+    val_pat = re.compile(r"->\s+val_acc=([0-9.]+)")
+    in_epoch = False
+    try:
+        for line in log_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if epoch_pat.search(line):
+                in_epoch = True
+                continue
+            if in_epoch:
+                m = val_pat.search(line)
+                if m:
+                    return float(m.group(1))
+                if "Epoch " in line:
+                    in_epoch = False
+    except Exception:
+        return None
+    return None
+
+
+def _best_warmup_reference(best_run: dict[str, Any] | None) -> float | None:
+    if not best_run:
+        return None
+
     run_config = best_run.get("run_config", {}) or {}
     cfg = run_config.get("config", {}) or {}
     ref = cfg.get("warmup_guard_best_at_epoch")
-    if ref in (None, 0, "0"):
-        return [
-            "--warmup_guard_enabled",
-            "--warmup_guard_epoch",
-            str(WARMUP_GUARD_EPOCH),
-            "--warmup_guard_min_ratio",
-            str(WARMUP_GUARD_MIN_RATIO),
-            "--warmup_guard_compare_best",
-        ]
-    return [
+    if ref not in (None, 0, "0"):
+        try:
+            return float(ref)
+        except Exception:
+            pass
+
+    run_dir = Path(best_run.get("run_dir", ""))
+    for name in ("train.log", "iter_train.log"):
+        parsed = _parse_warmup_val_acc(run_dir / name, WARMUP_GUARD_EPOCH)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _warmup_guard_args(best_run: dict[str, Any] | None) -> list[str]:
+    if not WARMUP_GUARD_ENABLED or not best_run:
+        return []
+    ref = _best_warmup_reference(best_run)
+    if ref is None or ref <= 0:
+        return []
+
+    args = [
         "--warmup_guard_enabled",
         "--warmup_guard_epoch",
         str(WARMUP_GUARD_EPOCH),
@@ -534,8 +678,12 @@ def _warmup_guard_args(best_run: dict[str, Any] | None) -> list[str]:
         str(ref),
         "--warmup_guard_min_ratio",
         str(WARMUP_GUARD_MIN_RATIO),
-        "--warmup_guard_compare_best",
     ]
+    if WARMUP_GUARD_COMPARE_BEST:
+        args.append("--warmup_guard_compare_best")
+    else:
+        args.append("--warmup_guard_no_compare_best")
+    return args
 
 
 def launch_candidate(cfg: dict[str, Any], best_run: dict[str, Any] | None, gpu: str | None) -> dict[str, Any]:
@@ -608,6 +756,10 @@ def launch_candidate(cfg: dict[str, Any], best_run: dict[str, Any] | None, gpu: 
         str(cfg["dataloader_workers"]),
         "--dataloader_prefetch_factor",
         str(cfg["dataloader_prefetch_factor"]),
+        "--feature_dim",
+        str(cfg["feature_dim"]),
+        "--proj_dim",
+        str(cfg["proj_dim"]),
         "--main_backbone",
         str(cfg["main_backbone"]),
         "--main_backbone_model",
@@ -669,6 +821,10 @@ def launch_candidate(cfg: dict[str, Any], best_run: dict[str, Any] | None, gpu: 
         str(cfg["prepared_dir"]),
         "--batch_size",
         str(cfg["batch_size"]),
+        "--feature_dim",
+        str(cfg["feature_dim"]),
+        "--proj_dim",
+        str(cfg["proj_dim"]),
         "--open_score_blend_objective",
         str(cfg["open_score_blend_objective"]),
     ]
@@ -687,7 +843,10 @@ def launch_candidate(cfg: dict[str, Any], best_run: dict[str, Any] | None, gpu: 
 
 def meets_targets(metrics: dict[str, Any]) -> bool:
     return (
-        _safe_float(metrics.get("open_set_AUROC"), -1.0) >= TARGETS["setting_b_open_set_AUROC_min"]
+        _safe_float(metrics.get("setting_a_accuracy"), -1.0) >= TARGETS["setting_a_accuracy_min"]
+        and _safe_float(metrics.get("setting_a_balanced_acc"), -1.0) >= TARGETS["setting_a_balanced_acc_min"]
+        and _safe_float(metrics.get("setting_a_macro_f1"), -1.0) >= TARGETS["setting_a_macro_f1_min"]
+        and _safe_float(metrics.get("open_set_AUROC"), -1.0) >= TARGETS["setting_b_open_set_AUROC_min"]
         and _safe_float(metrics.get("FPR_at_95TPR"), 1e9) <= TARGETS["setting_b_fpr95_max"]
         and _safe_float(metrics.get("shot1_acc"), -1.0) >= TARGETS["setting_c_1shot_acc_min"]
         and _safe_float(metrics.get("shot3_acc"), -1.0) >= TARGETS["setting_c_3shot_acc_min"]
@@ -703,6 +862,26 @@ def is_practical_candidate(metrics: dict[str, Any]) -> bool:
     )
 
 
+def _slim_run_dir(path: Path) -> None:
+    if not path.name.startswith("iter_auto"):
+        return
+    keep_files = {
+        "run_config.json",
+        "evaluation_summary.json",
+        "train.log",
+        "eval.log",
+        "iter_train.log",
+        "iter_eval.log",
+    }
+    for child in path.iterdir():
+        if child.name in keep_files:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+
+
 def prune_old_runs(keep_names: set[str]) -> None:
     if KEEP_ALL_RUN_DIRS:
         return
@@ -713,13 +892,7 @@ def prune_old_runs(keep_names: set[str]) -> None:
             continue
         if path.name.startswith("run_") or path.name.startswith("run_seed"):
             continue
-        for child in path.iterdir():
-            if child.name in {"run_config.json", "evaluation_summary.json", "iter_train.log", "iter_eval.log"}:
-                continue
-            if child.is_dir():
-                subprocess.run(["rm", "-rf", str(child)], check=False)
-            else:
-                child.unlink(missing_ok=True)
+        _slim_run_dir(path)
 
 
 def main() -> int:
@@ -731,6 +904,7 @@ def main() -> int:
     args = parser.parse_args()
 
     runs = collect_runs()
+    write_best_snapshot(runs, limit=20)
     best_run = runs[0] if runs else None
     base_cfg = derive_base_config(best_run)
     best_metrics = best_run["metrics"] if best_run else extract_metrics({})
@@ -758,6 +932,8 @@ def main() -> int:
             f"adv={cfg['lambda_adv']:.3f}, proto={cfg['lambda_proto']:.3f}, "
             f"temp={cfg['supcon_temperature']:.3f}, accp={cfg['accept_percentile']:.1f}, "
             f"reject={cfg['reject_threshold_factor']:.2f}, blocks={cfg['blocks_per_stage']}, "
+            f"embed={cfg['feature_dim']}, proj={cfg['proj_dim']}, "
+            f"pca={cfg['input_raw_pca_components']}, backbone={cfg['main_backbone']}, "
             f"dropout={cfg['dropout']:.2f}, auto_blend={cfg['open_score_auto_blend']}, "
             f"blend_obj={cfg['open_score_blend_objective']}"
         )
@@ -785,6 +961,7 @@ def main() -> int:
             f"  - accept_percentile={cfg['accept_percentile']}, reject_threshold_factor={cfg['reject_threshold_factor']}",
             f"  - auto_blend={cfg['open_score_auto_blend']}, base={cfg.get('open_score_base_weight')}, margin={cfg.get('open_score_margin_weight')}, objective={cfg['open_score_blend_objective']}",
             f"  - backbone={cfg['main_backbone']}, encoder_channels={cfg['encoder_channels']}, blocks={cfg['blocks_per_stage']}, dropout={cfg['dropout']}",
+            f"  - feature_dim={cfg['feature_dim']}, proj_dim={cfg['proj_dim']}, input_raw_pca_components={cfg['input_raw_pca_components']}",
         ])
         result = launch_candidate(cfg, best_run, args.gpu)
         summary = read_json(Path(result["run_dir"]) / "evaluation_summary.json")
@@ -806,6 +983,7 @@ def main() -> int:
             f"  - train_exit={result['train_exit']}, eval_exit={result['eval_exit']}",
             f"  - setting_a_accuracy={metrics.get('setting_a_accuracy')}",
             f"  - setting_a_balanced_acc={metrics.get('setting_a_balanced_acc')}",
+            f"  - setting_a_macro_f1={metrics.get('setting_a_macro_f1')}",
             f"  - open_set_AUROC={metrics.get('open_set_AUROC')}",
             f"  - FPR_at_95TPR={metrics.get('FPR_at_95TPR')}",
             f"  - known_unknown_gap={metrics.get('known_unknown_gap')}",
@@ -815,6 +993,7 @@ def main() -> int:
         launched += 1
 
         runs = collect_runs()
+        write_best_snapshot(runs, limit=20)
         best_run = runs[0] if runs else best_run
         if best_run:
             best_metrics = best_run["metrics"]
@@ -825,7 +1004,9 @@ def main() -> int:
             ])
             break
 
-    keep_names = {row["run_dir"].name for row in collect_runs()[: max(int(args.count), 3)]}
+    runs = collect_runs()
+    write_best_snapshot(runs, limit=20)
+    keep_names = {row["run_dir"].name for row in runs[: max(KEEP_TOP_N, int(args.count), 3)]}
     prune_old_runs(keep_names)
     return 0
 

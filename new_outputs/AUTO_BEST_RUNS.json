@@ -1,0 +1,164 @@
+[
+  {
+    "rank": 1,
+    "run": "run_seed41_20260701_180939/run_20260701_180940",
+    "run_dir": "/Users/slong/Documents/project/gcms_consistency/new_outputs/run_seed41_20260701_180939/run_20260701_180940",
+    "metrics": {
+      "setting_a_accuracy": 0.8660714285714286,
+      "setting_a_balanced_acc": 0.6775265552427155,
+      "setting_a_macro_f1": 0.5706813117941952,
+      "open_set_AUROC": 0.8753226349455729,
+      "FPR_at_95TPR": 0.40601503759398494,
+      "known_unknown_gap": 0.3079045341017956,
+      "shot1_acc": 0.5801526717557252,
+      "shot3_acc": 0.9763779527559056,
+      "blend_base_weight": 0.9,
+      "blend_margin_weight": 0.09999999999999998
+    },
+    "config": {}
+  },
+  {
+    "rank": 2,
+    "run": "run_seed42_20260701_184101/run_20260701_184102",
+    "run_dir": "/Users/slong/Documents/project/gcms_consistency/new_outputs/run_seed42_20260701_184101/run_20260701_184102",
+    "metrics": {
+      "setting_a_accuracy": 0.8630952380952381,
+      "setting_a_balanced_acc": 0.8033306512569186,
+      "setting_a_macro_f1": 0.6905626589953884,
+      "open_set_AUROC": 0.8559404908860638,
+      "FPR_at_95TPR": 0.49624060150375937,
+      "known_unknown_gap": 0.3236266947843025,
+      "shot1_acc": 0.6335877862595419,
+      "shot3_acc": 0.9921259842519685,
+      "blend_base_weight": 0.2,
+      "blend_margin_weight": 0.8
+    },
+    "config": {}
+  },
+  {
+    "rank": 3,
+    "run": "run_20260701_113442",
+    "run_dir": "/Users/slong/Documents/project/gcms_consistency/new_outputs/run_20260701_113442",
+    "metrics": {
+      "setting_a_accuracy": 0.8720238095238095,
+      "setting_a_balanced_acc": 0.6799185210807488,
+      "setting_a_macro_f1": 0.5732204911685687,
+      "open_set_AUROC": 0.8867531301601551,
+      "FPR_at_95TPR": 0.6691729323308271,
+      "known_unknown_gap": 0.34750990406879195,
+      "shot1_acc": 0.5419847328244275,
+      "shot3_acc": 0.984251968503937,
+      "blend_base_weight": null,
+      "blend_margin_weight": null
+    },
+    "config": {}
+  },
+  {
+    "rank": 4,
+    "run": "run_20260701_124311",
+    "run_dir": "/Users/slong/Documents/project/gcms_consistency/new_outputs/run_20260701_124311",
+    "metrics": {
+      "setting_a_accuracy": 0.8779761904761905,
+      "setting_a_balanced_acc": 0.6972301052126093,
+      "setting_a_macro_f1": 0.6707664861254053,
+      "open_set_AUROC": 0.7943472754380622,
+      "FPR_at_95TPR": 0.7218045112781954,
+      "known_unknown_gap": 0.25793326821066576,
+      "shot1_acc": 0.5801526717557252,
+      "shot3_acc": 0.9763779527559056,
+      "blend_base_weight": null,
+      "blend_margin_weight": null
+    },
+    "config": {}
+  },
+  {
+    "rank": 5,
+    "run": "run_20260701_130502",
+    "run_dir": "/Users/slong/Documents/project/gcms_consistency/new_outputs/run_20260701_130502",
+    "metrics": {
+      "setting_a_accuracy": 0.8779761904761905,
+      "setting_a_balanced_acc": 0.6833247994538317,
+      "setting_a_macro_f1": 0.6928167316901492,
+      "open_set_AUROC": 0.8131202205941293,
+      "FPR_at_95TPR": 0.7368421052631579,
+      "known_unknown_gap": 0.2586350296154999,
+      "shot1_acc": 0.35877862595419846,
+      "shot3_acc": 0.9763779527559056,
+      "blend_base_weight": null,
+      "blend_margin_weight": null
+    },
+    "config": {}
+  },
+  {
+    "rank": 6,
+    "run": "run_20260701_132702",
+    "run_dir": "/Users/slong/Documents/project/gcms_consistency/new_outputs/run_20260701_132702",
+    "metrics": {
+      "setting_a_accuracy": 0.8392857142857143,
+      "setting_a_balanced_acc": 0.6431276234447366,
+      "setting_a_macro_f1": 0.5662804847823931,
+      "open_set_AUROC": 0.7298683809737565,
+      "FPR_at_95TPR": 0.7669172932330827,
+      "known_unknown_gap": 0.18005392046621455,
+      "shot1_acc": 0.4732824427480916,
+      "shot3_acc": 0.952755905511811,
+      "blend_base_weight": null,
+      "blend_margin_weight": null
+    },
+    "config": {}
+  },
+  {
+    "rank": 7,
+    "run": "run_20260701_145405",
+    "run_dir": "/Users/slong/Documents/project/gcms_consistency/new_outputs/run_20260701_145405",
+    "metrics": {
+      "setting_a_accuracy": 0.7053571428571429,
+      "setting_a_balanced_acc": 0.2903151419124238,
+      "setting_a_macro_f1": 0.24395530469701868,
+      "open_set_AUROC": 0.6987419042656144,
+      "FPR_at_95TPR": 0.8947368421052632,
+      "known_unknown_gap": 0.12845080644347098,
+      "shot1_acc": 0.33587786259541985,
+      "shot3_acc": 0.8582677165354331,
+      "blend_base_weight": null,
+      "blend_margin_weight": null
+    },
+    "config": {}
+  },
+  {
+    "rank": 8,
+    "run": "run_20260701_101312",
+    "run_dir": "/Users/slong/Documents/project/gcms_consistency/new_outputs/run_20260701_101312",
+    "metrics": {
+      "setting_a_accuracy": 0.8184523809523809,
+      "setting_a_balanced_acc": 0.6135613883485476,
+      "setting_a_macro_f1": 0.48873811161451325,
+      "open_set_AUROC": 0.5969289031402034,
+      "FPR_at_95TPR": 0.9699248120300752,
+      "known_unknown_gap": 0.05731359002087871,
+      "shot1_acc": 0.48854961832061067,
+      "shot3_acc": 0.984251968503937,
+      "blend_base_weight": null,
+      "blend_margin_weight": null
+    },
+    "config": {}
+  },
+  {
+    "rank": 9,
+    "run": "run_20260701_145605/final_model",
+    "run_dir": "/Users/slong/Documents/project/gcms_consistency/new_outputs/run_20260701_145605/final_model",
+    "metrics": {
+      "setting_a_accuracy": 0.44642857142857145,
+      "setting_a_balanced_acc": 0.2535070525385295,
+      "setting_a_macro_f1": 0.17851003197521667,
+      "open_set_AUROC": 0.4698131467282067,
+      "FPR_at_95TPR": 0.9699248120300752,
+      "known_unknown_gap": -0.0009507758301935537,
+      "shot1_acc": 0.4580152671755725,
+      "shot3_acc": 0.84251968503937,
+      "blend_base_weight": null,
+      "blend_margin_weight": null
+    },
+    "config": {}
+  }
+]

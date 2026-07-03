@@ -378,6 +378,11 @@ def main():
                         help="易混产品对 hard margin 权重")
     parser.add_argument("--supcon_temperature", type=float, default=None,
                         help="SupCon 温度参数")
+    parser.add_argument("--embed_dim", "--feature_dim", dest="feature_dim",
+                        type=int, default=None,
+                        help="最终 embedding 维度")
+    parser.add_argument("--proj_dim", type=int, default=None,
+                        help="SupCon 投影头维度")
     parser.add_argument("--hard_pair_margin", type=float, default=None,
                         help="易混产品对 hard margin 距离")
     parser.add_argument("--accept_percentile", type=float, default=None,
@@ -515,6 +520,12 @@ def main():
                         action="store_true", default=False)
     parser.add_argument("--no-save_table", dest="save_prepare_tables",
                         action="store_false")
+    parser.add_argument("--save_visualizations", dest="evaluate_save_visualizations",
+                        action="store_true", default=None,
+                        help="评估时保存 t-SNE/score distribution 图")
+    parser.add_argument("--no_save_visualizations", dest="evaluate_save_visualizations",
+                        action="store_false",
+                        help="评估时不保存可视化图")
 
     # 范围参数
     parser.add_argument("--rt_min", type=float, default=3.17)
@@ -534,7 +545,8 @@ def main():
         "seed", "epochs", "batch_size", "lr", "weight_decay",
         "lambda_adv", "lambda_proto", "lambda_recon", "lambda_cls",
         "lambda_hard_pair", "hard_pair_margin",
-        "supcon_temperature", "accept_percentile", "reject_threshold_factor",
+        "supcon_temperature", "feature_dim", "proj_dim",
+        "accept_percentile", "reject_threshold_factor",
         "open_score_base_weight", "open_score_margin_weight",
         "eval_interval_search", "eval_interval_final", "eval_final_start_ratio",
         "early_stop_patience", "min_epochs_before_early_stop",
@@ -593,6 +605,8 @@ def main():
 
     cfg.save_prepare_plots = bool(args.save_prepare_plots)
     cfg.save_prepare_tables = bool(args.save_prepare_tables)
+    if args.evaluate_save_visualizations is not None:
+        cfg.evaluate_save_visualizations = bool(args.evaluate_save_visualizations)
 
     if (args.rt_min is not None) or (args.rt_max is not None):
         rt_min = cfg.rt_range[0] if args.rt_min is None else args.rt_min
@@ -611,7 +625,11 @@ def main():
     if args.command == "evaluate" and Path(cfg.output_dir).name == "final_model":
         cfg.output_dir = str(Path(cfg.output_dir).parent)
     output_name = Path(cfg.output_dir).name
-    explicit_run_dir = bool(args.output_dir) or output_name.startswith("run_") or output_name.startswith("run_seed")
+    explicit_run_dir = (
+        output_name.startswith("run_")
+        or output_name.startswith("run_seed")
+        or output_name.startswith("iter_auto")
+    )
     if args.command in ("prepare", "train") and not explicit_run_dir:
         import time as _time
         cfg.output_dir = str(
