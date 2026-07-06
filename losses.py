@@ -145,22 +145,25 @@ class HardPairMarginLoss(nn.Module):
             return torch.tensor(0.0, device=device, requires_grad=True)
 
         losses = []
+        z_unit = F.normalize(z, dim=1)
         for a_id, b_id in self.pair_label_ids:
             mask_a = labels == a_id
             mask_b = labels == b_id
             if not (mask_a.any() and mask_b.any()):
                 continue
 
-            proto_a = z[mask_a].mean(dim=0)
-            proto_b = z[mask_b].mean(dim=0)
+            proto_a = z_unit[mask_a].mean(dim=0)
+            proto_b = z_unit[mask_b].mean(dim=0)
+            proto_a = F.normalize(proto_a, dim=0)
+            proto_b = F.normalize(proto_b, dim=0)
 
-            d_aa = (z[mask_a] - proto_a).norm(dim=1)
-            d_ab = (z[mask_a] - proto_b).norm(dim=1)
-            d_bb = (z[mask_b] - proto_b).norm(dim=1)
-            d_ba = (z[mask_b] - proto_a).norm(dim=1)
+            sim_aa = z_unit[mask_a] @ proto_a
+            sim_ab = z_unit[mask_a] @ proto_b
+            sim_bb = z_unit[mask_b] @ proto_b
+            sim_ba = z_unit[mask_b] @ proto_a
 
-            losses.append(F.relu(self.margin + d_aa - d_ab).mean())
-            losses.append(F.relu(self.margin + d_bb - d_ba).mean())
+            losses.append(F.relu(self.margin + sim_ab - sim_aa).mean())
+            losses.append(F.relu(self.margin + sim_ba - sim_bb).mean())
 
         if not losses:
             return torch.tensor(0.0, device=device, requires_grad=True)

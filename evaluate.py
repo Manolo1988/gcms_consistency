@@ -21,6 +21,7 @@ import json
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import pandas as pd
 
 from register import PrototypeStore, register_from_loader
 
@@ -613,6 +614,127 @@ def _build_main_vs_readme_baselines(result_a, result_b, result_c,
             baseline_result,
         )
     return out
+
+
+def _records_to_dataframe(records):
+    rows = []
+    for r in records or []:
+        row = {
+            k: v
+            for k, v in r.items()
+            if k != "z" and not isinstance(v, np.ndarray)
+        }
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _setting_a_error_analysis(records, out_dir):
+    if not records:
+        return {}
+
+    df = _records_to_dataframe(records)
+    if df.empty or "true_class" not in df.columns or "pred_class" not in df.columns:
+        return {}
+
+    sort_cols = [
+        c for c in ("true_class", "pred_class", "consistency_score", "radius_norm")
+        if c in df.columns
+    ]
+    ascending = [
+        True if c in ("true_class", "pred_class") else False
+        for c in sort_cols
+    ]
+    if sort_cols:
+        df = df.sort_values(sort_cols, ascending=ascending)
+    df.to_csv(out_dir / "setting_a_predictions.csv", index=False)
+
+    if "correct" in df.columns:
+        errors = df[df["correct"] == False].copy()
+    else:
+        errors = df[df["true_class"].astype(str) != df["pred_class"].astype(str)].copy()
+    errors.to_csv(out_dir / "setting_a_errors.csv", index=False)
+
+    labels = sorted(
+        set(df["true_class"].astype(str).tolist())
+        | set(df["pred_class"].astype(str).tolist())
+    )
+    conf = confusion_matrix(
+        df["true_class"].astype(str),
+        df["pred_class"].astype(str),
+        labels=labels,
+    )
+    conf_df = pd.DataFrame(conf, index=labels, columns=labels)
+    conf_df.to_csv(out_dir / "setting_a_confusion_matrix.csv")
+
+    per_class = []
+    for cls_name, group in df.groupby("true_class", sort=True):
+        n = int(len(group))
+        correct = int(group["correct"].sum()) if "correct" in group else 0
+        per_class.append({
+            "class": str(cls_name),
+            "n": n,
+            "correct": correct,
+            "wrong": n - correct,
+            "accuracy": float(correct / max(n, 1)),
+        })
+    per_class = sorted(per_class, key=lambda x: (x["accuracy"], -x["n"], x["class"]))
+
+    error_pairs = []
+    if not errors.empty:
+        for (true_cls, pred_cls), group in errors.groupby(["true_class", "pred_class"]):
+            error_pairs.append({
+                "true_class": str(true_cls),
+                "pred_class": str(pred_cls),
+                "count": int(len(group)),
+                "mean_consistency_score": float(group["consistency_score"].mean())
+                if "consistency_score" in group else float("nan"),
+                "mean_radius_norm": float(group["radius_norm"].mean())
+                if "radius_norm" in group else float("nan"),
+                "sample_ids": [str(x) for x in group["sample_id"].head(20).tolist()]
+                if "sample_id" in group else [],
+            })
+    error_pairs = sorted(error_pairs, key=lambda x: (-x["count"], x["true_class"], x["pred_class"]))
+
+    high_conf_errors = []
+    if not errors.empty and "consistency_score" in errors:
+        high_conf = errors.sort_values("consistency_score", ascending=False).head(30)
+        keep_cols = [
+            c for c in (
+                "sample_id", "true_class", "pred_class", "consistency_score",
+                "open_set_score", "base_score", "margin_score",
+                "radius_norm", "min_dist", "second_dist", "batch_label",
+            )
+            if c in high_conf.columns
+        ]
+        high_conf_errors = high_conf[keep_cols].to_dict(orient="records")
+
+    return {
+        "n_samples": int(len(df)),
+        "n_errors": int(len(errors)),
+        "error_rate": float(len(errors) / max(len(df), 1)),
+        "per_class": per_class,
+        "error_pairs": error_pairs,
+        "high_confidence_errors": _s_recursive_local(high_conf_errors),
+        "files": {
+            "predictions": "setting_a_predictions.csv",
+            "errors": "setting_a_errors.csv",
+            "confusion_matrix": "setting_a_confusion_matrix.csv",
+        },
+    }
+
+
+def _s_recursive_local(obj):
+    if isinstance(obj, dict):
+        return {str(k): _s_recursive_local(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_s_recursive_local(v) for v in obj]
+    if isinstance(obj, (np.floating, float)):
+        return float(obj)
+    if isinstance(obj, (np.integer, int)):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
 
 
 def _evaluate_baseline_with_cache(model_cls, feature_mode, cache):
@@ -1424,6 +1546,9 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
         summary["setting_a_robustness"] = {
             k: _s(v) for k, v in result_a["batch_robustness"].items()
         }
+        summary["setting_a_error_analysis"] = _s_recursive(
+            _setting_a_error_analysis(result_a.get("records", []), out_dir)
+        )
 
     if result_b:
         summary["setting_b"] = {

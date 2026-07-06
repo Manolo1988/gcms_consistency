@@ -179,6 +179,42 @@ def _load_model_state(model, state_dict):
     getattr(model, "_orig_mod", model).load_state_dict(state_dict)
 
 
+def _prototype_radius_health(radii):
+    raw_vals = [
+        float(v.get("raw", np.nan))
+        for v in radii.values()
+        if isinstance(v, dict)
+    ]
+    raw_vals = np.array([v for v in raw_vals if np.isfinite(v)], dtype=np.float64)
+    if raw_vals.size == 0:
+        return {
+            "radius_mean": float("nan"),
+            "radius_cv": float("nan"),
+            "radius_penalty": 0.0,
+        }
+
+    mean = float(raw_vals.mean())
+    std = float(raw_vals.std())
+    cv = float(std / max(mean, 1e-8))
+    target = 0.45
+    penalty = max(0.0, mean - target) + 0.10 * cv
+    return {
+        "radius_mean": mean,
+        "radius_cv": cv,
+        "radius_penalty": float(penalty),
+    }
+
+
+def _selection_metric(val_acc, balanced_acc, auroc_correct, radius_penalty):
+    auroc_term = 0.5 if np.isnan(auroc_correct) else float(auroc_correct)
+    return (
+        0.45 * float(val_acc)
+        + 0.35 * float(balanced_acc)
+        + 0.20 * auroc_term
+        - 0.05 * float(radius_penalty)
+    )
+
+
 def _build_proto_subset_loader(dataset, cfg, device):
     """训练中期验证: 仅用训练子集构原型, 降低验证成本。"""
     n_total = len(dataset)
@@ -502,10 +538,6 @@ def validate_with_prototypes(model, train_loader_noaug, val_loader,
     if len(set(correct_flags)) > 1:
         auroc_correct = float(roc_auc_score(correct_flags, score_vals))
 
-    val_metric = val_acc
-    if not np.isnan(auroc_correct):
-        val_metric = val_acc + 0.05 * auroc_correct
-
     # ── Per-class accuracy + confusion matrix ──
     per_class_acc = {}
     all_labels_arr = np.array(all_val_labels)
@@ -522,6 +554,10 @@ def validate_with_prototypes(model, train_loader_noaug, val_loader,
         per_class_acc[label_names.get(lbl, str(lbl))] = float(
             (all_preds_arr[mask] == lbl).mean()
         )
+    if per_class_acc:
+        balanced_acc = float(np.mean(list(per_class_acc.values())))
+    else:
+        balanced_acc = float("nan")
     for t, p in zip(all_labels_arr, all_preds_arr):
         ti = int(t)
         pi = int(p)
@@ -546,14 +582,23 @@ def validate_with_prototypes(model, train_loader_noaug, val_loader,
             "raw": float(raw_radii.get(name, float("nan"))),
             "sph": float(sph_radii.get(name, float("nan"))),
         }
+    radius_health = _prototype_radius_health(radii)
+    val_metric = _selection_metric(
+        val_acc,
+        balanced_acc if np.isfinite(balanced_acc) else val_acc,
+        auroc_correct,
+        radius_health["radius_penalty"],
+    )
 
     return {
         "acc": float(val_acc),
+        "balanced_acc": float(balanced_acc),
         "auroc_correct": float(auroc_correct),
         "metric": float(val_metric),
         "train_proto_acc": float(train_proto_acc),
         "per_class_acc": per_class_acc,
         "radii": radii,
+        **radius_health,
         "confusion": conf_str,
     }, proto_store
 
@@ -688,6 +733,7 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
             val_acc = float(val_m["acc"])
             val_metric = float(val_m["metric"])
             val_auroc = float(val_m["auroc_correct"])
+            val_bal = float(val_m.get("balanced_acc", float("nan")))
             if val_metric > (best_metric + early_stop_ctrl["min_delta"]):
                 best_metric = val_metric
                 best_acc = val_acc
@@ -700,6 +746,8 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
             pa = val_m.get("per_class_acc", {})
             radii = val_m.get("radii", {})
             confusion = val_m.get("confusion", "")
+            radius_mean = float(val_m.get("radius_mean", float("nan")))
+            radius_cv = float(val_m.get("radius_cv", float("nan")))
             pa_str = " ".join(f"{k}={v:.2f}" for k, v in sorted(pa.items()))
             radii_str = " ".join(
                 f"{k}=raw{r.get('raw',float('nan')):.3f}/sph{r.get('sph',float('nan')):.3f}"
@@ -707,7 +755,8 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
             )
             print(
                 f"    -> val_acc={val_acc:.3f}, train_pa={train_pa:.3f}, "
-                f"val_auroc={val_auroc:.3f}, "
+                f"val_bal={val_bal:.3f}, val_auroc={val_auroc:.3f}, "
+                f"radius_mean={radius_mean:.3f}, radius_cv={radius_cv:.3f}, "
                 f"val_metric={val_metric:.3f} (best={best_metric:.3f}, "
                 f"proto={'full' if use_full_proto else 'subset'})"
                 f"\n       per_class: {pa_str}"
@@ -934,6 +983,7 @@ def train_single_model(cfg: Config):
             val_acc = float(val_m["acc"])
             val_metric = float(val_m["metric"])
             val_auroc = float(val_m["auroc_correct"])
+            val_bal = float(val_m.get("balanced_acc", float("nan")))
             if val_metric > (best_metric + early_stop_ctrl["min_delta"]):
                 best_metric = val_metric
                 best_acc = val_acc
@@ -946,6 +996,8 @@ def train_single_model(cfg: Config):
             pa = val_m.get("per_class_acc", {})
             radii = val_m.get("radii", {})
             confusion = val_m.get("confusion", "")
+            radius_mean = float(val_m.get("radius_mean", float("nan")))
+            radius_cv = float(val_m.get("radius_cv", float("nan")))
             pa_str = " ".join(f"{k}={v:.2f}" for k, v in sorted(pa.items()))
             radii_str = " ".join(
                 f"{k}=raw{r.get('raw',float('nan')):.3f}/sph{r.get('sph',float('nan')):.3f}"
@@ -953,7 +1005,8 @@ def train_single_model(cfg: Config):
             )
             print(
                 f"    -> val_acc={val_acc:.3f}, train_pa={train_pa:.3f}, "
-                f"val_auroc={val_auroc:.3f}, "
+                f"val_bal={val_bal:.3f}, val_auroc={val_auroc:.3f}, "
+                f"radius_mean={radius_mean:.3f}, radius_cv={radius_cv:.3f}, "
                 f"val_metric={val_metric:.3f} (best={best_metric:.3f}, "
                 f"proto={'full' if use_full_proto else 'subset'})"
                 f"\n       per_class: {pa_str}"
