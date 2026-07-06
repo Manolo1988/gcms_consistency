@@ -348,12 +348,12 @@ def main():
                         choices=["from_tensor", "raw_file"],
                         help="TIC 来源标记")
     parser.add_argument("--tic_encoder", type=str, default=None,
-                        choices=["cnn1d", "cnn", "mlp", "transformer"],
+                        choices=["mlp", "cnn1d", "cnn", "transformer"],
                         help="TIC 编码器")
     parser.add_argument("--tic_embed_dim", type=int, default=None,
                         help="TIC 编码器输出维度")
     parser.add_argument("--tic_fusion_mode", type=str, default=None,
-                        choices=["concat", "gated", "sum"],
+                        choices=["residual_gated", "film", "concat", "gated", "sum"],
                         help="TIC 与主嵌入融合方式")
     parser.add_argument("--tic_fusion_output_dim", type=int, default=None,
                         help="TIC 融合后嵌入维度")
@@ -361,6 +361,10 @@ def main():
                         help="TIC PCA 特征维度")
     parser.add_argument("--aug_tic_jitter", type=float, default=None,
                         help="TIC 增强抖动幅度")
+    parser.add_argument("--tic_residual_scale", type=float, default=None,
+                        help="TIC residual/FiLM 最大影响强度")
+    parser.add_argument("--tic_gate_bias", type=float, default=None,
+                        help="residual_gated 初始门控偏置")
 
     # 数据准备选项
     parser.add_argument("--save_plot", dest="save_prepare_plots",
@@ -418,6 +422,8 @@ def main():
         "tic_fusion_mode",
         "tic_fusion_output_dim",
         "tic_pca_components",
+        "tic_residual_scale",
+        "tic_gate_bias",
         "aug_tic_jitter",
     ):
         value = getattr(args, name)

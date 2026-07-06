@@ -626,7 +626,100 @@ class SumFusion(nn.Module):
         return self.drop(self.norm(fused))
 
 
-def _build_tic_fusion(fusion_mode, main_dim, tic_dim, output_dim, dropout=0.3):
+class ResidualGatedFusion(nn.Module):
+    """Conservative TIC fusion: main embedding plus a small gated TIC residual."""
+
+    def __init__(
+        self,
+        main_dim,
+        tic_dim,
+        output_dim,
+        dropout=0.3,
+        residual_scale=0.15,
+        gate_bias=-2.0,
+    ):
+        super().__init__()
+        self.output_dim = int(output_dim)
+        self.residual_scale = float(residual_scale)
+        self.main_proj = (
+            nn.Identity()
+            if int(main_dim) == int(output_dim)
+            else nn.Linear(main_dim, output_dim)
+        )
+        hidden_dim = max(int(output_dim), int(tic_dim) * 2)
+        self.tic_delta = nn.Sequential(
+            nn.LayerNorm(tic_dim),
+            nn.Linear(tic_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, output_dim),
+        )
+        self.gate = nn.Sequential(
+            nn.LayerNorm(main_dim + tic_dim),
+            nn.Linear(main_dim + tic_dim, output_dim),
+            nn.Sigmoid(),
+        )
+        nn.init.zeros_(self.tic_delta[-1].weight)
+        nn.init.zeros_(self.tic_delta[-1].bias)
+        gate_linear = self.gate[1]
+        nn.init.zeros_(gate_linear.weight)
+        nn.init.constant_(gate_linear.bias, float(gate_bias))
+
+    def forward(self, z_main, z_tic):
+        main_h = self.main_proj(z_main)
+        delta = torch.tanh(self.tic_delta(z_tic))
+        gate = self.gate(torch.cat([z_main, z_tic], dim=1))
+        fused = main_h + self.residual_scale * gate * delta
+        return fused
+
+
+class FiLMFusion(nn.Module):
+    """Feature-wise TIC modulation with a small bounded residual effect."""
+
+    def __init__(
+        self,
+        main_dim,
+        tic_dim,
+        output_dim,
+        dropout=0.3,
+        residual_scale=0.15,
+    ):
+        super().__init__()
+        self.residual_scale = float(residual_scale)
+        self.main_proj = (
+            nn.Identity()
+            if int(main_dim) == int(output_dim)
+            else nn.Linear(main_dim, output_dim)
+        )
+        hidden_dim = max(int(output_dim), int(tic_dim) * 2)
+        self.film = nn.Sequential(
+            nn.LayerNorm(tic_dim),
+            nn.Linear(tic_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, output_dim * 2),
+        )
+        nn.init.zeros_(self.film[-1].weight)
+        nn.init.zeros_(self.film[-1].bias)
+
+    def forward(self, z_main, z_tic):
+        main_h = self.main_proj(z_main)
+        gamma, beta = self.film(z_tic).chunk(2, dim=1)
+        gamma = torch.tanh(gamma)
+        beta = torch.tanh(beta)
+        fused = main_h * (1.0 + self.residual_scale * gamma) + self.residual_scale * beta
+        return fused
+
+
+def _build_tic_fusion(
+    fusion_mode,
+    main_dim,
+    tic_dim,
+    output_dim,
+    dropout=0.3,
+    residual_scale=0.15,
+    gate_bias=-2.0,
+):
     fusion_mode = str(fusion_mode or "concat").strip().lower()
     if fusion_mode == "concat":
         return ConcatFusion(main_dim, tic_dim, output_dim, dropout=dropout)
@@ -634,6 +727,23 @@ def _build_tic_fusion(fusion_mode, main_dim, tic_dim, output_dim, dropout=0.3):
         return GatedFusion(main_dim, tic_dim, output_dim, dropout=dropout)
     elif fusion_mode == "sum":
         return SumFusion(main_dim, tic_dim, output_dim, dropout=dropout)
+    elif fusion_mode in ("residual_gated", "residual", "resgate"):
+        return ResidualGatedFusion(
+            main_dim,
+            tic_dim,
+            output_dim,
+            dropout=dropout,
+            residual_scale=residual_scale,
+            gate_bias=gate_bias,
+        )
+    elif fusion_mode == "film":
+        return FiLMFusion(
+            main_dim,
+            tic_dim,
+            output_dim,
+            dropout=dropout,
+            residual_scale=residual_scale,
+        )
     else:
         raise ValueError(f"Unknown TIC fusion mode: {fusion_mode}")
 
@@ -775,6 +885,8 @@ class GCMSConsistencyNet(nn.Module):
             self.tic_fusion = _build_tic_fusion(
                 tic_fusion_mode, dim, tic_embed_dim_val, tic_fusion_output_dim_val,
                 dropout=cfg.dropout,
+                residual_scale=float(getattr(cfg, "tic_residual_scale", 0.15) or 0.15),
+                gate_bias=float(getattr(cfg, "tic_gate_bias", -2.0) or -2.0),
             )
             effective_dim = tic_fusion_output_dim_val
         else:

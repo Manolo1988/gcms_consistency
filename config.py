@@ -223,11 +223,13 @@ class Config:
     # ── TIC Auxiliary Branch ────────────────────────────
     tic_branch_enabled: bool = False          # 启用 TIC 辅助分支
     tic_source: str = "from_tensor"           # from_tensor / raw_file
-    tic_encoder: str = "cnn1d"               # cnn1d / mlp / transformer
+    tic_encoder: str = "mlp"                 # mlp / cnn1d / transformer
     tic_embed_dim: int = 64                   # TIC 编码器输出维度
-    tic_fusion_mode: str = "concat"           # concat / gated / sum
+    tic_fusion_mode: str = "residual_gated"   # residual_gated / film / concat / gated / sum
     tic_fusion_output_dim: int = 256          # 融合后输出维度
     tic_pca_components: int = 64              # TIC PCA 降维后的组件数
+    tic_residual_scale: float = 0.15          # TIC 残差/FiLM 初始最大影响强度
+    tic_gate_bias: float = -2.0               # residual_gated 初始门控偏置(sigmoid≈0.12)
 
     # ── 数据增强 ──────────────────────────────────────────
     aug_intensity_scale: tuple = (0.8, 1.2)
@@ -290,6 +292,8 @@ TIC_CONFIG_KEYS = (
     "tic_fusion_mode",
     "tic_fusion_output_dim",
     "tic_pca_components",
+    "tic_residual_scale",
+    "tic_gate_bias",
 )
 
 

@@ -1118,12 +1118,18 @@ def evaluate_single_model(cfg):
             if "tic_fusion.fc.0.weight" in sd:
                 cfg.tic_fusion_mode = "concat"
                 cfg.tic_fusion_output_dim = int(sd["tic_fusion.fc.0.weight"].shape[0])
+            elif "tic_fusion.gate.1.weight" in sd:
+                cfg.tic_fusion_mode = "residual_gated"
+                cfg.tic_fusion_output_dim = int(sd["tic_fusion.gate.1.weight"].shape[0])
             elif "tic_fusion.gate.0.weight" in sd:
                 cfg.tic_fusion_mode = "gated"
                 cfg.tic_fusion_output_dim = int(sd["tic_fusion.gate.0.weight"].shape[0])
             elif "tic_fusion.main_proj.weight" in sd:
                 cfg.tic_fusion_mode = "sum"
                 cfg.tic_fusion_output_dim = int(sd["tic_fusion.main_proj.weight"].shape[0])
+            elif "tic_fusion.film.4.weight" in sd:
+                cfg.tic_fusion_mode = "film"
+                cfg.tic_fusion_output_dim = int(sd["tic_fusion.film.4.weight"].shape[0] // 2)
 
     if bool(getattr(cfg, "tic_branch_enabled", False)):
         tic_dim = infer_tic_feature_dim(metadata_csv)
@@ -1513,6 +1519,8 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
         "fusion_mode": str(getattr(cfg, "tic_fusion_mode", "concat") or "concat") if cfg else "concat",
         "fusion_output_dim": int(getattr(cfg, "tic_fusion_output_dim", 256)) if cfg else 256,
         "pca_components": int(getattr(cfg, "tic_pca_components", 64)) if cfg else 64,
+        "residual_scale": float(getattr(cfg, "tic_residual_scale", 0.15)) if cfg else 0.15,
+        "gate_bias": float(getattr(cfg, "tic_gate_bias", -2.0)) if cfg else -2.0,
     }
 
     with open(out_dir / "evaluation_summary.json", "w") as f:

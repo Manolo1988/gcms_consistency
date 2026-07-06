@@ -140,6 +140,9 @@ class GCMSDataset(Dataset):
         self.product_col = product_col
         self.aug = augmentation
         self.input_transform = input_transform
+        self._tic_path_by_sample_id = {}
+        if "tic_pca_path" not in df.columns and self.tic_root.exists():
+            self._tic_path_by_sample_id = self._build_tic_path_index()
 
         # 标签编码
         self.product_enc = LabelEncoder()
@@ -186,14 +189,34 @@ class GCMSDataset(Dataset):
 
         return path
 
+    def _build_tic_path_index(self):
+        """Index tic_pca files by sample_id when metadata lacks tic_pca_path."""
+        mapping = {}
+        for path in self.tic_root.rglob("*.npy"):
+            stem = path.stem
+            if "_" not in stem:
+                continue
+            sample_id = stem.split("_", 1)[1]
+            mapping.setdefault(sample_id, path)
+        return mapping
+
+    def _tic_path_for_row(self, row):
+        raw_path = row.get("tic_pca_path", "")
+        if isinstance(raw_path, str) and raw_path.strip():
+            return self._resolve_tic_path(raw_path)
+        sample_id = str(row.get("sample_id", ""))
+        if sample_id and sample_id in self._tic_path_by_sample_id:
+            return self._tic_path_by_sample_id[sample_id]
+        return None
+
     def _infer_tic_dim(self):
-        if "tic_pca_path" not in self.df.columns:
+        if "tic_pca_path" not in self.df.columns and not self._tic_path_by_sample_id:
             return None
 
-        for raw_path in self.df["tic_pca_path"].tolist():
-            if not isinstance(raw_path, str) or not raw_path.strip():
+        for _, row in self.df.iterrows():
+            path = self._tic_path_for_row(row)
+            if path is None:
                 continue
-            path = self._resolve_tic_path(raw_path)
             if not path.exists():
                 continue
             arr = np.load(path)
@@ -222,11 +245,9 @@ class GCMSDataset(Dataset):
 
         if self.tic_dim is not None:
             tic = np.zeros((self.tic_dim,), dtype=np.float32)
-            raw_path = row.get("tic_pca_path", "")
-            if isinstance(raw_path, str) and raw_path.strip():
-                path = self._resolve_tic_path(raw_path)
-                if path.exists():
-                    tic = np.asarray(np.load(path), dtype=np.float32).reshape(-1)
+            path = self._tic_path_for_row(row)
+            if path is not None and path.exists():
+                tic = np.asarray(np.load(path), dtype=np.float32).reshape(-1)
             item["tic"] = torch.from_numpy(tic)
 
         return item
