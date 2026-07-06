@@ -124,6 +124,7 @@ class GCMSDataset(Dataset):
                  input_transform=None):
         self.metadata_csv = Path(metadata_csv)
         self.tensor_root = self.metadata_csv.parent / "tensors"
+        self.tic_root = self.metadata_csv.parent / "tic_pca"
         df = pd.read_csv(metadata_csv)
 
         if exclude_blanks:
@@ -152,6 +153,7 @@ class GCMSDataset(Dataset):
 
         self.num_products = len(self.product_enc.classes_)
         self.num_batches = len(self.batch_enc.classes_)
+        self.tic_dim = self._infer_tic_dim()
 
     def __len__(self):
         return len(self.df)
@@ -170,6 +172,36 @@ class GCMSDataset(Dataset):
 
         return path
 
+    def _resolve_tic_path(self, tic_path):
+        path = Path(tic_path)
+        if path.exists():
+            return path
+
+        parts = path.parts
+        if "tic_pca" in parts:
+            rel = Path(*parts[parts.index("tic_pca") + 1:])
+            relocated = self.tic_root / rel
+            if relocated.exists():
+                return relocated
+
+        return path
+
+    def _infer_tic_dim(self):
+        if "tic_pca_path" not in self.df.columns:
+            return None
+
+        for raw_path in self.df["tic_pca_path"].tolist():
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+            path = self._resolve_tic_path(raw_path)
+            if not path.exists():
+                continue
+            arr = np.load(path)
+            arr = np.asarray(arr, dtype=np.float32).reshape(-1)
+            if arr.size > 0:
+                return int(arr.size)
+        return None
+
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         data = np.load(self._resolve_tensor_path(row["tensor_path"]))
@@ -181,12 +213,23 @@ class GCMSDataset(Dataset):
         if self.aug is not None:
             x = self.aug(x)
 
-        return {
+        item = {
             "input": torch.from_numpy(x),
             "product": torch.tensor(row["product_label"], dtype=torch.long),
             "batch": torch.tensor(row["batch_label"], dtype=torch.long),
             "sample_id": row["sample_id"],
         }
+
+        if self.tic_dim is not None:
+            tic = np.zeros((self.tic_dim,), dtype=np.float32)
+            raw_path = row.get("tic_pca_path", "")
+            if isinstance(raw_path, str) and raw_path.strip():
+                path = self._resolve_tic_path(raw_path)
+                if path.exists():
+                    tic = np.asarray(np.load(path), dtype=np.float32).reshape(-1)
+            item["tic"] = torch.from_numpy(tic)
+
+        return item
 
     def get_product_names(self):
         return list(self.product_enc.classes_)
@@ -197,6 +240,19 @@ class GCMSDataset(Dataset):
     def get_label_name_map(self):
         """返回 {label_idx: product_name} 映射。"""
         return {i: c for i, c in enumerate(self.product_enc.classes_)}
+
+    def get_tic_dim(self):
+        return self.tic_dim
+
+
+def infer_tic_feature_dim(metadata_csv, exclude_blanks=True, exclude_special=True):
+    ds = GCMSDataset(
+        metadata_csv,
+        augmentation=None,
+        exclude_blanks=exclude_blanks,
+        exclude_special=exclude_special,
+    )
+    return ds.get_tic_dim()
 
 
 # ─────────────────────────────────────────────────────────

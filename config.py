@@ -227,6 +227,7 @@ class Config:
     tic_embed_dim: int = 64                   # TIC 编码器输出维度
     tic_fusion_mode: str = "concat"           # concat / gated / sum
     tic_fusion_output_dim: int = 256          # 融合后输出维度
+    tic_pca_components: int = 64              # TIC PCA 降维后的组件数
 
     # ── 数据增强 ──────────────────────────────────────────
     aug_intensity_scale: tuple = (0.8, 1.2)

@@ -60,7 +60,10 @@ def collect_embeddings(model, loader, device):
         disable=not _progress_enabled(),
     ):
         x = batch["input"].to(device)
-        z = model.encode(x)
+        tic = batch.get("tic")
+        if tic is not None:
+            tic = tic.to(device)
+        z = model.encode(x, tic=tic)
 
         for i in range(x.size(0)):
             records.append({
@@ -87,7 +90,10 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
         disable=not _progress_enabled(),
     ):
         x = batch["input"].to(device)
-        z = model.encode(x)
+        tic = batch.get("tic")
+        if tic is not None:
+            tic = tic.to(device)
+        z = model.encode(x, tic=tic)
         result = proto_store.predict(z, use_spherical=False)
 
         for i in range(x.size(0)):

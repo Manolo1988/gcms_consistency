@@ -379,12 +379,13 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch,
             batch, device, channels_last=channels_last
         )
         x = batch_dev["input"]
+        tic = batch_dev.get("tic", None)
 
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(
             device_type="cuda", dtype=amp_dtype, enabled=amp_enabled
         ):
-            out = model(x)
+            out = model(x, tic=tic)
             losses = criterion(out, batch_dev)
             loss = losses["total"]
 
@@ -442,7 +443,10 @@ def validate_with_prototypes(model, train_loader_noaug, val_loader,
         x = batch["input"].to(device, non_blocking=True)
         if _channels_last_enabled(cfg, device) and x.ndim == 4:
             x = x.contiguous(memory_format=torch.channels_last)
-        z = model.encode(x)
+        tic = batch.get("tic")
+        if tic is not None:
+            tic = tic.to(device, non_blocking=True)
+        z = model.encode(x, tic=tic)
         result = proto_store.predict(z, use_spherical=False)
         preds = result["pred_idx"].cpu()
         labels = batch["product"]

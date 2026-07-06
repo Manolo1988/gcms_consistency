@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import IncrementalPCA
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 from scipy.interpolate import interp1d
 
@@ -260,6 +262,185 @@ def _save_prepare_table(
         "log_intensity": grid.reshape(-1),
     })
     table_df.to_csv(table_path, index=False, encoding="utf-8-sig")
+
+
+def _build_tic_pca_paths(metadata: pd.DataFrame, tic_dir: Path, cfg: Config):
+    paths = []
+    for idx, row in metadata.iterrows():
+        batch_tag = _safe_tag(row["batch_name"])
+        product_tag = _safe_tag(row["code"])
+        sample_tag = _safe_tag(row["sample_id"])
+
+        if cfg.tag_output_with_batch_and_product:
+            tic_subdir = tic_dir / batch_tag / product_tag
+            tic_subdir.mkdir(parents=True, exist_ok=True)
+            tic_path = tic_subdir / f"{idx:04d}_{sample_tag}.npy"
+        else:
+            tic_path = tic_dir / f"{idx:04d}.npy"
+        paths.append(str(tic_path))
+    return paths
+
+
+def _extract_tic_vector_from_raw(d_path: str, cfg: Config, target_len: int) -> np.ndarray:
+    mode, rts, a, b = read_gcms_data(d_path, backend="auto")
+    rts = np.asarray(rts, dtype=np.float32)
+
+    if mode == "matrix":
+        mzs = np.asarray(a, dtype=np.float32)
+        mat = np.asarray(b, dtype=np.float32)
+        if mat.shape == (len(mzs), len(rts)):
+            mat = mat.T
+        if mat.shape != (len(rts), len(mzs)):
+            raise ValueError(f"matrix shape mismatch: {mat.shape}")
+
+        if cfg.rt_range is not None:
+            rt_lo, rt_hi = float(cfg.rt_range[0]), float(cfg.rt_range[1])
+            rt_mask = (rts >= rt_lo) & (rts <= rt_hi)
+            if np.any(rt_mask):
+                rts = rts[rt_mask]
+                mat = mat[rt_mask]
+
+        mz_lo, mz_hi = float(cfg.mz_range[0]), float(cfg.mz_range[1])
+        mz_mask = (mzs >= mz_lo) & (mzs <= mz_hi)
+        if np.any(mz_mask):
+            mat = mat[:, mz_mask]
+
+        tic = np.maximum(mat, 0.0).sum(axis=1)
+    elif mode == "spectra":
+        spectra = a
+        tic = np.asarray([
+            float(np.sum(np.maximum(np.asarray(ints, dtype=np.float32), 0.0)))
+            for _mz, ints in spectra
+        ], dtype=np.float32)
+        if cfg.rt_range is not None and len(rts) == len(tic):
+            rt_lo, rt_hi = float(cfg.rt_range[0]), float(cfg.rt_range[1])
+            rt_mask = (rts >= rt_lo) & (rts <= rt_hi)
+            if np.any(rt_mask):
+                rts = rts[rt_mask]
+                tic = tic[rt_mask]
+    elif mode == "tic":
+        tic = np.maximum(np.asarray(a, dtype=np.float32), 0.0)
+        if cfg.rt_range is not None and len(rts) == len(tic):
+            rt_lo, rt_hi = float(cfg.rt_range[0]), float(cfg.rt_range[1])
+            rt_mask = (rts >= rt_lo) & (rts <= rt_hi)
+            if np.any(rt_mask):
+                rts = rts[rt_mask]
+                tic = tic[rt_mask]
+    else:
+        raise RuntimeError(f"unsupported GCMS mode for TIC extraction: {mode}")
+
+    tic = np.asarray(tic, dtype=np.float32).reshape(-1)
+    if tic.size == 0:
+        return np.zeros((target_len,), dtype=np.float32)
+
+    if bool(cfg.log_transform):
+        tic = np.log1p(np.maximum(tic, 0.0))
+
+    if tic.size == target_len:
+        return tic.astype(np.float32)
+
+    if rts.ndim != 1 or rts.size != tic.size or tic.size < 2 or np.any(np.diff(rts) <= 0):
+        rts = np.linspace(0.0, 1.0, tic.size, dtype=np.float32)
+    dst_rts = np.linspace(float(rts[0]), float(rts[-1]), int(target_len), dtype=np.float32)
+    tic_resampled = np.interp(dst_rts, rts, tic).astype(np.float32)
+    return tic_resampled
+
+
+def _resolve_tic_fit_orig_indices(metadata: pd.DataFrame, out_dir: Path, fit_indices=None):
+    mask = (metadata["product_fine"] != "BLANK") & (~metadata["is_special"])
+    filtered_orig = metadata.index[mask].to_numpy(dtype=np.int64)
+    if filtered_orig.size == 0:
+        return np.array([], dtype=np.int64), "empty"
+
+    resolved_fit = fit_indices
+    fit_scope = "all"
+    if resolved_fit is None:
+        split_path = out_dir / "split.json"
+        if split_path.exists():
+            try:
+                split = json.loads(split_path.read_text(encoding="utf-8"))
+                resolved_fit = split.get("train_idx")
+                fit_scope = "train_only"
+            except Exception:
+                resolved_fit = None
+
+    if resolved_fit is None:
+        return filtered_orig, fit_scope
+
+    valid = [int(i) for i in resolved_fit if 0 <= int(i) < len(filtered_orig)]
+    if not valid:
+        return filtered_orig, "all"
+    return filtered_orig[np.asarray(valid, dtype=np.int64)], fit_scope
+
+
+def _precompute_tic_pca_features(metadata_csv: Path, out_dir: Path, cfg: Config, fit_indices=None):
+    metadata = pd.read_csv(metadata_csv)
+    if metadata.empty:
+        return {
+            "enabled": False,
+            "applied": False,
+            "reason": "empty_metadata",
+        }
+
+    target_len = int(getattr(cfg, "rt_bins", 1024) or 1024)
+    requested_components = int(getattr(cfg, "tic_pca_components", 64) or 64)
+    tic_dir = out_dir / "tic_pca"
+    tic_dir.mkdir(parents=True, exist_ok=True)
+
+    tic_paths = _build_tic_pca_paths(metadata, tic_dir, cfg)
+    tic_vectors = []
+    failed = 0
+    for _, row in tqdm(metadata.iterrows(), total=len(metadata), desc="提取TIC"):
+        try:
+            tic_vec = _extract_tic_vector_from_raw(row["d_path"], cfg, target_len=target_len)
+        except Exception as e:
+            print(f"\n  ! TIC 提取失败 {row.get('d_name', 'NA')}: {e}")
+            tic_vec = np.zeros((target_len,), dtype=np.float32)
+            failed += 1
+        tic_vectors.append(tic_vec)
+
+    X_all = np.stack(tic_vectors, axis=0).astype(np.float32)
+    fit_orig_idx, fit_scope = _resolve_tic_fit_orig_indices(metadata, out_dir, fit_indices=fit_indices)
+    if fit_orig_idx.size == 0:
+        fit_orig_idx = np.arange(X_all.shape[0], dtype=np.int64)
+        fit_scope = "all"
+    X_fit = X_all[fit_orig_idx]
+
+    scaler = StandardScaler()
+    X_fit_scaled = scaler.fit_transform(X_fit)
+    n_components = min(requested_components, X_fit_scaled.shape[0], X_fit_scaled.shape[1])
+    n_components = max(1, int(n_components))
+    pca = PCA(n_components=n_components, random_state=int(getattr(cfg, "seed", 42) or 42))
+    pca.fit(X_fit_scaled)
+    X_all_pca = pca.transform(scaler.transform(X_all)).astype(np.float32)
+
+    for tic_path, tic_feat in zip(tic_paths, X_all_pca):
+        np.save(tic_path, tic_feat)
+
+    metadata = metadata.copy()
+    metadata["tic_pca_path"] = tic_paths
+    metadata.to_csv(metadata_csv, index=False, encoding="utf-8-sig")
+
+    cache_dir = out_dir / "cache" / "tic_pca"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    import pickle
+    model_path = cache_dir / "tic_pca_model.pkl"
+    with open(model_path, "wb") as f:
+        pickle.dump({"scaler": scaler, "pca": pca}, f)
+
+    return {
+        "enabled": True,
+        "applied": True,
+        "reason": "ok",
+        "requested_components": int(requested_components),
+        "n_components": int(n_components),
+        "fit_scope": fit_scope,
+        "dir": str(tic_dir.resolve()),
+        "model_path": str(model_path.resolve()),
+        "converted": int(X_all.shape[0]),
+        "failed": int(failed),
+        "vector_length": int(target_len),
+    }
 
 
 def _raw_direct_cache_key(metadata_csv: Path, cfg: Config, n_components: int) -> str:
@@ -643,6 +824,22 @@ def _convert_all_raw_direct_pca(metadata: pd.DataFrame, out_dir: Path, cfg: Conf
         info["input_pca_ref_mz_axis_len"] = int(pca_prepare_info.get("ref_mz_axis_len", 0))
         info["mz_bins"] = int(info["input_pca_components"])
 
+    # TIC PCA 特征预计算 (仅在启用 TIC 分支时执行)
+    if bool(getattr(cfg, "tic_branch_enabled", False)):
+        tic_pca_info = _precompute_tic_pca_features(meta_path, out_dir, cfg, fit_indices=fit_indices)
+        if tic_pca_info is not None:
+            info["tic_pca_enabled"] = bool(tic_pca_info.get("enabled", False))
+            info["tic_pca_applied"] = bool(tic_pca_info.get("applied", False))
+            info["tic_pca_reason"] = str(tic_pca_info.get("reason", "unknown"))
+            info["tic_pca_requested_components"] = int(tic_pca_info.get("requested_components", getattr(cfg, "tic_pca_components", 64)))
+            info["tic_pca_components"] = int(tic_pca_info.get("n_components", getattr(cfg, "tic_pca_components", 64)))
+            info["tic_pca_fit_scope"] = str(tic_pca_info.get("fit_scope", "all"))
+            info["tic_pca_dir"] = str(tic_pca_info.get("dir", ""))
+            info["tic_pca_model_path"] = str(tic_pca_info.get("model_path", ""))
+            info["tic_pca_converted"] = int(tic_pca_info.get("converted", 0))
+            info["tic_pca_failed"] = int(tic_pca_info.get("failed", 0))
+            info["tic_vector_length"] = int(tic_pca_info.get("vector_length", 0))
+
     (out_dir / "grid_info.json").write_text(json.dumps(info, indent=2))
     print(f"\n转换完成(原始直读PCA): 成功 {info['success']}, 失败 {info['fail']}")
     print(f"元数据: {meta_path}")
@@ -805,6 +1002,7 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config, fit_indices=N
     metadata.to_csv(meta_path, index=False, encoding="utf-8-sig")
 
     pca_prepare_info = _precompute_input_pca_tensors(meta_path, cfg)
+    tic_pca_info = _precompute_tic_pca_features(meta_path, out_dir, cfg, fit_indices=fit_indices)
 
     info = {
         "rt_bins": cfg.rt_bins,
@@ -835,6 +1033,19 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config, fit_indices=N
 
         if bool(pca_prepare_info.get("enabled", False)):
             info["mz_bins"] = int(info["input_pca_components"])
+
+    if tic_pca_info is not None:
+        info["tic_pca_enabled"] = bool(tic_pca_info.get("enabled", False))
+        info["tic_pca_applied"] = bool(tic_pca_info.get("applied", False))
+        info["tic_pca_reason"] = str(tic_pca_info.get("reason", "unknown"))
+        info["tic_pca_requested_components"] = int(tic_pca_info.get("requested_components", getattr(cfg, "tic_pca_components", 0)))
+        info["tic_pca_components"] = int(tic_pca_info.get("n_components", getattr(cfg, "tic_pca_components", 0)))
+        info["tic_pca_fit_scope"] = str(tic_pca_info.get("fit_scope", "all"))
+        info["tic_pca_dir"] = str(tic_pca_info.get("dir", ""))
+        info["tic_pca_model_path"] = str(tic_pca_info.get("model_path", ""))
+        info["tic_pca_converted"] = int(tic_pca_info.get("converted", 0))
+        info["tic_pca_failed"] = int(tic_pca_info.get("failed", 0))
+        info["tic_vector_length"] = int(tic_pca_info.get("vector_length", 0))
 
     (out_dir / "grid_info.json").write_text(json.dumps(info, indent=2))
     print(f"\n转换完成: 成功 {success}, 失败 {fail}")

@@ -482,6 +482,163 @@ class TorchvisionResNetEncoder(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════
+#  TIC 辅助编码器 (1D 信号 → 嵌入向量)
+# ═══════════════════════════════════════════════════════════
+class TICMLPEncoder(nn.Module):
+    """MLP 编码器: 将 PCA 降维后的 TIC 向量映射到嵌入空间。"""
+
+    def __init__(self, input_dim, output_dim, hidden_dim=None, dropout=0.3):
+        super().__init__()
+        if hidden_dim is None:
+            hidden_dim = max(output_dim * 2, input_dim // 2)
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.BatchNorm1d(hidden_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, output_dim),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class TICCNN1DEncoder(nn.Module):
+    """1D CNN 编码器: 将 PCA 分量视为一维序列，逐层卷积 + 自适应池化。"""
+
+    def __init__(self, input_dim, output_dim, dropout=0.3):
+        super().__init__()
+        mid_dim = max(output_dim * 2, 64)
+        self.conv1 = nn.Conv1d(1, 32, kernel_size=5, stride=2, padding=2)
+        self.bn1 = nn.BatchNorm1d(32)
+        self.conv2 = nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2)
+        self.bn2 = nn.BatchNorm1d(64)
+        self.conv3 = nn.Conv1d(64, mid_dim, kernel_size=3, stride=2, padding=1)
+        self.bn3 = nn.BatchNorm1d(mid_dim)
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.drop = nn.Dropout(dropout)
+        self.fc = nn.Linear(mid_dim, output_dim)
+
+    def forward(self, x):
+        x = x.unsqueeze(1)
+        x = F.relu(self.bn1(self.conv1(x)), inplace=True)
+        x = F.relu(self.bn2(self.conv2(x)), inplace=True)
+        x = F.relu(self.bn3(self.conv3(x)), inplace=True)
+        x = self.pool(x).flatten(1)
+        x = self.drop(x)
+        return self.fc(x)
+
+
+class TICTransformerEncoder(nn.Module):
+    """轻量 Transformer 编码器: 可学习位置编码 + 2 层 self-attention。"""
+
+    def __init__(self, input_dim, output_dim, num_heads=4, num_layers=2, dropout=0.3):
+        super().__init__()
+        self.input_proj = nn.Linear(1, output_dim)
+        self.pos_embed = nn.Parameter(torch.randn(1, input_dim, output_dim) * 0.02)
+        self.blocks = nn.ModuleList([
+            TransformerBlock(dim=output_dim, num_heads=num_heads, dropout=dropout)
+            for _ in range(num_layers)
+        ])
+        self.norm = nn.LayerNorm(output_dim)
+
+    def forward(self, x):
+        x = x.unsqueeze(-1)
+        x = self.input_proj(x)
+        x = x + self.pos_embed
+        for blk in self.blocks:
+            x = blk(x)
+        x = self.norm(x)
+        x = x.mean(dim=1)
+        return x
+
+
+def _build_tic_encoder(encoder_type, input_dim, output_dim, dropout=0.3):
+    encoder_type = str(encoder_type or "cnn1d").strip().lower()
+    if encoder_type == "mlp":
+        return TICMLPEncoder(input_dim, output_dim, dropout=dropout)
+    elif encoder_type in ("cnn1d", "cnn"):
+        return TICCNN1DEncoder(input_dim, output_dim, dropout=dropout)
+    elif encoder_type == "transformer":
+        return TICTransformerEncoder(input_dim, output_dim, dropout=dropout)
+    else:
+        raise ValueError(f"Unknown TIC encoder type: {encoder_type}")
+
+
+# ═══════════════════════════════════════════════════════════
+#  TIC 融合模块 (主嵌入 + TIC 嵌入 → 融合向量)
+# ═══════════════════════════════════════════════════════════
+class ConcatFusion(nn.Module):
+    """拼接融合: [z_main; z_tic] → Linear → 输出。"""
+
+    def __init__(self, main_dim, tic_dim, output_dim, dropout=0.3):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(main_dim + tic_dim, output_dim),
+            nn.BatchNorm1d(output_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, z_main, z_tic):
+        fused = torch.cat([z_main, z_tic], dim=1)
+        return self.fc(fused)
+
+
+class GatedFusion(nn.Module):
+    """门控融合: gate = σ(W·[z_main; z_tic]), output = gate*main_proj + (1-gate)*tic_proj。"""
+
+    def __init__(self, main_dim, tic_dim, output_dim, dropout=0.3):
+        super().__init__()
+        self.main_proj = nn.Linear(main_dim, output_dim)
+        self.tic_proj = nn.Linear(tic_dim, output_dim)
+        self.gate = nn.Sequential(
+            nn.Linear(main_dim + tic_dim, output_dim),
+            nn.Sigmoid(),
+        )
+        self.norm = nn.BatchNorm1d(output_dim)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, z_main, z_tic):
+        main_h = self.main_proj(z_main)
+        tic_h = self.tic_proj(z_tic)
+        gate = self.gate(torch.cat([z_main, z_tic], dim=1))
+        fused = gate * main_h + (1.0 - gate) * tic_h
+        return self.drop(self.norm(fused))
+
+
+class SumFusion(nn.Module):
+    """加和融合: 投影到同维度后逐元素相加。"""
+
+    def __init__(self, main_dim, tic_dim, output_dim, dropout=0.3):
+        super().__init__()
+        self.main_proj = nn.Linear(main_dim, output_dim)
+        self.tic_proj = nn.Linear(tic_dim, output_dim)
+        self.norm = nn.BatchNorm1d(output_dim)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, z_main, z_tic):
+        fused = self.main_proj(z_main) + self.tic_proj(z_tic)
+        return self.drop(self.norm(fused))
+
+
+def _build_tic_fusion(fusion_mode, main_dim, tic_dim, output_dim, dropout=0.3):
+    fusion_mode = str(fusion_mode or "concat").strip().lower()
+    if fusion_mode == "concat":
+        return ConcatFusion(main_dim, tic_dim, output_dim, dropout=dropout)
+    elif fusion_mode == "gated":
+        return GatedFusion(main_dim, tic_dim, output_dim, dropout=dropout)
+    elif fusion_mode == "sum":
+        return SumFusion(main_dim, tic_dim, output_dim, dropout=dropout)
+    else:
+        raise ValueError(f"Unknown TIC fusion mode: {fusion_mode}")
+
+
+# ═══════════════════════════════════════════════════════════
 #  任务头
 # ═══════════════════════════════════════════════════════════
 class ProjectionHead(nn.Module):
@@ -601,34 +758,65 @@ class GCMSConsistencyNet(nn.Module):
         dim = self.encoder.out_dim
         feat_map_dim = getattr(self.encoder, "feat_map_dim", dim)
 
+        # ── TIC 辅助分支 (可选) ──
+        tic_enabled = bool(getattr(cfg, "tic_branch_enabled", False))
+        self.tic_enabled = tic_enabled
+        if tic_enabled:
+            tic_input_dim = int(getattr(cfg, "tic_pca_components", 64) or 64)
+            tic_encoder_type = str(getattr(cfg, "tic_encoder", "cnn1d") or "cnn1d")
+            tic_embed_dim_val = int(getattr(cfg, "tic_embed_dim", 64) or 64)
+            tic_fusion_mode = str(getattr(cfg, "tic_fusion_mode", "concat") or "concat")
+            tic_fusion_output_dim_val = int(getattr(cfg, "tic_fusion_output_dim", 256) or 256)
+
+            self.tic_encoder = _build_tic_encoder(
+                tic_encoder_type, tic_input_dim, tic_embed_dim_val,
+                dropout=cfg.dropout,
+            )
+            self.tic_fusion = _build_tic_fusion(
+                tic_fusion_mode, dim, tic_embed_dim_val, tic_fusion_output_dim_val,
+                dropout=cfg.dropout,
+            )
+            effective_dim = tic_fusion_output_dim_val
+        else:
+            self.tic_encoder = None
+            self.tic_fusion = None
+            effective_dim = dim
+
         # 对比学习投影头 (仅训练)
-        self.proj_head = ProjectionHead(dim, cfg.proj_dim)
+        self.proj_head = ProjectionHead(effective_dim, cfg.proj_dim)
         # 批次对抗头: 梯度反转消除批次信息 (训练后丢弃)
-        self.domain_head = DomainHead(dim, num_batches)
+        self.domain_head = DomainHead(effective_dim, num_batches)
         # CE 分类辅助头 (加速产品判别学习, 训练后丢弃)
-        self.cls_head = nn.Linear(dim, num_products) if num_products else None
+        self.cls_head = nn.Linear(effective_dim, num_products) if num_products else None
         # 重建解码器 (正则项)
         self.decoder = ReconDecoder(
             feat_map_dim, cfg.in_channels, cfg.rt_bins, cfg.mz_bins
         )
 
-    def forward(self, x, return_feat_map=False):
+    def forward(self, x, tic=None, return_feat_map=False):
         z_raw, feat_map = self.encoder(x)
 
-        # 归一化嵌入 (度量学习标准做法)
-        if self.embed_normalize:
-            z = F.normalize(z_raw, dim=1)
+        # 融合 TIC 嵌入 (若启用且提供)
+        if self.tic_enabled and tic is not None:
+            tic_embed = self.tic_encoder(tic)
+            z_fused = self.tic_fusion(z_raw, tic_embed)
         else:
-            z = z_raw
+            z_fused = z_raw
 
-        proj = self.proj_head(z_raw)
-        domain_logits = self.domain_head(z_raw)
-        cls_logits = self.cls_head(z_raw) if self.cls_head is not None else None
+        # 归一化嵌入 (在融合空间中进行度量学习)
+        if self.embed_normalize:
+            z = F.normalize(z_fused, dim=1)
+        else:
+            z = z_fused
+
+        proj = self.proj_head(z_fused)
+        domain_logits = self.domain_head(z_fused)
+        cls_logits = self.cls_head(z_fused) if self.cls_head is not None else None
         recon = self.decoder(feat_map)
 
         out = {
             "z": z,
-            "z_raw": z_raw,
+            "z_raw": z_fused,
             "proj": proj,
             "domain_logits": domain_logits,
             "cls_logits": cls_logits,
@@ -638,9 +826,14 @@ class GCMSConsistencyNet(nn.Module):
             out["feat_map"] = feat_map
         return out
 
-    def encode(self, x):
+    def encode(self, x, tic=None):
         """仅提取嵌入向量 (推理用)。"""
         z_raw, _ = self.encoder(x)
+        if self.tic_enabled and tic is not None:
+            tic_embed = self.tic_encoder(tic)
+            z_fused = self.tic_fusion(z_raw, tic_embed)
+        else:
+            z_fused = z_raw
         if self.embed_normalize:
-            return F.normalize(z_raw, dim=1)
-        return z_raw
+            return F.normalize(z_fused, dim=1)
+        return z_fused
