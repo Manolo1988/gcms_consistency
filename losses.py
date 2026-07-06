@@ -194,6 +194,8 @@ class UnifiedLoss(nn.Module):
         self.lam_proto = cfg.lambda_proto
         self.lam_recon = cfg.lambda_recon
         self.lam_hard_pair = getattr(cfg, "lambda_hard_pair", 0.0)
+        self.lam_tic_residual = getattr(cfg, "lambda_tic_residual", 0.0)
+        self.lam_tic_anchor = getattr(cfg, "lambda_tic_anchor", 0.0)
 
     def set_label_names(self, label_names):
         self.hard_pair_loss.set_label_names(label_names)
@@ -222,15 +224,31 @@ class UnifiedLoss(nn.Module):
         # 重建损失 (防止表征退化)
         l_recon = self.recon_loss(model_out["recon"], batch["input"])
 
+        # TIC 分支正则: 让 TIC 做小幅、稳定修正，而不是改写主嵌入空间。
+        l_tic_residual = torch.tensor(0.0, device=labels.device)
+        tic_residual = model_out.get("tic_residual")
+        if tic_residual is not None:
+            l_tic_residual = tic_residual.pow(2).mean()
+
+        l_tic_anchor = torch.tensor(0.0, device=labels.device)
+        tic_anchor = model_out.get("tic_main_anchor")
+        if tic_anchor is not None:
+            fused = model_out["z_raw"]
+            if fused.shape == tic_anchor.shape:
+                l_tic_anchor = 1.0 - F.cosine_similarity(fused, tic_anchor, dim=1).mean()
+
         total = (self.lam_supcon * l_supcon
                  + self.lam_adv * l_adv
                  + self.lam_cls * l_cls
                  + self.lam_proto * l_proto
                  + self.lam_hard_pair * l_hard_pair
-                 + self.lam_recon * l_recon)
+                 + self.lam_recon * l_recon
+                 + self.lam_tic_residual * l_tic_residual
+                 + self.lam_tic_anchor * l_tic_anchor)
 
         return {
             "supcon": l_supcon, "adv": l_adv, "cls": l_cls,
             "proto": l_proto, "hardpair": l_hard_pair, "recon": l_recon,
+            "ticres": l_tic_residual, "ticanchor": l_tic_anchor,
             "total": total,
         }

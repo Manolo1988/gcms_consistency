@@ -326,6 +326,10 @@ def main():
                         help="学习率")
     parser.add_argument("--lambda_hard_pair", type=float, default=None,
                         help="易混产品对 hard margin 权重")
+    parser.add_argument("--lambda_tic_residual", type=float, default=None,
+                        help="TIC 残差幅度正则权重")
+    parser.add_argument("--lambda_tic_anchor", type=float, default=None,
+                        help="融合嵌入贴近主干嵌入的正则权重")
     parser.add_argument("--hard_pair_margin", type=float, default=None,
                         help="易混产品对 hard margin 距离")
     parser.add_argument("--open_score_base_weight", type=float, default=None,
@@ -353,7 +357,10 @@ def main():
     parser.add_argument("--tic_embed_dim", type=int, default=None,
                         help="TIC 编码器输出维度")
     parser.add_argument("--tic_fusion_mode", type=str, default=None,
-                        choices=["residual_gated", "film", "concat", "gated", "sum"],
+                        choices=[
+                            "orthogonal_residual", "orthogonal",
+                            "residual_gated", "film", "concat", "gated", "sum",
+                        ],
                         help="TIC 与主嵌入融合方式")
     parser.add_argument("--tic_fusion_output_dim", type=int, default=None,
                         help="TIC 融合后嵌入维度")
@@ -365,6 +372,10 @@ def main():
                         help="TIC residual/FiLM 最大影响强度")
     parser.add_argument("--tic_gate_bias", type=float, default=None,
                         help="residual_gated 初始门控偏置")
+    parser.add_argument("--tic_warmup_epochs", type=int, default=None,
+                        help="TIC 残差线性放开的 epoch 数")
+    parser.add_argument("--tic_residual_dropout", type=float, default=None,
+                        help="训练时 TIC 残差随机丢弃概率")
 
     # 数据准备选项
     parser.add_argument("--save_plot", dest="save_prepare_plots",
@@ -392,7 +403,8 @@ def main():
         cfg.prepared_dir = str(Path(args.prepared_dir))
     for name in (
         "seed", "epochs", "batch_size", "lr",
-        "lambda_hard_pair", "hard_pair_margin",
+        "lambda_hard_pair", "lambda_tic_residual", "lambda_tic_anchor",
+        "hard_pair_margin",
         "open_score_base_weight", "open_score_margin_weight",
     ):
         value = getattr(args, name)
@@ -424,6 +436,8 @@ def main():
         "tic_pca_components",
         "tic_residual_scale",
         "tic_gate_bias",
+        "tic_warmup_epochs",
+        "tic_residual_dropout",
         "aug_tic_jitter",
     ):
         value = getattr(args, name)

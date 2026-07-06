@@ -637,10 +637,14 @@ class ResidualGatedFusion(nn.Module):
         dropout=0.3,
         residual_scale=0.15,
         gate_bias=-2.0,
+        residual_dropout=0.0,
     ):
         super().__init__()
         self.output_dim = int(output_dim)
         self.residual_scale = float(residual_scale)
+        self.residual_dropout = float(residual_dropout)
+        self.runtime_scale = 1.0
+        self.last_aux = {}
         self.main_proj = (
             nn.Identity()
             if int(main_dim) == int(output_dim)
@@ -669,7 +673,19 @@ class ResidualGatedFusion(nn.Module):
         main_h = self.main_proj(z_main)
         delta = torch.tanh(self.tic_delta(z_tic))
         gate = self.gate(torch.cat([z_main, z_tic], dim=1))
-        fused = main_h + self.residual_scale * gate * delta
+        residual = (self.residual_scale * self.runtime_scale) * gate * delta
+        if self.training and self.residual_dropout > 0:
+            keep_prob = max(1.0 - self.residual_dropout, 1e-6)
+            keep = torch.rand(
+                residual.shape[0], 1, device=residual.device, dtype=residual.dtype
+            ) < keep_prob
+            residual = residual * keep / keep_prob
+        fused = main_h + residual
+        self.last_aux = {
+            "tic_residual": residual,
+            "tic_gate_mean": gate.mean(),
+            "tic_main_anchor": main_h,
+        }
         return fused
 
 
@@ -683,9 +699,13 @@ class FiLMFusion(nn.Module):
         output_dim,
         dropout=0.3,
         residual_scale=0.15,
+        residual_dropout=0.0,
     ):
         super().__init__()
         self.residual_scale = float(residual_scale)
+        self.residual_dropout = float(residual_dropout)
+        self.runtime_scale = 1.0
+        self.last_aux = {}
         self.main_proj = (
             nn.Identity()
             if int(main_dim) == int(output_dim)
@@ -707,7 +727,99 @@ class FiLMFusion(nn.Module):
         gamma, beta = self.film(z_tic).chunk(2, dim=1)
         gamma = torch.tanh(gamma)
         beta = torch.tanh(beta)
-        fused = main_h * (1.0 + self.residual_scale * gamma) + self.residual_scale * beta
+        scale = self.residual_scale * self.runtime_scale
+        fused = main_h * (1.0 + scale * gamma) + scale * beta
+        if self.training and self.residual_dropout > 0:
+            keep_prob = max(1.0 - self.residual_dropout, 1e-6)
+            keep = torch.rand(
+                fused.shape[0], 1, device=fused.device, dtype=fused.dtype
+            ) < keep_prob
+            fused = main_h + (fused - main_h) * keep / keep_prob
+        self.last_aux = {
+            "tic_residual": fused - main_h,
+            "tic_gate_mean": gamma.abs().mean(),
+            "tic_main_anchor": main_h,
+        }
+        return fused
+
+
+class OrthogonalResidualFusion(nn.Module):
+    """
+    TIC as a tangent-space correction.
+
+    The main GC-MS embedding remains the metric backbone. TIC can only add a
+    gated residual component orthogonal to the projected main embedding, which
+    reduces the chance that TIC directly collapses prototype radii or shifts
+    known/unknown score margins.
+    """
+
+    def __init__(
+        self,
+        main_dim,
+        tic_dim,
+        output_dim,
+        dropout=0.3,
+        residual_scale=0.15,
+        gate_bias=-2.0,
+        residual_dropout=0.0,
+    ):
+        super().__init__()
+        self.output_dim = int(output_dim)
+        self.residual_scale = float(residual_scale)
+        self.residual_dropout = float(residual_dropout)
+        self.runtime_scale = 1.0
+        self.last_aux = {}
+        self.main_proj = (
+            nn.Identity()
+            if int(main_dim) == int(output_dim)
+            else nn.Linear(main_dim, output_dim)
+        )
+        hidden_dim = max(int(output_dim), int(tic_dim) * 2)
+        self.tic_delta = nn.Sequential(
+            nn.LayerNorm(tic_dim),
+            nn.Linear(tic_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, output_dim),
+        )
+        self.gate = nn.Sequential(
+            nn.LayerNorm(main_dim + tic_dim),
+            nn.Linear(main_dim + tic_dim, output_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(output_dim // 2, 1),
+            nn.Sigmoid(),
+        )
+        nn.init.zeros_(self.tic_delta[-1].weight)
+        nn.init.zeros_(self.tic_delta[-1].bias)
+        nn.init.zeros_(self.gate[-2].weight)
+        nn.init.constant_(self.gate[-2].bias, float(gate_bias))
+
+    def forward(self, z_main, z_tic):
+        main_h = self.main_proj(z_main)
+        delta = torch.tanh(self.tic_delta(z_tic))
+
+        main_unit = F.normalize(main_h, dim=1)
+        parallel = (delta * main_unit).sum(dim=1, keepdim=True) * main_unit
+        delta_orth = delta - parallel
+        delta_orth = F.normalize(delta_orth, dim=1) * delta.norm(dim=1, keepdim=True)
+
+        gate = self.gate(torch.cat([z_main, z_tic], dim=1))
+        residual = (self.residual_scale * self.runtime_scale) * gate * delta_orth
+        if self.training and self.residual_dropout > 0:
+            keep_prob = max(1.0 - self.residual_dropout, 1e-6)
+            keep = torch.rand(
+                residual.shape[0], 1, device=residual.device, dtype=residual.dtype
+            ) < keep_prob
+            residual = residual * keep / keep_prob
+
+        fused = main_h + residual
+        self.last_aux = {
+            "tic_residual": residual,
+            "tic_gate_mean": gate.mean(),
+            "tic_main_anchor": main_h,
+            "tic_orthogonality": (residual * main_unit).sum(dim=1).abs().mean(),
+        }
         return fused
 
 
@@ -719,6 +831,7 @@ def _build_tic_fusion(
     dropout=0.3,
     residual_scale=0.15,
     gate_bias=-2.0,
+    residual_dropout=0.0,
 ):
     fusion_mode = str(fusion_mode or "concat").strip().lower()
     if fusion_mode == "concat":
@@ -735,6 +848,17 @@ def _build_tic_fusion(
             dropout=dropout,
             residual_scale=residual_scale,
             gate_bias=gate_bias,
+            residual_dropout=residual_dropout,
+        )
+    elif fusion_mode in ("orthogonal_residual", "orthogonal", "ortho_residual"):
+        return OrthogonalResidualFusion(
+            main_dim,
+            tic_dim,
+            output_dim,
+            dropout=dropout,
+            residual_scale=residual_scale,
+            gate_bias=gate_bias,
+            residual_dropout=residual_dropout,
         )
     elif fusion_mode == "film":
         return FiLMFusion(
@@ -743,6 +867,7 @@ def _build_tic_fusion(
             output_dim,
             dropout=dropout,
             residual_scale=residual_scale,
+            residual_dropout=residual_dropout,
         )
     else:
         raise ValueError(f"Unknown TIC fusion mode: {fusion_mode}")
@@ -887,6 +1012,7 @@ class GCMSConsistencyNet(nn.Module):
                 dropout=cfg.dropout,
                 residual_scale=float(getattr(cfg, "tic_residual_scale", 0.15) or 0.15),
                 gate_bias=float(getattr(cfg, "tic_gate_bias", -2.0) or -2.0),
+                residual_dropout=float(getattr(cfg, "tic_residual_dropout", 0.0) or 0.0),
             )
             effective_dim = tic_fusion_output_dim_val
         else:
@@ -936,6 +1062,8 @@ class GCMSConsistencyNet(nn.Module):
         }
         if return_feat_map:
             out["feat_map"] = feat_map
+        if self.tic_enabled and self.tic_fusion is not None:
+            out.update(getattr(self.tic_fusion, "last_aux", {}))
         return out
 
     def encode(self, x, tic=None):
@@ -949,3 +1077,10 @@ class GCMSConsistencyNet(nn.Module):
         if self.embed_normalize:
             return F.normalize(z_fused, dim=1)
         return z_fused
+
+    def set_tic_warmup_scale(self, scale):
+        """Set a runtime multiplier for conservative TIC residual fusion."""
+        if not self.tic_enabled or self.tic_fusion is None:
+            return
+        if hasattr(self.tic_fusion, "runtime_scale"):
+            self.tic_fusion.runtime_scale = float(scale)

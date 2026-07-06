@@ -385,6 +385,13 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch,
     p = epoch / total_epochs
     alpha = 2.0 / (1.0 + np.exp(-10.0 * p)) - 1.0
     model.domain_head.set_alpha(alpha)
+    tic_warmup = int(getattr(cfg, "tic_warmup_epochs", 0) or 0) if cfg is not None else 0
+    tic_scale = 1.0
+    if tic_warmup > 0:
+        tic_scale = min(1.0, float(epoch + 1) / float(tic_warmup))
+    base_model = getattr(model, "_orig_mod", model)
+    if hasattr(base_model, "set_tic_warmup_scale"):
+        base_model.set_tic_warmup_scale(tic_scale)
 
     pbar = tqdm(
         loader,
@@ -421,6 +428,15 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch,
 
         for k, v in losses.items():
             running[k] = running.get(k, 0.0) + v.item()
+        if out.get("tic_gate_mean") is not None:
+            running["ticgate"] = running.get("ticgate", 0.0) + float(
+                out["tic_gate_mean"].detach().item()
+            )
+        if out.get("tic_orthogonality") is not None:
+            running["ticorth"] = running.get("ticorth", 0.0) + float(
+                out["tic_orthogonality"].detach().item()
+            )
+        running["ticscale"] = running.get("ticscale", 0.0) + float(tic_scale)
 
         pbar.set_postfix(loss=f"{loss.item():.3f}")
 
@@ -630,6 +646,11 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
               f"adv={m_train.get('adv',0):.3f} "
               f"proto={m_train.get('proto',0):.3f} "
               f"hardpair={m_train.get('hardpair',0):.3f} "
+              f"ticres={m_train.get('ticres',0):.5f} "
+              f"ticanchor={m_train.get('ticanchor',0):.5f} "
+              f"ticgate={m_train.get('ticgate',0):.4f} "
+              f"ticorth={m_train.get('ticorth',0):.5f} "
+              f"ticscale={m_train.get('ticscale',1):.2f} "
               f"total={m_train.get('total',0):.3f}")
 
         # 按配置间隔做原型验证；若启用前N轮淘汰，确保该轮次会触发验证
@@ -869,6 +890,11 @@ def train_single_model(cfg: Config):
               f"adv={m_train.get('adv',0):.3f} "
               f"proto={m_train.get('proto',0):.3f} "
               f"hardpair={m_train.get('hardpair',0):.3f} "
+              f"ticres={m_train.get('ticres',0):.5f} "
+              f"ticanchor={m_train.get('ticanchor',0):.5f} "
+              f"ticgate={m_train.get('ticgate',0):.4f} "
+              f"ticorth={m_train.get('ticorth',0):.5f} "
+              f"ticscale={m_train.get('ticscale',1):.2f} "
               f"total={m_train.get('total',0):.3f}")
 
         epoch_num = epoch + 1

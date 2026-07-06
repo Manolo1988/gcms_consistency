@@ -1118,6 +1118,9 @@ def evaluate_single_model(cfg):
             if "tic_fusion.fc.0.weight" in sd:
                 cfg.tic_fusion_mode = "concat"
                 cfg.tic_fusion_output_dim = int(sd["tic_fusion.fc.0.weight"].shape[0])
+            elif "tic_fusion.gate.4.weight" in sd:
+                cfg.tic_fusion_mode = "orthogonal_residual"
+                cfg.tic_fusion_output_dim = int(sd["tic_fusion.tic_delta.4.weight"].shape[0])
             elif "tic_fusion.gate.1.weight" in sd:
                 cfg.tic_fusion_mode = "residual_gated"
                 cfg.tic_fusion_output_dim = int(sd["tic_fusion.gate.1.weight"].shape[0])
@@ -1521,6 +1524,8 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
         "pca_components": int(getattr(cfg, "tic_pca_components", 64)) if cfg else 64,
         "residual_scale": float(getattr(cfg, "tic_residual_scale", 0.15)) if cfg else 0.15,
         "gate_bias": float(getattr(cfg, "tic_gate_bias", -2.0)) if cfg else -2.0,
+        "warmup_epochs": int(getattr(cfg, "tic_warmup_epochs", 0)) if cfg else 0,
+        "residual_dropout": float(getattr(cfg, "tic_residual_dropout", 0.0)) if cfg else 0.0,
     }
 
     with open(out_dir / "evaluation_summary.json", "w") as f:

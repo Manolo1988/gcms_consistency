@@ -161,6 +161,8 @@ class Config:
     lambda_recon: float = 0.2                 # 重建正则
     lambda_cls: float = 0.5                   # CE 分类辅助头权重
     lambda_hard_pair: float = 0.05            # 易混产品对边界约束
+    lambda_tic_residual: float = 0.10         # TIC 残差幅度约束, 防止辅助分支改写主嵌入
+    lambda_tic_anchor: float = 0.05           # 融合嵌入贴近主干嵌入的约束
     supcon_temperature: float = 0.10          # SupCon 温度参数
     proto_margin: float = 1.5                 # 原型损失推斥间距
     hard_pair_margin: float = 0.35            # 易混对最近异类原型至少远出该距离
@@ -225,11 +227,13 @@ class Config:
     tic_source: str = "from_tensor"           # from_tensor / raw_file
     tic_encoder: str = "mlp"                 # mlp / cnn1d / transformer
     tic_embed_dim: int = 64                   # TIC 编码器输出维度
-    tic_fusion_mode: str = "residual_gated"   # residual_gated / film / concat / gated / sum
+    tic_fusion_mode: str = "orthogonal_residual"  # orthogonal_residual / residual_gated / film / concat / gated / sum
     tic_fusion_output_dim: int = 256          # 融合后输出维度
     tic_pca_components: int = 64              # TIC PCA 降维后的组件数
-    tic_residual_scale: float = 0.15          # TIC 残差/FiLM 初始最大影响强度
-    tic_gate_bias: float = -2.0               # residual_gated 初始门控偏置(sigmoid≈0.12)
+    tic_residual_scale: float = 0.05          # TIC 残差/FiLM 最大影响强度
+    tic_gate_bias: float = -4.0               # residual_gated 初始门控偏置(sigmoid≈0.018)
+    tic_warmup_epochs: int = 15               # 前 N 轮线性放开 TIC 残差
+    tic_residual_dropout: float = 0.25        # 训练时随机丢弃 TIC 残差, 避免依赖批次伪相关
 
     # ── 数据增强 ──────────────────────────────────────────
     aug_intensity_scale: tuple = (0.8, 1.2)
@@ -294,6 +298,8 @@ TIC_CONFIG_KEYS = (
     "tic_pca_components",
     "tic_residual_scale",
     "tic_gate_bias",
+    "tic_warmup_epochs",
+    "tic_residual_dropout",
 )
 
 
