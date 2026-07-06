@@ -16,7 +16,7 @@ from sklearn.metrics import roc_auc_score
 
 from sklearn.preprocessing import LabelEncoder
 
-from config import Config
+from config import Config, export_tic_config
 from dataset import (
     GCMSDataset,
     GCMSAugmentation,
@@ -280,6 +280,25 @@ def build_loaders(metadata_csv, train_idx, val_idx, cfg, product_col,
         **loader_kwargs,
     )
     return ds_train, ds_val, loader_train, loader_val
+
+
+def _sync_tic_dim_from_dataset(cfg, dataset, context="train"):
+    if not bool(getattr(cfg, "tic_branch_enabled", False)):
+        return None
+    tic_dim = dataset.get_tic_dim() if hasattr(dataset, "get_tic_dim") else None
+    if tic_dim is None:
+        raise RuntimeError(
+            f"TIC branch is enabled for {context}, but metadata.csv has no usable "
+            "tic_pca_path features. Run prepare with --enable_tic_branch first."
+        )
+    requested = int(getattr(cfg, "tic_pca_components", tic_dim) or tic_dim)
+    if int(tic_dim) != requested:
+        print(
+            f"  [TIC] actual tic_pca_dim={tic_dim} differs from cfg.tic_pca_components="
+            f"{requested}; using actual dimension."
+        )
+        cfg.tic_pca_components = int(tic_dim)
+    return int(tic_dim)
 
 
 def _build_input_transform_for_training(cfg, metadata_csv, train_idx):
@@ -549,6 +568,12 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
         f"pin_memory={bool(getattr(cfg, 'dataloader_pin_memory', True))}, "
         f"prefetch_factor={int(getattr(cfg, 'dataloader_prefetch_factor', 2) or 2)}"
     )
+    tic_dim = _sync_tic_dim_from_dataset(cfg, ds_train, context=f"fold {fold_idx}")
+    if tic_dim is not None:
+        print(
+            f"  TIC branch: enabled, dim={tic_dim}, "
+            f"encoder={cfg.tic_encoder}, fusion={cfg.tic_fusion_mode}"
+        )
 
     _enable_cuda_fast_paths(cfg, device)
 
@@ -784,6 +809,12 @@ def train_single_model(cfg: Config):
         f"pin_memory={bool(getattr(cfg, 'dataloader_pin_memory', True))}, "
         f"prefetch_factor={int(getattr(cfg, 'dataloader_prefetch_factor', 2) or 2)}"
     )
+    tic_dim = _sync_tic_dim_from_dataset(cfg, ds_train, context="train")
+    if tic_dim is not None:
+        print(
+            f"  TIC branch: enabled, dim={tic_dim}, "
+            f"encoder={cfg.tic_encoder}, fusion={cfg.tic_fusion_mode}"
+        )
 
     _enable_cuda_fast_paths(cfg, device)
 
@@ -959,14 +990,17 @@ def train_single_model(cfg: Config):
     with open(model_dir / "train_meta.json", "w") as f:
         pca_precomputed = bool(getattr(cfg, "_input_pca_precomputed_active", False))
         pca_enabled = bool(input_pca_model is not None) or pca_precomputed
-        json.dump({
+        meta = {
             "num_batches": int(num_batches),
             "num_products": int(ds_train.num_products),
             "input_raw_pca_enabled": pca_enabled,
             "input_raw_pca_precomputed": pca_precomputed,
             "input_raw_pca_components": int(cfg.mz_bins),
             "input_raw_pca_rt_bins": int(getattr(cfg, "rt_bins", 0)),
-        }, f, indent=2)
+        }
+        meta.update(export_tic_config(cfg))
+        meta["tic_branch"] = export_tic_config(cfg)
+        json.dump(meta, f, indent=2)
 
     print(f"\n模型已保存到 {model_dir}")
     print(f"  最佳验证准确率: {best_acc:.4f}")

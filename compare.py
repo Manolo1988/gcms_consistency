@@ -173,7 +173,10 @@ def collect_proto_results(model, loader, proto_store, device):
 
     for batch in loader:
         x = batch["input"].to(device)
-        z = model.encode(x)
+        tic = batch.get("tic")
+        if tic is not None:
+            tic = tic.to(device)
+        z = model.encode(x, tic=tic)
         result = proto_store.predict(z)
 
         all_pred.append(result["pred_idx"].cpu().numpy())

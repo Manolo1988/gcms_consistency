@@ -1002,7 +1002,9 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config, fit_indices=N
     metadata.to_csv(meta_path, index=False, encoding="utf-8-sig")
 
     pca_prepare_info = _precompute_input_pca_tensors(meta_path, cfg)
-    tic_pca_info = _precompute_tic_pca_features(meta_path, out_dir, cfg, fit_indices=fit_indices)
+    tic_pca_info = None
+    if bool(getattr(cfg, "tic_branch_enabled", False)):
+        tic_pca_info = _precompute_tic_pca_features(meta_path, out_dir, cfg, fit_indices=fit_indices)
 
     info = {
         "rt_bins": cfg.rt_bins,

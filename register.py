@@ -414,7 +414,10 @@ def compute_prototypes(model, dataloader, device, percentile=95.0):
         x = batch["input"].to(device, non_blocking=True)
         if use_channels_last and x.ndim == 4:
             x = x.contiguous(memory_format=torch.channels_last)
-        z = model.encode(x)
+        tic = batch.get("tic")
+        if tic is not None:
+            tic = tic.to(device, non_blocking=True)
+        z = model.encode(x, tic=tic)
         all_z.append(z.cpu())
         all_labels.append(batch["product"])
         all_sample_ids.extend(
@@ -562,14 +565,20 @@ def finetune_for_new_product(model, old_store, new_loader, old_loader,
         for new_batch in new_loader:
             x_new = new_batch["input"].to(device)
             y_new = new_batch["product"].to(device)
-            z_new = model.encode(x_new)
+            tic_new = new_batch.get("tic")
+            if tic_new is not None:
+                tic_new = tic_new.to(device)
+            z_new = model.encode(x_new, tic=tic_new)
 
             # 混合新旧数据
             if replay_batches:
                 old_batch = replay_batches[n_batches % len(replay_batches)]
                 x_old = old_batch["input"].to(device)
                 y_old = old_batch["product"].to(device)
-                z_old = model.encode(x_old)
+                tic_old = old_batch.get("tic")
+                if tic_old is not None:
+                    tic_old = tic_old.to(device)
+                z_old = model.encode(x_old, tic=tic_old)
 
                 # 拼接
                 z_all = torch.cat([z_new, z_old], dim=0)

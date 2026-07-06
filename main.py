@@ -8,11 +8,12 @@ CLI 入口: 数据准备 → 训练 → 评估 → 解释 → 对比
   python main.py compare
 """
 import argparse, json, sys
+from datetime import datetime
 from pathlib import Path
 import numpy as np
 import torch
 
-from config import Config
+from config import Config, apply_tic_config, config_to_dict
 
 
 class _TeeStream:
@@ -36,6 +37,18 @@ def _run_with_log(cfg, log_name, fn):
     """Run a command and save stdout/stderr into cfg.output_dir/log_name."""
     log_path = Path(cfg.output_dir) / log_name
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    run_config_path = Path(cfg.output_dir) / "run_config.json"
+    if not run_config_path.exists():
+        with open(run_config_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "config": config_to_dict(cfg),
+                },
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
     orig_stdout, orig_stderr = sys.stdout, sys.stderr
     with open(log_path, "w", encoding="utf-8") as log_f:
         sys.stdout = _TeeStream(orig_stdout, log_f)
@@ -93,6 +106,13 @@ def cmd_register(cfg, new_data_dir):
     device = get_device()
     model_dir = Path(cfg.output_dir) / "final_model"
 
+    with open(model_dir / "train_meta.json") as f:
+        meta = json.load(f)
+    apply_tic_config(cfg, meta)
+    if bool(meta.get("input_raw_pca_enabled", False)):
+        cfg.mz_bins = int(meta.get("input_raw_pca_components", cfg.mz_bins))
+    cfg.rt_bins = int(meta.get("input_raw_pca_rt_bins", cfg.rt_bins))
+
     input_transform = None
     input_pca_path = model_dir / "input_rt_pca.pkl"
     if input_pca_path.exists():
@@ -103,8 +123,6 @@ def cmd_register(cfg, new_data_dir):
         cfg.mz_bins = int(getattr(input_pca_model, "n_components_", cfg.mz_bins))
 
     # 加载已训练模型
-    with open(model_dir / "train_meta.json") as f:
-        meta = json.load(f)
     model = GCMSConsistencyNet(meta["num_batches"], cfg).to(device)
     model.load_state_dict(torch.load(model_dir / "model.pt",
                                      map_location=device,
@@ -146,6 +164,20 @@ def cmd_register(cfg, new_data_dir):
     print(f"新产品: {new_product_names}")
     print(f"新数据: {len(ds_new)} 样本")
 
+    if bool(getattr(cfg, "tic_branch_enabled", False)):
+        for name, ds in (("old replay", ds_old), ("new product", ds_new)):
+            tic_dim = ds.get_tic_dim()
+            if tic_dim is None:
+                raise RuntimeError(
+                    f"TIC branch is enabled, but {name} metadata has no usable "
+                    "tic_pca_path. Prepare that dataset with --enable_tic_branch."
+                )
+            if int(tic_dim) != int(cfg.tic_pca_components):
+                raise RuntimeError(
+                    f"TIC feature dim mismatch for {name}: metadata has {tic_dim}, "
+                    f"model expects {cfg.tic_pca_components}."
+                )
+
     # 微调
     model, new_store = finetune_for_new_product(
         model, old_store, loader_new, loader_old,
@@ -179,6 +211,16 @@ def cmd_interpret(cfg, fold_idx=0, sample_idx=0):
     split = load_data_split(cfg)
     model_dir = Path(cfg.output_dir) / "final_model"
 
+    meta_path = model_dir / "train_meta.json"
+    meta = {}
+    if meta_path.exists():
+        with open(meta_path) as f:
+            meta = json.load(f)
+        apply_tic_config(cfg, meta)
+        if bool(meta.get("input_raw_pca_enabled", False)):
+            cfg.mz_bins = int(meta.get("input_raw_pca_components", cfg.mz_bins))
+        cfg.rt_bins = int(meta.get("input_raw_pca_rt_bins", cfg.rt_bins))
+
     input_transform = None
     input_pca_path = model_dir / "input_rt_pca.pkl"
     if input_pca_path.exists():
@@ -194,7 +236,13 @@ def cmd_interpret(cfg, fold_idx=0, sample_idx=0):
                           augmentation=None, indices=test_idx,
                           input_transform=input_transform)
 
-    model = GCMSConsistencyNet(ds_test.num_batches, cfg).to(device)
+    num_batches_model = ds_test.num_batches
+    num_products_model = None
+    if meta:
+        num_batches_model = int(meta.get("num_batches", num_batches_model))
+        num_products_model = meta.get("num_products")
+
+    model = GCMSConsistencyNet(num_batches_model, cfg, num_products=num_products_model).to(device)
     model.load_state_dict(torch.load(model_dir / "model.pt",
                                      map_location=device,
                                      weights_only=True))
@@ -206,8 +254,11 @@ def cmd_interpret(cfg, fold_idx=0, sample_idx=0):
 
     sample = ds_test[sample_idx]
     x = sample["input"].unsqueeze(0).to(device)
+    tic = sample.get("tic")
+    if tic is not None:
+        tic = tic.unsqueeze(0).to(device)
 
-    z = model.encode(x)
+    z = model.encode(x, tic=tic)
     pred_result = proto_store.predict(z) if proto_store.num_classes > 0 else None
 
     # Grad-CAM (仅使用嵌入距离模式)
@@ -216,12 +267,12 @@ def cmd_interpret(cfg, fold_idx=0, sample_idx=0):
         score = pred_result["scores"][0].item()
         target_proto = proto_store.prototypes[pred_class]
         grad_cam = GradCAM(model, mode="embedding")
-        cam = grad_cam(x, target_proto=target_proto)
+        cam = grad_cam(x, tic=tic, target_proto=target_proto)
     else:
         pred_class = None
         score = None
         grad_cam = GradCAM(model, mode="embedding")
-        cam = grad_cam(x)
+        cam = grad_cam(x, tic=tic)
 
     with open(Path(cfg.prepared_dir) / "grid_info.json") as f:
         grid_info = json.load(f)
@@ -289,6 +340,27 @@ def main():
                         help="训练前不自动刷新 split.json")
     parser.add_argument("--skip_readme_baselines", action="store_true",
                         help="评估时跳过 README baselines")
+    parser.add_argument("--enable_tic_branch", action="store_true",
+                        help="启用 TIC 辅助分支")
+    parser.add_argument("--disable_tic_branch", action="store_true",
+                        help="禁用 TIC 辅助分支")
+    parser.add_argument("--tic_source", type=str, default=None,
+                        choices=["from_tensor", "raw_file"],
+                        help="TIC 来源标记")
+    parser.add_argument("--tic_encoder", type=str, default=None,
+                        choices=["cnn1d", "cnn", "mlp", "transformer"],
+                        help="TIC 编码器")
+    parser.add_argument("--tic_embed_dim", type=int, default=None,
+                        help="TIC 编码器输出维度")
+    parser.add_argument("--tic_fusion_mode", type=str, default=None,
+                        choices=["concat", "gated", "sum"],
+                        help="TIC 与主嵌入融合方式")
+    parser.add_argument("--tic_fusion_output_dim", type=int, default=None,
+                        help="TIC 融合后嵌入维度")
+    parser.add_argument("--tic_pca_components", type=int, default=None,
+                        help="TIC PCA 特征维度")
+    parser.add_argument("--aug_tic_jitter", type=float, default=None,
+                        help="TIC 增强抖动幅度")
 
     # 数据准备选项
     parser.add_argument("--save_plot", dest="save_prepare_plots",
@@ -335,6 +407,22 @@ def main():
         cfg.auto_create_split_on_train = False
     if args.skip_readme_baselines:
         cfg.evaluate_readme_baselines = False
+    if args.enable_tic_branch:
+        cfg.tic_branch_enabled = True
+    if args.disable_tic_branch:
+        cfg.tic_branch_enabled = False
+    for name in (
+        "tic_source",
+        "tic_encoder",
+        "tic_embed_dim",
+        "tic_fusion_mode",
+        "tic_fusion_output_dim",
+        "tic_pca_components",
+        "aug_tic_jitter",
+    ):
+        value = getattr(args, name)
+        if value is not None:
+            setattr(cfg, name, value)
 
     cfg.save_prepare_plots = bool(args.save_prepare_plots)
     cfg.save_prepare_tables = bool(args.save_prepare_tables)

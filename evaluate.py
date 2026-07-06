@@ -1035,8 +1035,13 @@ def evaluate_single_model(cfg):
             save_summary_fn=_save_single_summary,
         )
 
-    from config import get_device
-    from dataset import GCMSDataset, load_data_split, few_shot_from_unknown
+    from config import apply_tic_config, get_device
+    from dataset import (
+        GCMSDataset,
+        few_shot_from_unknown,
+        infer_tic_feature_dim,
+        load_data_split,
+    )
     from models import GCMSConsistencyNet
     from register import PrototypeStore
 
@@ -1088,6 +1093,7 @@ def evaluate_single_model(cfg):
     if meta_path.exists():
         with open(meta_path) as f:
             train_meta = json.load(f)
+        apply_tic_config(cfg, train_meta)
         num_batches_model = train_meta["num_batches"]
         num_products_model = train_meta.get("num_products", None)
         if bool(train_meta.get("input_raw_pca_enabled", False)):
@@ -1099,6 +1105,38 @@ def evaluate_single_model(cfg):
                         weights_only=True)
         num_batches_model = sd["domain_head.fc.2.weight"].shape[0]
         num_products_model = None
+        if any(k.startswith("tic_encoder.") or k.startswith("tic_fusion.") for k in sd):
+            cfg.tic_branch_enabled = True
+            if "tic_encoder.conv1.weight" in sd:
+                cfg.tic_encoder = "cnn1d"
+            elif "tic_encoder.input_proj.weight" in sd:
+                cfg.tic_encoder = "transformer"
+                cfg.tic_pca_components = int(sd["tic_encoder.pos_embed"].shape[1])
+            elif "tic_encoder.net.0.weight" in sd:
+                cfg.tic_encoder = "mlp"
+                cfg.tic_pca_components = int(sd["tic_encoder.net.0.weight"].shape[1])
+            if "tic_fusion.fc.0.weight" in sd:
+                cfg.tic_fusion_mode = "concat"
+                cfg.tic_fusion_output_dim = int(sd["tic_fusion.fc.0.weight"].shape[0])
+            elif "tic_fusion.gate.0.weight" in sd:
+                cfg.tic_fusion_mode = "gated"
+                cfg.tic_fusion_output_dim = int(sd["tic_fusion.gate.0.weight"].shape[0])
+            elif "tic_fusion.main_proj.weight" in sd:
+                cfg.tic_fusion_mode = "sum"
+                cfg.tic_fusion_output_dim = int(sd["tic_fusion.main_proj.weight"].shape[0])
+
+    if bool(getattr(cfg, "tic_branch_enabled", False)):
+        tic_dim = infer_tic_feature_dim(metadata_csv)
+        if tic_dim is None:
+            raise RuntimeError(
+                "TIC branch is enabled for this model, but prepared metadata has no "
+                "usable tic_pca_path. Re-run prepare with --enable_tic_branch."
+            )
+        if int(tic_dim) != int(cfg.tic_pca_components):
+            raise RuntimeError(
+                f"TIC feature dim mismatch: metadata has {tic_dim}, "
+                f"model expects {cfg.tic_pca_components}."
+            )
 
     model = GCMSConsistencyNet(num_batches_model, cfg, num_products=num_products_model).to(device)
     model.load_state_dict(torch.load(
@@ -1465,6 +1503,16 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
         "transformer_depth": (int(getattr(cfg, "transformer_depth", 6)) if cfg else 6),
         "transformer_num_heads": (int(getattr(cfg, "transformer_num_heads", 8)) if cfg else 8),
         "transformer_mlp_ratio": (float(getattr(cfg, "transformer_mlp_ratio", 4.0)) if cfg else 4.0),
+    }
+
+    summary["tic_branch"] = {
+        "enabled": bool(getattr(cfg, "tic_branch_enabled", False)) if cfg else False,
+        "source": str(getattr(cfg, "tic_source", "from_tensor") or "from_tensor") if cfg else "from_tensor",
+        "encoder": str(getattr(cfg, "tic_encoder", "cnn1d") or "cnn1d") if cfg else "cnn1d",
+        "embed_dim": int(getattr(cfg, "tic_embed_dim", 64)) if cfg else 64,
+        "fusion_mode": str(getattr(cfg, "tic_fusion_mode", "concat") or "concat") if cfg else "concat",
+        "fusion_output_dim": int(getattr(cfg, "tic_fusion_output_dim", 256)) if cfg else 256,
+        "pca_components": int(getattr(cfg, "tic_pca_components", 64)) if cfg else 64,
     }
 
     with open(out_dir / "evaluation_summary.json", "w") as f:

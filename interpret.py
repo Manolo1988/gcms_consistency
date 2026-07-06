@@ -39,7 +39,7 @@ class GradCAM:
         layer.register_forward_hook(fwd_hook)
         layer.register_full_backward_hook(bwd_hook)
 
-    def __call__(self, x, target_class=None, target_proto=None):
+    def __call__(self, x, tic=None, target_class=None, target_proto=None):
         """
         x: (1, C, H, W) 单个样本
         target_proto: (D,) 目标原型向量 (embedding 模式下使用)
@@ -47,7 +47,7 @@ class GradCAM:
         """
         self.model.eval()
         x = x.requires_grad_(True)
-        out = self.model(x, return_feat_map=True)
+        out = self.model(x, tic=tic, return_feat_map=True)
 
         self.model.zero_grad()
 

@@ -3,7 +3,7 @@ import os
 import sys
 import subprocess
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Optional, Tuple, List
 
 # MPS fallback: 某些算子在 MPS 上未实现时回退到 CPU
@@ -280,3 +280,41 @@ class Config:
     save_prepare_tables: bool = True
 
     seed: int = 42
+
+
+TIC_CONFIG_KEYS = (
+    "tic_branch_enabled",
+    "tic_source",
+    "tic_encoder",
+    "tic_embed_dim",
+    "tic_fusion_mode",
+    "tic_fusion_output_dim",
+    "tic_pca_components",
+)
+
+
+def config_to_dict(cfg: Config) -> dict:
+    """Convert Config to a JSON-friendly dict."""
+    result = asdict(cfg)
+    for key, value in list(result.items()):
+        if isinstance(value, Path):
+            result[key] = str(value)
+        elif isinstance(value, tuple):
+            result[key] = list(value)
+    return result
+
+
+def export_tic_config(cfg: Config) -> dict:
+    """Return the TIC branch settings needed to rebuild a trained model."""
+    return {key: getattr(cfg, key) for key in TIC_CONFIG_KEYS}
+
+
+def apply_tic_config(cfg: Config, source: Optional[dict]) -> Config:
+    """Apply saved TIC branch settings to cfg in-place."""
+    if not source:
+        return cfg
+    tic_source = source.get("tic_branch", source)
+    for key in TIC_CONFIG_KEYS:
+        if key in tic_source and tic_source[key] is not None:
+            setattr(cfg, key, tic_source[key])
+    return cfg
