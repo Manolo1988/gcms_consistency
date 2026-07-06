@@ -330,6 +330,10 @@ def main():
                         help="TIC 残差幅度正则权重")
     parser.add_argument("--lambda_tic_anchor", type=float, default=None,
                         help="融合嵌入贴近主干嵌入的正则权重")
+    parser.add_argument("--lambda_tic_cls", type=float, default=None,
+                        help="TIC-only 产品辅助分类权重")
+    parser.add_argument("--lambda_tic_gate", type=float, default=None,
+                        help="TIC gate预算正则权重")
     parser.add_argument("--hard_pair_margin", type=float, default=None,
                         help="易混产品对 hard margin 距离")
     parser.add_argument("--open_score_base_weight", type=float, default=None,
@@ -372,6 +376,8 @@ def main():
                         help="TIC residual/FiLM 最大影响强度")
     parser.add_argument("--tic_gate_bias", type=float, default=None,
                         help="residual_gated 初始门控偏置")
+    parser.add_argument("--tic_gate_max", type=float, default=None,
+                        help="TIC gate最大开度")
     parser.add_argument("--tic_warmup_epochs", type=int, default=None,
                         help="TIC 残差线性放开的 epoch 数")
     parser.add_argument("--tic_residual_dropout", type=float, default=None,
@@ -403,7 +409,8 @@ def main():
         cfg.prepared_dir = str(Path(args.prepared_dir))
     for name in (
         "seed", "epochs", "batch_size", "lr",
-        "lambda_hard_pair", "lambda_tic_residual", "lambda_tic_anchor",
+        "lambda_hard_pair", "lambda_tic_cls", "lambda_tic_gate",
+        "lambda_tic_residual", "lambda_tic_anchor",
         "hard_pair_margin",
         "open_score_base_weight", "open_score_margin_weight",
     ):
@@ -436,6 +443,7 @@ def main():
         "tic_pca_components",
         "tic_residual_scale",
         "tic_gate_bias",
+        "tic_gate_max",
         "tic_warmup_epochs",
         "tic_residual_dropout",
         "aug_tic_jitter",

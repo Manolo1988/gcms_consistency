@@ -432,6 +432,10 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch,
             running["ticgate"] = running.get("ticgate", 0.0) + float(
                 out["tic_gate_mean"].detach().item()
             )
+        if out.get("tic_gate_raw_mean") is not None:
+            running["ticgate_raw"] = running.get("ticgate_raw", 0.0) + float(
+                out["tic_gate_raw_mean"].detach().item()
+            )
         if out.get("tic_orthogonality") is not None:
             running["ticorth"] = running.get("ticorth", 0.0) + float(
                 out["tic_orthogonality"].detach().item()
@@ -643,12 +647,15 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
         print(f"  Epoch {epoch+1}/{cfg.epochs}  "
               f"supcon={m_train.get('supcon',0):.3f} "
               f"cls={m_train.get('cls',0):.3f} "
+              f"ticcls={m_train.get('ticcls',0):.3f} "
               f"adv={m_train.get('adv',0):.3f} "
               f"proto={m_train.get('proto',0):.3f} "
               f"hardpair={m_train.get('hardpair',0):.3f} "
               f"ticres={m_train.get('ticres',0):.5f} "
               f"ticanchor={m_train.get('ticanchor',0):.5f} "
               f"ticgate={m_train.get('ticgate',0):.4f} "
+              f"ticraw={m_train.get('ticgate_raw',0):.4f} "
+              f"ticgloss={m_train.get('ticgate_loss',0):.4f} "
               f"ticorth={m_train.get('ticorth',0):.5f} "
               f"ticscale={m_train.get('ticscale',1):.2f} "
               f"total={m_train.get('total',0):.3f}")
@@ -887,12 +894,15 @@ def train_single_model(cfg: Config):
         print(f"  Epoch {epoch+1}/{cfg.epochs}  "
               f"supcon={m_train.get('supcon',0):.3f} "
               f"cls={m_train.get('cls',0):.3f} "
+              f"ticcls={m_train.get('ticcls',0):.3f} "
               f"adv={m_train.get('adv',0):.3f} "
               f"proto={m_train.get('proto',0):.3f} "
               f"hardpair={m_train.get('hardpair',0):.3f} "
               f"ticres={m_train.get('ticres',0):.5f} "
               f"ticanchor={m_train.get('ticanchor',0):.5f} "
               f"ticgate={m_train.get('ticgate',0):.4f} "
+              f"ticraw={m_train.get('ticgate_raw',0):.4f} "
+              f"ticgloss={m_train.get('ticgate_loss',0):.4f} "
               f"ticorth={m_train.get('ticorth',0):.5f} "
               f"ticscale={m_train.get('ticscale',1):.2f} "
               f"total={m_train.get('total',0):.3f}")

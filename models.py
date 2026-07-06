@@ -637,11 +637,13 @@ class ResidualGatedFusion(nn.Module):
         dropout=0.3,
         residual_scale=0.15,
         gate_bias=-2.0,
+        gate_max=1.0,
         residual_dropout=0.0,
     ):
         super().__init__()
         self.output_dim = int(output_dim)
         self.residual_scale = float(residual_scale)
+        self.gate_max = float(gate_max)
         self.residual_dropout = float(residual_dropout)
         self.runtime_scale = 1.0
         self.last_aux = {}
@@ -761,11 +763,13 @@ class OrthogonalResidualFusion(nn.Module):
         dropout=0.3,
         residual_scale=0.15,
         gate_bias=-2.0,
+        gate_max=1.0,
         residual_dropout=0.0,
     ):
         super().__init__()
         self.output_dim = int(output_dim)
         self.residual_scale = float(residual_scale)
+        self.gate_max = float(gate_max)
         self.residual_dropout = float(residual_dropout)
         self.runtime_scale = 1.0
         self.last_aux = {}
@@ -790,7 +794,7 @@ class OrthogonalResidualFusion(nn.Module):
             nn.Linear(output_dim // 2, 1),
             nn.Sigmoid(),
         )
-        nn.init.normal_(self.tic_delta[-1].weight, mean=0.0, std=1e-3)
+        nn.init.normal_(self.tic_delta[-1].weight, mean=0.0, std=1e-2)
         nn.init.zeros_(self.tic_delta[-1].bias)
         nn.init.normal_(self.gate[-2].weight, mean=0.0, std=1e-3)
         nn.init.constant_(self.gate[-2].bias, float(gate_bias))
@@ -805,7 +809,8 @@ class OrthogonalResidualFusion(nn.Module):
         delta_orth_norm = delta_orth.norm(dim=1, keepdim=True).clamp_min(1e-6)
         delta_orth = delta_orth / delta_orth_norm * delta.norm(dim=1, keepdim=True)
 
-        gate = self.gate(torch.cat([z_main, z_tic], dim=1))
+        raw_gate = self.gate(torch.cat([z_main, z_tic], dim=1))
+        gate = self.gate_max * raw_gate.clamp(0.0, 1.0)
         residual = (self.residual_scale * self.runtime_scale) * gate * delta_orth
         if self.training and self.residual_dropout > 0:
             keep_prob = max(1.0 - self.residual_dropout, 1e-6)
@@ -818,6 +823,7 @@ class OrthogonalResidualFusion(nn.Module):
         self.last_aux = {
             "tic_residual": residual,
             "tic_gate_mean": gate.mean(),
+            "tic_gate_raw_mean": raw_gate.mean(),
             "tic_main_anchor": main_h,
             "tic_orthogonality": (residual * main_unit).sum(dim=1).abs().mean(),
         }
@@ -832,6 +838,7 @@ def _build_tic_fusion(
     dropout=0.3,
     residual_scale=0.15,
     gate_bias=-2.0,
+    gate_max=1.0,
     residual_dropout=0.0,
 ):
     fusion_mode = str(fusion_mode or "concat").strip().lower()
@@ -849,6 +856,7 @@ def _build_tic_fusion(
             dropout=dropout,
             residual_scale=residual_scale,
             gate_bias=gate_bias,
+            gate_max=gate_max,
             residual_dropout=residual_dropout,
         )
     elif fusion_mode in ("orthogonal_residual", "orthogonal", "ortho_residual"):
@@ -1013,6 +1021,7 @@ class GCMSConsistencyNet(nn.Module):
                 dropout=cfg.dropout,
                 residual_scale=float(getattr(cfg, "tic_residual_scale", 0.15) or 0.15),
                 gate_bias=float(getattr(cfg, "tic_gate_bias", -2.0) or -2.0),
+                gate_max=float(getattr(cfg, "tic_gate_max", 1.0) or 1.0),
                 residual_dropout=float(getattr(cfg, "tic_residual_dropout", 0.0) or 0.0),
             )
             self.tic_cls_head = (

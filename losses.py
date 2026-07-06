@@ -191,11 +191,13 @@ class UnifiedLoss(nn.Module):
         self.lam_supcon = cfg.lambda_supcon
         self.lam_adv = cfg.lambda_adv
         self.lam_cls = getattr(cfg, "lambda_cls", 0.0)
+        self.lam_tic_cls = getattr(cfg, "lambda_tic_cls", 0.0)
         self.lam_proto = cfg.lambda_proto
         self.lam_recon = cfg.lambda_recon
         self.lam_hard_pair = getattr(cfg, "lambda_hard_pair", 0.0)
         self.lam_tic_residual = getattr(cfg, "lambda_tic_residual", 0.0)
         self.lam_tic_anchor = getattr(cfg, "lambda_tic_anchor", 0.0)
+        self.lam_tic_gate = getattr(cfg, "lambda_tic_gate", 0.0)
 
     def set_label_names(self, label_names):
         self.hard_pair_loss.set_label_names(label_names)
@@ -214,6 +216,10 @@ class UnifiedLoss(nn.Module):
         l_cls = torch.tensor(0.0, device=labels.device)
         if model_out.get("cls_logits") is not None:
             l_cls = self.cls_loss(model_out["cls_logits"], labels)
+
+        l_tic_cls = torch.tensor(0.0, device=labels.device)
+        if model_out.get("tic_cls_logits") is not None:
+            l_tic_cls = self.cls_loss(model_out["tic_cls_logits"], labels)
 
         # 原型距离损失 (在嵌入空间, 类内紧凑)
         l_proto = self.proto_loss(model_out["z"], labels)
@@ -237,18 +243,30 @@ class UnifiedLoss(nn.Module):
             if fused.shape == tic_anchor.shape:
                 l_tic_anchor = 1.0 - F.cosine_similarity(fused, tic_anchor, dim=1).mean()
 
+        l_tic_gate = torch.tensor(0.0, device=labels.device)
+        tic_gate_raw = model_out.get("tic_gate_raw_mean")
+        tic_gate = model_out.get("tic_gate_mean")
+        if tic_gate_raw is not None:
+            l_tic_gate = tic_gate_raw
+        elif tic_gate is not None:
+            l_tic_gate = tic_gate
+
         total = (self.lam_supcon * l_supcon
                  + self.lam_adv * l_adv
                  + self.lam_cls * l_cls
+                 + self.lam_tic_cls * l_tic_cls
                  + self.lam_proto * l_proto
                  + self.lam_hard_pair * l_hard_pair
                  + self.lam_recon * l_recon
                  + self.lam_tic_residual * l_tic_residual
-                 + self.lam_tic_anchor * l_tic_anchor)
+                 + self.lam_tic_anchor * l_tic_anchor
+                 + self.lam_tic_gate * l_tic_gate)
 
         return {
             "supcon": l_supcon, "adv": l_adv, "cls": l_cls,
+            "ticcls": l_tic_cls,
             "proto": l_proto, "hardpair": l_hard_pair, "recon": l_recon,
             "ticres": l_tic_residual, "ticanchor": l_tic_anchor,
+            "ticgate_loss": l_tic_gate,
             "total": total,
         }

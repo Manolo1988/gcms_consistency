@@ -1105,6 +1105,10 @@ def evaluate_single_model(cfg):
                         weights_only=True)
         num_batches_model = sd["domain_head.fc.2.weight"].shape[0]
         num_products_model = None
+        if "tic_cls_head.weight" in sd:
+            num_products_model = int(sd["tic_cls_head.weight"].shape[0])
+        elif "cls_head.weight" in sd:
+            num_products_model = int(sd["cls_head.weight"].shape[0])
         if any(k.startswith("tic_encoder.") or k.startswith("tic_fusion.") for k in sd):
             cfg.tic_branch_enabled = True
             if "tic_encoder.conv1.weight" in sd:
@@ -1524,8 +1528,10 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
         "pca_components": int(getattr(cfg, "tic_pca_components", 64)) if cfg else 64,
         "residual_scale": float(getattr(cfg, "tic_residual_scale", 0.15)) if cfg else 0.15,
         "gate_bias": float(getattr(cfg, "tic_gate_bias", -2.0)) if cfg else -2.0,
+        "gate_max": float(getattr(cfg, "tic_gate_max", 1.0)) if cfg else 1.0,
         "warmup_epochs": int(getattr(cfg, "tic_warmup_epochs", 0)) if cfg else 0,
         "residual_dropout": float(getattr(cfg, "tic_residual_dropout", 0.0)) if cfg else 0.0,
+        "aux_cls_enabled": bool(getattr(cfg, "tic_aux_cls_enabled", True)) if cfg else True,
     }
 
     with open(out_dir / "evaluation_summary.json", "w") as f:

@@ -161,8 +161,10 @@ class Config:
     lambda_recon: float = 0.2                 # 重建正则
     lambda_cls: float = 0.5                   # CE 分类辅助头权重
     lambda_hard_pair: float = 0.05            # 易混产品对边界约束
+    lambda_tic_cls: float = 0.10              # TIC-only 产品辅助分类, 打通 TIC 分支监督
     lambda_tic_residual: float = 0.10         # TIC 残差幅度约束, 防止辅助分支改写主嵌入
     lambda_tic_anchor: float = 0.05           # 融合嵌入贴近主干嵌入的约束
+    lambda_tic_gate: float = 0.05             # TIC gate预算约束, 避免辅助支路接管主空间
     supcon_temperature: float = 0.10          # SupCon 温度参数
     proto_margin: float = 1.5                 # 原型损失推斥间距
     hard_pair_margin: float = 0.35            # 易混对最近异类原型至少远出该距离
@@ -231,9 +233,11 @@ class Config:
     tic_fusion_output_dim: int = 256          # 融合后输出维度
     tic_pca_components: int = 64              # TIC PCA 降维后的组件数
     tic_residual_scale: float = 0.05          # TIC 残差/FiLM 最大影响强度
-    tic_gate_bias: float = -4.0               # residual_gated 初始门控偏置(sigmoid≈0.018)
+    tic_gate_bias: float = -2.0               # bounded gate 内部初始偏置(sigmoid≈0.12)
+    tic_gate_max: float = 0.25                # TIC gate最大开度, 保护开集/原型几何
     tic_warmup_epochs: int = 15               # 前 N 轮线性放开 TIC 残差
     tic_residual_dropout: float = 0.25        # 训练时随机丢弃 TIC 残差, 避免依赖批次伪相关
+    tic_aux_cls_enabled: bool = True          # 训练时为 TIC encoder 加产品辅助监督
 
     # ── 数据增强 ──────────────────────────────────────────
     aug_intensity_scale: tuple = (0.8, 1.2)
@@ -298,8 +302,10 @@ TIC_CONFIG_KEYS = (
     "tic_pca_components",
     "tic_residual_scale",
     "tic_gate_bias",
+    "tic_gate_max",
     "tic_warmup_epochs",
     "tic_residual_dropout",
+    "tic_aux_cls_enabled",
 )
 
 
