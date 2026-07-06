@@ -1,0 +1,24 @@
+{
+  "num_batches": 28,
+  "num_products": 8,
+  "input_raw_pca_enabled": true,
+  "input_raw_pca_precomputed": true,
+  "input_raw_pca_components": 239,
+  "input_raw_pca_rt_bins": 1024,
+  "tic_branch_enabled": true,
+  "tic_source": "from_tensor",
+  "tic_encoder": "cnn1d",
+  "tic_embed_dim": 64,
+  "tic_fusion_mode": "concat",
+  "tic_fusion_output_dim": 256,
+  "tic_pca_components": 64,
+  "tic_branch": {
+    "tic_branch_enabled": true,
+    "tic_source": "from_tensor",
+    "tic_encoder": "cnn1d",
+    "tic_embed_dim": 64,
+    "tic_fusion_mode": "concat",
+    "tic_fusion_output_dim": 256,
+    "tic_pca_components": 64
+  }
+}
