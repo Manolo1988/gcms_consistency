@@ -790,9 +790,9 @@ class OrthogonalResidualFusion(nn.Module):
             nn.Linear(output_dim // 2, 1),
             nn.Sigmoid(),
         )
-        nn.init.zeros_(self.tic_delta[-1].weight)
+        nn.init.normal_(self.tic_delta[-1].weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.tic_delta[-1].bias)
-        nn.init.zeros_(self.gate[-2].weight)
+        nn.init.normal_(self.gate[-2].weight, mean=0.0, std=1e-3)
         nn.init.constant_(self.gate[-2].bias, float(gate_bias))
 
     def forward(self, z_main, z_tic):
@@ -802,7 +802,8 @@ class OrthogonalResidualFusion(nn.Module):
         main_unit = F.normalize(main_h, dim=1)
         parallel = (delta * main_unit).sum(dim=1, keepdim=True) * main_unit
         delta_orth = delta - parallel
-        delta_orth = F.normalize(delta_orth, dim=1) * delta.norm(dim=1, keepdim=True)
+        delta_orth_norm = delta_orth.norm(dim=1, keepdim=True).clamp_min(1e-6)
+        delta_orth = delta_orth / delta_orth_norm * delta.norm(dim=1, keepdim=True)
 
         gate = self.gate(torch.cat([z_main, z_tic], dim=1))
         residual = (self.residual_scale * self.runtime_scale) * gate * delta_orth
@@ -1014,10 +1015,16 @@ class GCMSConsistencyNet(nn.Module):
                 gate_bias=float(getattr(cfg, "tic_gate_bias", -2.0) or -2.0),
                 residual_dropout=float(getattr(cfg, "tic_residual_dropout", 0.0) or 0.0),
             )
+            self.tic_cls_head = (
+                nn.Linear(tic_embed_dim_val, num_products)
+                if num_products and bool(getattr(cfg, "tic_aux_cls_enabled", True))
+                else None
+            )
             effective_dim = tic_fusion_output_dim_val
         else:
             self.tic_encoder = None
             self.tic_fusion = None
+            self.tic_cls_head = None
             effective_dim = dim
 
         # 对比学习投影头 (仅训练)
@@ -1038,8 +1045,15 @@ class GCMSConsistencyNet(nn.Module):
         if self.tic_enabled and tic is not None:
             tic_embed = self.tic_encoder(tic)
             z_fused = self.tic_fusion(z_raw, tic_embed)
+            tic_cls_logits = (
+                self.tic_cls_head(tic_embed)
+                if self.tic_cls_head is not None
+                else None
+            )
         else:
             z_fused = z_raw
+            tic_embed = None
+            tic_cls_logits = None
 
         # 归一化嵌入 (在融合空间中进行度量学习)
         if self.embed_normalize:
@@ -1058,6 +1072,7 @@ class GCMSConsistencyNet(nn.Module):
             "proj": proj,
             "domain_logits": domain_logits,
             "cls_logits": cls_logits,
+            "tic_cls_logits": tic_cls_logits,
             "recon": recon,
         }
         if return_feat_map:
