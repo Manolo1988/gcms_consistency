@@ -61,6 +61,26 @@ def _run_with_log(cfg, log_name, fn):
             print(f"日志已保存到 {log_path}")
 
 
+def _resolve_evaluate_output_dir(output_dir):
+    """Resolve common evaluate path variants before creating a new empty run dir."""
+    out = Path(output_dir)
+    if (out / "final_model" / "model.pt").exists():
+        return str(out)
+    if out.name == "final_model" and (out / "model.pt").exists():
+        return str(out.parent)
+
+    candidates = []
+    if not out.is_absolute():
+        candidates.append(Path("new_outputs") / out)
+        if out.name.startswith("run_"):
+            candidates.append(Path("new_outputs") / out.name)
+    for cand in candidates:
+        if (cand / "final_model" / "model.pt").exists():
+            print(f"  [Evaluate] output_dir 自动解析为: {cand}")
+            return str(cand)
+    return str(out)
+
+
 def cmd_prepare(cfg):
     def _impl():
         from data_prepare import scan_dataset, convert_all
@@ -485,6 +505,8 @@ def main():
 
     if args.command == "evaluate" and Path(cfg.output_dir).name == "final_model":
         cfg.output_dir = str(Path(cfg.output_dir).parent)
+    if args.command == "evaluate":
+        cfg.output_dir = _resolve_evaluate_output_dir(cfg.output_dir)
     if args.command in ("prepare", "train"):
         import time as _time
         cfg.output_dir = str(

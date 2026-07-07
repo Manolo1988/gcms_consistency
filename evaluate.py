@@ -112,6 +112,8 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0,
             radius = float(proto_store.radii.get(pred_class_name, 1.0))
             true_label = batch["product"][i].item()
             true_class_name = label_name_map.get(int(true_label), str(int(true_label)))
+            name_to_label = {str(v): int(k) for k, v in label_name_map.items()}
+            pred_label_for_evidence = name_to_label.get(pred_class_name, pred_idx)
 
             # 拒识判定
             is_known = proto_store.is_known(
@@ -142,7 +144,7 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0,
             if chemical_store is not None:
                 chem = chemical_store.score(
                     x_cpu[i],
-                    pred_idx,
+                    pred_label_for_evidence,
                     tic=tic_cpu[i] if tic_cpu is not None else None,
                     use_tic_pca=chemical_use_tic_pca,
                 )
@@ -1305,7 +1307,12 @@ def evaluate_single_model(cfg):
 
     # ── 加载模型 ──
     if not (model_dir / "model.pt").exists():
-        print("未找到 final_model/model.pt, 请先运行 python main.py train")
+        print(
+            "未找到 final_model/model.pt, 请先运行 python main.py train\n"
+            f"  当前查找路径: {(model_dir / 'model.pt').resolve()}\n"
+            "  如果模型在 new_outputs/run_xxx 下，请使用 "
+            "--output_dir new_outputs/run_xxx"
+        )
         return
 
     # ── 输入变换: raw -> PCA(沿 m/z 轴) ──
