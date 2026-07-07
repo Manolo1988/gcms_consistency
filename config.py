@@ -160,14 +160,16 @@ class Config:
     lambda_proto: float = 1.0                 # λ₂ 原型紧凑 (类内紧凑)
     lambda_recon: float = 0.2                 # 重建正则
     lambda_cls: float = 0.5                   # CE 分类辅助头权重
-    lambda_hard_pair: float = 0.10            # 易混产品对边界约束
+    lambda_hard_pair: float = 0.25            # 易混产品对边界约束
     lambda_tic_cls: float = 0.10              # TIC-only 产品辅助分类, 打通 TIC 分支监督
     lambda_tic_residual: float = 0.20         # TIC 残差幅度约束, 防止辅助分支改写主嵌入
     lambda_tic_anchor: float = 0.10           # 融合嵌入贴近主干嵌入的约束
     lambda_tic_gate: float = 0.10             # TIC gate预算约束, 避免辅助支路接管主空间
     supcon_temperature: float = 0.10          # SupCon 温度参数
     proto_margin: float = 1.5                 # 原型损失推斥间距
-    hard_pair_margin: float = 0.20            # 易混对余弦原型相似度至少拉开该 margin
+    hard_pair_margin: float = 0.30            # 易混对余弦原型相似度至少拉开该 margin
+    hard_pair_pairwise_weight: float = 0.50   # 同 batch 易混样本的 hardest-negative 约束权重
+    hard_pair_memory_momentum: float = 0.80   # 易混类跨 batch 原型记忆动量
     hard_pair_names: Tuple[Tuple[str, str], ...] = (
         ("H88", "H99"),
         ("RJD", "YJD"),

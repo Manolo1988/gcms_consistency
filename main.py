@@ -356,6 +356,10 @@ def main():
                         help="TIC gate预算正则权重")
     parser.add_argument("--hard_pair_margin", type=float, default=None,
                         help="易混产品对 hard margin 距离")
+    parser.add_argument("--hard_pair_pairwise_weight", type=float, default=None,
+                        help="易混产品对 batch 内 hardest-negative 约束权重")
+    parser.add_argument("--hard_pair_memory_momentum", type=float, default=None,
+                        help="易混产品对跨 batch 原型记忆动量")
     parser.add_argument("--open_score_base_weight", type=float, default=None,
                         help="开集分数 base score 权重")
     parser.add_argument("--open_score_margin_weight", type=float, default=None,
@@ -439,7 +443,8 @@ def main():
         "seed", "epochs", "batch_size", "lr",
         "lambda_hard_pair", "lambda_tic_cls", "lambda_tic_gate",
         "lambda_tic_residual", "lambda_tic_anchor",
-        "hard_pair_margin",
+        "hard_pair_margin", "hard_pair_pairwise_weight",
+        "hard_pair_memory_momentum",
         "open_score_base_weight", "open_score_margin_weight",
         "chemical_evidence_open_weight",
         "chemical_evidence_max_samples_per_class",

@@ -125,11 +125,12 @@ class HardPairMarginLoss(nn.Module):
     这样只强化指定相似对的局部边界，不会把所有类别一刀切推远。
     """
 
-    def __init__(self, margin=0.35):
+    def __init__(self, margin=0.35, pairwise_weight=0.5, proto_momentum=0.8):
         super().__init__()
         self.margin = float(margin)
+        self.pairwise_weight = float(pairwise_weight)
         self.pair_label_ids = []
-        self.proto_momentum = 0.9
+        self.proto_momentum = float(proto_momentum)
         self.register_buffer("_proto_labels", torch.empty(0, dtype=torch.long))
         self.register_buffer("_proto_memory", torch.empty(0, 0))
 
@@ -219,6 +220,20 @@ class HardPairMarginLoss(nn.Module):
                 sim_ba = z_unit[mask_b] @ proto_a
                 losses.append(F.relu(self.margin + sim_ba - sim_bb).mean())
 
+            if self.pairwise_weight > 0 and mask_a.any() and mask_b.any():
+                za = z_unit[mask_a]
+                zb = z_unit[mask_b]
+                sim_ab_mat = za @ zb.T
+                hardest_ab = sim_ab_mat.max(dim=1).values
+                hardest_ba = sim_ab_mat.max(dim=0).values
+                own_a = za @ proto_a
+                own_b = zb @ proto_b
+                pair_loss = 0.5 * (
+                    F.relu(self.margin + hardest_ab - own_a).mean()
+                    + F.relu(self.margin + hardest_ba - own_b).mean()
+                )
+                losses.append(self.pairwise_weight * pair_loss)
+
         self._update_memory(labels, batch_protos)
 
         if not losses:
@@ -237,7 +252,9 @@ class UnifiedLoss(nn.Module):
         self.supcon_loss = SupConLoss(temperature=cfg.supcon_temperature)
         self.proto_loss = BatchPrototypeLoss(margin=cfg.proto_margin)
         self.hard_pair_loss = HardPairMarginLoss(
-            margin=getattr(cfg, "hard_pair_margin", 0.35)
+            margin=getattr(cfg, "hard_pair_margin", 0.35),
+            pairwise_weight=getattr(cfg, "hard_pair_pairwise_weight", 0.5),
+            proto_momentum=getattr(cfg, "hard_pair_memory_momentum", 0.8),
         )
         self.hard_pair_loss.pair_names = tuple(
             (str(a), str(b))

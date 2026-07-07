@@ -114,6 +114,14 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0,
             true_class_name = label_name_map.get(int(true_label), str(int(true_label)))
             name_to_label = {str(v): int(k) for k, v in label_name_map.items()}
             pred_label_for_evidence = name_to_label.get(pred_class_name, pred_idx)
+            all_dists_i = result["all_dists"][i]
+            true_dist = float("nan")
+            pred_true_gap = float("nan")
+            true_class_index = None
+            if true_class_name in proto_store.class_names:
+                true_class_index = int(proto_store.class_names.index(true_class_name))
+                true_dist = all_dists_i[true_class_index].item()
+                pred_true_gap = true_dist - min_dist
 
             # 拒识判定
             is_known = proto_store.is_known(
@@ -136,6 +144,8 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0,
                 "second_dist": second_dist,
                 "radius_norm": float(min_dist / max(radius, 1e-8)),
                 "min_dist": min_dist,
+                "true_class_dist": true_dist,
+                "pred_vs_true_dist_gap": pred_true_gap,
                 "is_known": bool(is_known),
                 "correct": pred_class_name == true_class_name,
                 "z": z[i].cpu().numpy(),
@@ -714,6 +724,115 @@ def _records_to_dataframe(records):
     return pd.DataFrame(rows)
 
 
+def _augment_setting_a_errors(errors, out_dir):
+    if errors.empty or "sample_id" not in errors.columns:
+        return errors, {}
+
+    errors = errors.copy()
+    sample_ids = errors["sample_id"].astype(str)
+    lot_ids = sample_ids.str.split("_").str[-1]
+    errors["lot_id_from_sample"] = lot_ids
+    errors["lot_prefix"] = lot_ids.str.slice(0, 3)
+    errors["suspect_lot_prefix"] = (
+        errors["lot_prefix"].notna()
+        & (errors["lot_prefix"] != "")
+        & (errors["lot_prefix"] != "125")
+    )
+
+    current_dir = out_dir.resolve()
+    history_paths = []
+    for path in sorted(out_dir.parent.glob("run_*/setting_a_errors.csv")):
+        try:
+            if path.parent.resolve() == current_dir:
+                continue
+        except Exception:
+            pass
+        history_paths.append(path)
+
+    history_count = {}
+    history_pairs = {}
+    for path in history_paths:
+        try:
+            hist = pd.read_csv(path)
+        except Exception:
+            continue
+        if "sample_id" not in hist.columns:
+            continue
+        for _, row in hist.iterrows():
+            sid = str(row.get("sample_id", ""))
+            if not sid:
+                continue
+            history_count[sid] = history_count.get(sid, 0) + 1
+            pair = (
+                str(row.get("true_class", "")),
+                str(row.get("pred_class", "")),
+            )
+            history_pairs.setdefault(sid, set()).add(pair)
+
+    errors["previous_error_count"] = sample_ids.map(
+        lambda sid: int(history_count.get(str(sid), 0))
+    )
+    errors["total_error_count_in_available_runs"] = errors["previous_error_count"] + 1
+    errors["stable_difficult_error"] = errors["previous_error_count"] >= 2
+    errors["same_pair_seen_before"] = errors.apply(
+        lambda r: (
+            (str(r.get("true_class", "")), str(r.get("pred_class", "")))
+            in history_pairs.get(str(r.get("sample_id", "")), set())
+        ),
+        axis=1,
+    )
+
+    stable = errors[errors["stable_difficult_error"]].copy()
+    if not stable.empty:
+        stable = stable.sort_values(
+            [
+                "total_error_count_in_available_runs",
+                "same_pair_seen_before",
+                "consistency_score",
+            ],
+            ascending=[False, False, False],
+        )
+        stable.to_csv(out_dir / "setting_a_stable_difficult_samples.csv", index=False)
+
+    suspect = errors[errors["suspect_lot_prefix"]].copy()
+    if not suspect.empty:
+        suspect.to_csv(out_dir / "setting_a_suspect_lot_prefix_errors.csv", index=False)
+
+    pair_counts = []
+    if not stable.empty:
+        for (true_cls, pred_cls), group in stable.groupby(["true_class", "pred_class"]):
+            pair_counts.append({
+                "true_class": str(true_cls),
+                "pred_class": str(pred_cls),
+                "count": int(len(group)),
+                "mean_consistency_score": float(group["consistency_score"].mean())
+                if "consistency_score" in group else float("nan"),
+                "sample_ids": [str(x) for x in group["sample_id"].head(20).tolist()],
+            })
+    pair_counts = sorted(pair_counts, key=lambda x: (-x["count"], x["true_class"], x["pred_class"]))
+
+    summary = {
+        "history_files_used": len(history_paths),
+        "n_stable_difficult_errors": int(len(stable)),
+        "stable_error_fraction_of_current_errors": float(len(stable) / max(len(errors), 1)),
+        "stable_error_pairs": pair_counts,
+        "n_suspect_lot_prefix_errors": int(len(suspect)),
+        "suspect_lot_prefix_sample_ids": (
+            [str(x) for x in suspect["sample_id"].head(30).tolist()]
+            if not suspect.empty else []
+        ),
+        "files": {
+            "stable_difficult_samples": (
+                "setting_a_stable_difficult_samples.csv" if not stable.empty else None
+            ),
+            "suspect_lot_prefix_errors": (
+                "setting_a_suspect_lot_prefix_errors.csv" if not suspect.empty else None
+            ),
+        },
+    }
+    return errors, summary
+
+
 def _setting_a_error_analysis(records, out_dir):
     if not records:
         return {}
@@ -738,6 +857,7 @@ def _setting_a_error_analysis(records, out_dir):
         errors = df[df["correct"] == False].copy()
     else:
         errors = df[df["true_class"].astype(str) != df["pred_class"].astype(str)].copy()
+    errors, difficult_summary = _augment_setting_a_errors(errors, out_dir)
     errors.to_csv(out_dir / "setting_a_errors.csv", index=False)
 
     labels = sorted(
@@ -801,6 +921,7 @@ def _setting_a_error_analysis(records, out_dir):
         "per_class": per_class,
         "error_pairs": error_pairs,
         "high_confidence_errors": _s_recursive_local(high_conf_errors),
+        "stable_difficult_samples": _s_recursive_local(difficult_summary),
         "files": {
             "predictions": "setting_a_predictions.csv",
             "errors": "setting_a_errors.csv",
