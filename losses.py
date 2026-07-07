@@ -129,6 +129,9 @@ class HardPairMarginLoss(nn.Module):
         super().__init__()
         self.margin = float(margin)
         self.pair_label_ids = []
+        self.proto_momentum = 0.9
+        self.register_buffer("_proto_labels", torch.empty(0, dtype=torch.long))
+        self.register_buffer("_proto_memory", torch.empty(0, 0))
 
     def set_label_names(self, label_names):
         name_to_id = {str(name): int(idx) for idx, name in label_names.items()}
@@ -139,6 +142,47 @@ class HardPairMarginLoss(nn.Module):
             if a in name_to_id and b in name_to_id
         ]
 
+    def _memory_lookup(self, label_id, device, dtype):
+        if self._proto_labels.numel() == 0 or self._proto_memory.numel() == 0:
+            return None
+        hits = (self._proto_labels.to(device) == int(label_id)).nonzero(as_tuple=False)
+        if hits.numel() == 0:
+            return None
+        idx = int(hits[0].item())
+        return self._proto_memory.to(device=device, dtype=dtype)[idx]
+
+    @torch.no_grad()
+    def _update_memory(self, labels, batch_protos):
+        if not batch_protos:
+            return
+        device = labels.device
+        proto_labels = sorted(batch_protos.keys())
+        proto_tensor = torch.stack([batch_protos[k].detach() for k in proto_labels])
+        proto_labels_t = torch.tensor(proto_labels, device=device, dtype=torch.long)
+
+        if self._proto_labels.numel() == 0 or self._proto_memory.numel() == 0:
+            self._proto_labels = proto_labels_t.cpu()
+            self._proto_memory = proto_tensor.cpu()
+            return
+
+        old_labels = self._proto_labels.to(device)
+        old_memory = self._proto_memory.to(device=device, dtype=proto_tensor.dtype)
+        memory = {int(k.item()): v for k, v in zip(old_labels, old_memory)}
+        for label, proto in zip(proto_labels_t, proto_tensor):
+            key = int(label.item())
+            if key in memory:
+                memory[key] = F.normalize(
+                    self.proto_momentum * memory[key]
+                    + (1.0 - self.proto_momentum) * proto,
+                    dim=0,
+                )
+            else:
+                memory[key] = proto
+
+        merged_labels = sorted(memory.keys())
+        self._proto_labels = torch.tensor(merged_labels, dtype=torch.long)
+        self._proto_memory = torch.stack([memory[k].detach().cpu() for k in merged_labels])
+
     def forward(self, z, labels):
         device = z.device
         if not self.pair_label_ids:
@@ -146,24 +190,36 @@ class HardPairMarginLoss(nn.Module):
 
         losses = []
         z_unit = F.normalize(z, dim=1)
+        pair_ids = sorted({int(x) for pair in self.pair_label_ids for x in pair})
+        batch_protos = {}
+        for label_id in pair_ids:
+            mask = labels == label_id
+            if mask.any():
+                batch_protos[label_id] = F.normalize(
+                    z_unit[mask].mean(dim=0), dim=0
+                )
         for a_id, b_id in self.pair_label_ids:
             mask_a = labels == a_id
             mask_b = labels == b_id
-            if not (mask_a.any() and mask_b.any()):
+            proto_a = batch_protos.get(int(a_id))
+            proto_b = batch_protos.get(int(b_id))
+            if proto_a is None:
+                proto_a = self._memory_lookup(a_id, device, z_unit.dtype)
+            if proto_b is None:
+                proto_b = self._memory_lookup(b_id, device, z_unit.dtype)
+            if proto_a is None or proto_b is None:
                 continue
 
-            proto_a = z_unit[mask_a].mean(dim=0)
-            proto_b = z_unit[mask_b].mean(dim=0)
-            proto_a = F.normalize(proto_a, dim=0)
-            proto_b = F.normalize(proto_b, dim=0)
+            if mask_a.any():
+                sim_aa = z_unit[mask_a] @ proto_a
+                sim_ab = z_unit[mask_a] @ proto_b
+                losses.append(F.relu(self.margin + sim_ab - sim_aa).mean())
+            if mask_b.any():
+                sim_bb = z_unit[mask_b] @ proto_b
+                sim_ba = z_unit[mask_b] @ proto_a
+                losses.append(F.relu(self.margin + sim_ba - sim_bb).mean())
 
-            sim_aa = z_unit[mask_a] @ proto_a
-            sim_ab = z_unit[mask_a] @ proto_b
-            sim_bb = z_unit[mask_b] @ proto_b
-            sim_ba = z_unit[mask_b] @ proto_a
-
-            losses.append(F.relu(self.margin + sim_ab - sim_aa).mean())
-            losses.append(F.relu(self.margin + sim_ba - sim_bb).mean())
+        self._update_memory(labels, batch_protos)
 
         if not losses:
             return torch.tensor(0.0, device=device, requires_grad=True)

@@ -867,6 +867,7 @@ def _build_tic_fusion(
             dropout=dropout,
             residual_scale=residual_scale,
             gate_bias=gate_bias,
+            gate_max=gate_max,
             residual_dropout=residual_dropout,
         )
     elif fusion_mode == "film":

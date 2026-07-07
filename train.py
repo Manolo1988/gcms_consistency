@@ -196,11 +196,13 @@ def _prototype_radius_health(radii):
     mean = float(raw_vals.mean())
     std = float(raw_vals.std())
     cv = float(std / max(mean, 1e-8))
-    target = 0.45
-    penalty = max(0.0, mean - target) + 0.10 * cv
+    target = 0.20
+    max_radius = float(raw_vals.max())
+    penalty = max(0.0, mean - target) + 0.25 * max(0.0, max_radius - 0.30) + 0.15 * cv
     return {
         "radius_mean": mean,
         "radius_cv": cv,
+        "radius_max": max_radius,
         "radius_penalty": float(penalty),
     }
 
@@ -211,7 +213,7 @@ def _selection_metric(val_acc, balanced_acc, auroc_correct, radius_penalty):
         0.45 * float(val_acc)
         + 0.35 * float(balanced_acc)
         + 0.20 * auroc_term
-        - 0.05 * float(radius_penalty)
+        - 0.12 * float(radius_penalty)
     )
 
 
@@ -748,6 +750,7 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
             confusion = val_m.get("confusion", "")
             radius_mean = float(val_m.get("radius_mean", float("nan")))
             radius_cv = float(val_m.get("radius_cv", float("nan")))
+            radius_max = float(val_m.get("radius_max", float("nan")))
             pa_str = " ".join(f"{k}={v:.2f}" for k, v in sorted(pa.items()))
             radii_str = " ".join(
                 f"{k}=raw{r.get('raw',float('nan')):.3f}/sph{r.get('sph',float('nan')):.3f}"
@@ -756,7 +759,8 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
             print(
                 f"    -> val_acc={val_acc:.3f}, train_pa={train_pa:.3f}, "
                 f"val_bal={val_bal:.3f}, val_auroc={val_auroc:.3f}, "
-                f"radius_mean={radius_mean:.3f}, radius_cv={radius_cv:.3f}, "
+                f"radius_mean={radius_mean:.3f}, radius_max={radius_max:.3f}, "
+                f"radius_cv={radius_cv:.3f}, "
                 f"val_metric={val_metric:.3f} (best={best_metric:.3f}, "
                 f"proto={'full' if use_full_proto else 'subset'})"
                 f"\n       per_class: {pa_str}"
@@ -998,6 +1002,7 @@ def train_single_model(cfg: Config):
             confusion = val_m.get("confusion", "")
             radius_mean = float(val_m.get("radius_mean", float("nan")))
             radius_cv = float(val_m.get("radius_cv", float("nan")))
+            radius_max = float(val_m.get("radius_max", float("nan")))
             pa_str = " ".join(f"{k}={v:.2f}" for k, v in sorted(pa.items()))
             radii_str = " ".join(
                 f"{k}=raw{r.get('raw',float('nan')):.3f}/sph{r.get('sph',float('nan')):.3f}"
@@ -1006,7 +1011,8 @@ def train_single_model(cfg: Config):
             print(
                 f"    -> val_acc={val_acc:.3f}, train_pa={train_pa:.3f}, "
                 f"val_bal={val_bal:.3f}, val_auroc={val_auroc:.3f}, "
-                f"radius_mean={radius_mean:.3f}, radius_cv={radius_cv:.3f}, "
+                f"radius_mean={radius_mean:.3f}, radius_max={radius_max:.3f}, "
+                f"radius_cv={radius_cv:.3f}, "
                 f"val_metric={val_metric:.3f} (best={best_metric:.3f}, "
                 f"proto={'full' if use_full_proto else 'subset'})"
                 f"\n       per_class: {pa_str}"
