@@ -23,6 +23,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from chemical_similarity import ChemicalEvidenceStore
 from register import PrototypeStore, register_from_loader
 
 
@@ -77,7 +78,8 @@ def collect_embeddings(model, loader, device):
 
 
 @torch.no_grad()
-def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
+def collect_predictions(model, loader, proto_store, device, reject_factor=2.0,
+                        chemical_store=None, chemical_use_tic_pca=False):
     """收集所有样本的预测结果 (基于原型匹配)。"""
     model.eval()
     records = []
@@ -96,6 +98,8 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
             tic = tic.to(device)
         z = model.encode(x, tic=tic)
         result = proto_store.predict(z, use_spherical=False)
+        x_cpu = x.detach().cpu().numpy()
+        tic_cpu = tic.detach().cpu().numpy() if tic is not None else None
 
         for i in range(x.size(0)):
             pred_idx = result["pred_idx"][i].item()
@@ -117,7 +121,7 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
                 use_spherical=bool(result.get("use_spherical", True)),
             )[0]
 
-            records.append({
+            record = {
                 "sample_id": batch["sample_id"][i] if isinstance(batch["sample_id"], list) else batch["sample_id"],
                 "true_product": true_label,
                 "true_class": true_class_name,
@@ -134,7 +138,16 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
                 "correct": pred_class_name == true_class_name,
                 "z": z[i].cpu().numpy(),
                 "batch_label": batch["batch"][i].item(),
-            })
+            }
+            if chemical_store is not None:
+                chem = chemical_store.score(
+                    x_cpu[i],
+                    pred_idx,
+                    tic=tic_cpu[i] if tic_cpu is not None else None,
+                    use_tic_pca=chemical_use_tic_pca,
+                )
+                record.update(chem)
+            records.append(record)
     return records
 
 
@@ -309,6 +322,77 @@ def apply_open_score_blend(records, base_weight=0.75, margin_weight=0.25):
         margin = float(r.get("margin_score", 0.0))
         r["open_set_score"] = bw * base + mw * margin
     return bw, mw
+
+
+def apply_chemical_open_score(records, chemical_weight=0.25):
+    """Blend open-set score with chemical evidence, preserving raw score fields."""
+    cw = float(min(max(chemical_weight, 0.0), 1.0))
+    if cw <= 0:
+        return 0.0
+    for r in records:
+        chem = r.get("chemical_score")
+        if chem is None or not np.isfinite(float(chem)):
+            continue
+        raw = float(r.get("open_set_score", r.get("consistency_score", 0.0)))
+        r["open_set_score_before_chemical"] = raw
+        r["open_set_score"] = (1.0 - cw) * raw + cw * float(chem)
+    return cw
+
+
+def chemical_evidence_metrics(records):
+    """Summarize chemical evidence separation for correct/wrong predictions."""
+    vals = [
+        float(r["chemical_score"])
+        for r in records
+        if r.get("chemical_score") is not None and np.isfinite(float(r["chemical_score"]))
+    ]
+    if not vals:
+        return {}
+
+    correct = np.array([bool(r.get("correct", False)) for r in records
+                        if r.get("chemical_score") is not None and np.isfinite(float(r["chemical_score"]))])
+    scores = np.array(vals, dtype=np.float64)
+    out = {
+        "chemical_score_mean": float(scores.mean()),
+        "chemical_score_std": float(scores.std()),
+    }
+    if len(np.unique(correct)) > 1:
+        out["chemical_AUROC_correct"] = float(roc_auc_score(correct.astype(int), scores))
+        out["chemical_score_correct_mean"] = float(scores[correct].mean())
+        out["chemical_score_wrong_mean"] = float(scores[~correct].mean())
+    return out
+
+
+def chemical_open_set_metrics(known_records, unknown_records):
+    """Summarize chemical evidence for known-vs-unknown separation."""
+    known = np.array([
+        float(r["chemical_score"])
+        for r in known_records
+        if r.get("chemical_score") is not None and np.isfinite(float(r["chemical_score"]))
+    ], dtype=np.float64)
+    unknown = np.array([
+        float(r["chemical_score"])
+        for r in unknown_records
+        if r.get("chemical_score") is not None and np.isfinite(float(r["chemical_score"]))
+    ], dtype=np.float64)
+    if known.size == 0 or unknown.size == 0:
+        return {}
+
+    labels = np.concatenate([
+        np.ones(known.size, dtype=np.int64),
+        np.zeros(unknown.size, dtype=np.int64),
+    ])
+    scores = np.concatenate([known, unknown])
+    out = {
+        "known_chemical_mean": float(known.mean()),
+        "unknown_chemical_mean": float(unknown.mean()),
+    }
+    if len(np.unique(labels)) > 1:
+        out["chemical_open_set_AUROC"] = float(roc_auc_score(labels, scores))
+        fpr, tpr, _thresholds = roc_curve(labels, scores)
+        idx_95 = np.searchsorted(tpr, 0.95)
+        out["chemical_FPR_at_95TPR"] = float(fpr[min(idx_95, len(fpr) - 1)])
+    return out
 
 
 def open_set_score_blend_diagnostics(known_records, unknown_records):
@@ -1001,18 +1085,23 @@ def plot_score_distribution(records, save_path):
 # ═══════════════════════════════════════════════════════════
 
 def evaluate_setting_a(model, loader_train_noaug, loader_val, proto_store,
-                       device, cfg, fold_name=""):
+                       device, cfg, fold_name="", chemical_store=None):
     """Setting A: 闭集跨批次 — 在已知类上评估。"""
     train_records = collect_predictions(
         model, loader_train_noaug, proto_store, device,
-        reject_factor=cfg.reject_threshold_factor)
+        reject_factor=cfg.reject_threshold_factor,
+        chemical_store=chemical_store,
+        chemical_use_tic_pca=getattr(cfg, "chemical_evidence_use_tic_pca", False))
     val_records = collect_predictions(
         model, loader_val, proto_store, device,
-        reject_factor=cfg.reject_threshold_factor)
+        reject_factor=cfg.reject_threshold_factor,
+        chemical_store=chemical_store,
+        chemical_use_tic_pca=getattr(cfg, "chemical_evidence_use_tic_pca", False))
 
     pid = product_identification_metrics(val_records, train_records)
     con = consistency_scoring_metrics(val_records)
     rob = batch_robustness_metrics(val_records)
+    chem = chemical_evidence_metrics(val_records)
 
     print(f"\n── Setting A [{fold_name}] ──")
     print(f"  Accuracy:       {pid['accuracy']:.4f}")
@@ -1020,6 +1109,8 @@ def evaluate_setting_a(model, loader_train_noaug, loader_val, proto_store,
     if "cross_batch_gap" in pid:
         print(f"  Cross-batch Δ:  {pid['cross_batch_gap']:.4f}")
     print(f"  Score AUROC:    {con['AUROC_correct']:.4f}")
+    if chem.get("chemical_AUROC_correct") is not None:
+        print(f"  Chem AUROC:     {chem['chemical_AUROC_correct']:.4f}")
     print(f"  Cohen's d:      {con['cohens_d']:.4f}")
     print(f"  Sil(product):   {rob['silhouette_product']:.4f}")
     print(f"  Sil(batch):     {rob['silhouette_batch']:.4f}")
@@ -1028,6 +1119,7 @@ def evaluate_setting_a(model, loader_train_noaug, loader_val, proto_store,
     return {
         "product_identification": pid,
         "consistency_scoring": con,
+        "chemical_evidence": chem,
         "batch_robustness": rob,
         "records": val_records,
     }
@@ -1035,7 +1127,7 @@ def evaluate_setting_a(model, loader_train_noaug, loader_val, proto_store,
 
 def evaluate_stress_batches(model, loader_train_noaug, make_loader, split,
                             metadata_csv, product_col, proto_store,
-                            device, cfg):
+                            device, cfg, chemical_store=None):
     """Evaluate known products on configured stress batches outside model selection."""
     import pandas as pd
 
@@ -1068,7 +1160,8 @@ def evaluate_stress_batches(model, loader_train_noaug, make_loader, split,
         _ds_stress, loader_stress = make_loader(idx)
         result = evaluate_setting_a(
             model, loader_train_noaug, loader_stress, proto_store,
-            device, cfg, f"stress batch {batch_name}")
+            device, cfg, f"stress batch {batch_name}",
+            chemical_store=chemical_store)
         result["batch_name"] = batch_name
         result["n_samples"] = len(idx)
         results[batch_name] = result
@@ -1076,14 +1169,18 @@ def evaluate_stress_batches(model, loader_train_noaug, make_loader, split,
 
 
 def evaluate_setting_b(model, proto_store, loader_known, loader_unknown,
-                       device, cfg, fold_name=""):
+                       device, cfg, fold_name="", chemical_store=None):
     """Setting B: 开放集 — 已知类 vs 未知类判别。"""
     known_records = collect_predictions(
         model, loader_known, proto_store, device,
-        reject_factor=cfg.reject_threshold_factor)
+        reject_factor=cfg.reject_threshold_factor,
+        chemical_store=chemical_store,
+        chemical_use_tic_pca=getattr(cfg, "chemical_evidence_use_tic_pca", False))
     unknown_records = collect_predictions(
         model, loader_unknown, proto_store, device,
-        reject_factor=cfg.reject_threshold_factor)
+        reject_factor=cfg.reject_threshold_factor,
+        chemical_store=chemical_store,
+        chemical_use_tic_pca=getattr(cfg, "chemical_evidence_use_tic_pca", False))
 
     base_weight, margin_weight = apply_open_score_blend(
         known_records,
@@ -1095,16 +1192,32 @@ def evaluate_setting_b(model, proto_store, loader_known, loader_unknown,
         base_weight=base_weight,
         margin_weight=margin_weight,
     )
+    chemical_weight = 0.0
+    if bool(getattr(cfg, "chemical_evidence_enabled", True)):
+        chemical_weight = apply_chemical_open_score(
+            known_records,
+            chemical_weight=getattr(cfg, "chemical_evidence_open_weight", 0.25),
+        )
+        apply_chemical_open_score(
+            unknown_records,
+            chemical_weight=chemical_weight,
+        )
 
     osm = open_set_metrics(known_records, unknown_records)
     blend_diag = open_set_score_blend_diagnostics(known_records, unknown_records)
+    chem_osm = chemical_open_set_metrics(known_records, unknown_records)
 
     print(f"\n── Setting B [{fold_name}] ──")
     print(f"  Score blend:     base={base_weight:.2f}, margin={margin_weight:.2f}")
+    if chemical_weight > 0:
+        print(f"  Chemical blend:  weight={chemical_weight:.2f}")
     print(f"  Open-set AUROC:  {osm['open_set_AUROC']:.4f}")
     print(f"  FPR@95TPR:       {osm['FPR_at_95TPR']:.4f}")
     print(f"  Known mean:      {osm['known_score_mean']:.4f}")
     print(f"  Unknown mean:    {osm['unknown_score_mean']:.4f}")
+    if chem_osm.get("chemical_open_set_AUROC") is not None:
+        print(f"  Chem AUROC:      {chem_osm['chemical_open_set_AUROC']:.4f}")
+        print(f"  Chem FPR@95TPR:  {chem_osm['chemical_FPR_at_95TPR']:.4f}")
     if blend_diag.get("best"):
         best = blend_diag["best"]
         print(
@@ -1114,7 +1227,14 @@ def evaluate_setting_b(model, proto_store, loader_known, loader_unknown,
             f"FPR95={best['FPR_at_95TPR']:.4f}"
         )
 
-    return {"open_set": osm, "score_blend_diagnostics": blend_diag}
+    return {
+        "open_set": osm,
+        "chemical_evidence": chem_osm,
+        "score_blend_diagnostics": blend_diag,
+        "chemical_weight": float(chemical_weight),
+        "known_records": known_records,
+        "unknown_records": unknown_records,
+    }
 
 
 def evaluate_setting_c(model, unknown_dataset, unknown_idx_splits,
@@ -1326,6 +1446,23 @@ def evaluate_single_model(cfg):
 
     # 训练集 loader (Setting A 计算 cross-batch gap)
     _, loader_train = _make_loader_main(split["train_idx"])
+    chemical_store = None
+    if bool(getattr(cfg, "chemical_evidence_enabled", True)):
+        print("  [ChemicalEvidence] building class-wise tensor/TIC prototypes ...")
+        chemical_store = ChemicalEvidenceStore.from_loader(
+            loader_train,
+            max_samples_per_class=getattr(
+                cfg, "chemical_evidence_max_samples_per_class", 128
+            ),
+            use_tic_pca=getattr(cfg, "chemical_evidence_use_tic_pca", False),
+        )
+        print(
+            "  [ChemicalEvidence] "
+            f"tensor_classes={len(chemical_store.tensor_prototypes)}, "
+            f"tic_classes={len(chemical_store.tic_prototypes)}, "
+            f"open_weight={float(getattr(cfg, 'chemical_evidence_open_weight', 0.25)):.2f}, "
+            f"use_tic_pca={bool(getattr(cfg, 'chemical_evidence_use_tic_pca', False))}"
+        )
 
     print(f"\n{'='*60}")
     print("单模型评估")
@@ -1337,7 +1474,8 @@ def evaluate_single_model(cfg):
             split["test_batch_idx"])
         result_a = evaluate_setting_a(
             model, loader_train, loader_test_batch, proto_store,
-            device, cfg, f"留出批次 {split['holdout_batches']}")
+            device, cfg, f"留出批次 {split['holdout_batches']}",
+            chemical_store=chemical_store)
 
         if result_a.get("records"):
             plot_embedding_tsne(
@@ -1356,7 +1494,8 @@ def evaluate_single_model(cfg):
     # ═══ Stress Test: 指定困难批次，不参与选模，只做诊断 ═══
     stress_results = evaluate_stress_batches(
         model, loader_train, _make_loader_main, split,
-        metadata_csv, product_col, proto_store, device, cfg)
+        metadata_csv, product_col, proto_store, device, cfg,
+        chemical_store=chemical_store)
 
     # ═══ Setting B: 开集检测 ═══
     if split["test_unknown_idx"]:
@@ -1368,7 +1507,8 @@ def evaluate_single_model(cfg):
         ds_unknown, loader_unknown = _make_loader_main(split["test_unknown_idx"])
         result_b = evaluate_setting_b(
             model, proto_store, loader_known, loader_unknown,
-            device, cfg, f"留出产品 {split['holdout_products']}")
+            device, cfg, f"留出产品 {split['holdout_products']}",
+            chemical_store=chemical_store)
     else:
         result_b = None
         print("\n── Setting B: 无留出产品测试数据 ──")
@@ -1425,6 +1565,7 @@ def _print_single_summary(result_a, result_b, result_c, cfg,
     if result_a:
         pid = result_a["product_identification"]
         con = result_a["consistency_scoring"]
+        chem = result_a.get("chemical_evidence", {})
         rob = result_a["batch_robustness"]
         print("\nSetting A (批次一致性 — 已知产品 × 留出批次):")
         print(f"  Accuracy:          {pid['accuracy']:.4f}")
@@ -1432,6 +1573,8 @@ def _print_single_summary(result_a, result_b, result_c, cfg,
         if "cross_batch_gap" in pid:
             print(f"  Cross-batch Δ:     {pid['cross_batch_gap']:.4f}")
         print(f"  Score AUROC:       {con['AUROC_correct']:.4f}")
+        if chem.get("chemical_AUROC_correct") is not None:
+            print(f"  Chem AUROC:        {chem['chemical_AUROC_correct']:.4f}")
         print(f"  Cohen's d:         {con['cohens_d']:.4f}")
         print(f"  Sil(product):      {rob['silhouette_product']:.4f}")
         print(f"  Sil(batch):        {rob['silhouette_batch']:.4f}")
@@ -1439,11 +1582,15 @@ def _print_single_summary(result_a, result_b, result_c, cfg,
 
     if result_b:
         osm = result_b["open_set"]
+        chem = result_b.get("chemical_evidence", {})
         print("\nSetting B (开集检测 — 已知类 vs 留出产品类):")
         print(f"  Open-set AUROC:    {osm['open_set_AUROC']:.4f}")
         print(f"  FPR@95TPR:         {osm['FPR_at_95TPR']:.4f}")
         print(f"  Known score mean:  {osm['known_score_mean']:.4f}")
         print(f"  Unknown score mean:{osm['unknown_score_mean']:.4f}")
+        if chem.get("chemical_open_set_AUROC") is not None:
+            print(f"  Chem AUROC:        {chem['chemical_open_set_AUROC']:.4f}")
+            print(f"  Chem FPR@95TPR:    {chem['chemical_FPR_at_95TPR']:.4f}")
 
     if result_c:
         print("\nSetting C (少样本 — 留出产品类 N-shot 注册):")
@@ -1543,6 +1690,9 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
         summary["setting_a_consistency"] = {
             k: _s(v) for k, v in result_a["consistency_scoring"].items()
         }
+        summary["setting_a_chemical_evidence"] = {
+            k: _s(v) for k, v in result_a.get("chemical_evidence", {}).items()
+        }
         summary["setting_a_robustness"] = {
             k: _s(v) for k, v in result_a["batch_robustness"].items()
         }
@@ -1554,6 +1704,12 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
         summary["setting_b"] = {
             k: _s(v) for k, v in result_b["open_set"].items()
         }
+        summary["setting_b_chemical_evidence"] = {
+            k: _s(v) for k, v in result_b.get("chemical_evidence", {}).items()
+        }
+        summary["setting_b_chemical_weight"] = float(
+            result_b.get("chemical_weight", 0.0)
+        )
         if result_b.get("score_blend_diagnostics"):
             summary["setting_b_score_blend_diagnostics"] = _s_recursive(
                 result_b["score_blend_diagnostics"]
@@ -1576,6 +1732,9 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
                 },
                 "consistency_scoring": {
                     k: _s(v) for k, v in result["consistency_scoring"].items()
+                },
+                "chemical_evidence": {
+                    k: _s(v) for k, v in result.get("chemical_evidence", {}).items()
                 },
                 "batch_robustness": {
                     k: _s(v) for k, v in result["batch_robustness"].items()
@@ -1657,6 +1816,13 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
         "warmup_epochs": int(getattr(cfg, "tic_warmup_epochs", 0)) if cfg else 0,
         "residual_dropout": float(getattr(cfg, "tic_residual_dropout", 0.0)) if cfg else 0.0,
         "aux_cls_enabled": bool(getattr(cfg, "tic_aux_cls_enabled", True)) if cfg else True,
+    }
+
+    summary["chemical_evidence"] = {
+        "enabled": bool(getattr(cfg, "chemical_evidence_enabled", True)) if cfg else True,
+        "open_weight": float(getattr(cfg, "chemical_evidence_open_weight", 0.25)) if cfg else 0.25,
+        "max_samples_per_class": int(getattr(cfg, "chemical_evidence_max_samples_per_class", 128)) if cfg else 128,
+        "use_tic_pca": bool(getattr(cfg, "chemical_evidence_use_tic_pca", False)) if cfg else False,
     }
 
     with open(out_dir / "evaluation_summary.json", "w") as f:

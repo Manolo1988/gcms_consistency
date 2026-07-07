@@ -340,6 +340,14 @@ def main():
                         help="开集分数 base score 权重")
     parser.add_argument("--open_score_margin_weight", type=float, default=None,
                         help="开集分数 margin score 权重")
+    parser.add_argument("--disable_chemical_evidence", action="store_true",
+                        help="评估时禁用 raw GC-MS 化学证据校准")
+    parser.add_argument("--chemical_evidence_open_weight", type=float, default=None,
+                        help="开集分数中 raw GC-MS 化学证据融合权重")
+    parser.add_argument("--chemical_evidence_max_samples_per_class", type=int, default=None,
+                        help="每类用于构建化学证据原型的最大训练样本数")
+    parser.add_argument("--chemical_evidence_use_tic_pca", action="store_true",
+                        help="化学证据额外使用 TIC-PCA 特征；默认只使用 raw GC-MS tensor 派生证据")
     parser.add_argument("--eval_interval", type=int, default=None,
                         help="验证间隔 epoch")
     parser.add_argument("--stress_test_batches", type=str, default=None,
@@ -413,10 +421,16 @@ def main():
         "lambda_tic_residual", "lambda_tic_anchor",
         "hard_pair_margin",
         "open_score_base_weight", "open_score_margin_weight",
+        "chemical_evidence_open_weight",
+        "chemical_evidence_max_samples_per_class",
     ):
         value = getattr(args, name)
         if value is not None:
             setattr(cfg, name, value)
+    if args.disable_chemical_evidence:
+        cfg.chemical_evidence_enabled = False
+    if args.chemical_evidence_use_tic_pca:
+        cfg.chemical_evidence_use_tic_pca = True
     if args.eval_interval is not None:
         cfg.eval_interval = int(args.eval_interval)
         cfg.eval_interval_search = int(args.eval_interval)

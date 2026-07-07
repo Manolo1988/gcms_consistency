@@ -224,6 +224,12 @@ class Config:
     open_score_calibration_holdout_products: int = 1  # 留出伪未知类数量
     open_score_calibration_seed: int = 42
 
+    # ── Chemical Evidence Calibration ───────────────────
+    chemical_evidence_enabled: bool = True
+    chemical_evidence_open_weight: float = 0.25
+    chemical_evidence_max_samples_per_class: int = 128
+    chemical_evidence_use_tic_pca: bool = False
+
     # ── TIC Auxiliary Branch ────────────────────────────
     tic_branch_enabled: bool = False          # 启用 TIC 辅助分支
     tic_source: str = "from_tensor"           # from_tensor / raw_file
