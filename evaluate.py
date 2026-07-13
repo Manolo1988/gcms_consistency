@@ -21,6 +21,7 @@ import json
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import pandas as pd
 
 from register import PrototypeStore, register_from_loader
 
@@ -1387,6 +1388,90 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
             return [_s_recursive(v) for v in obj]
         return _s(obj)
 
+    def _export_setting_a_records(records):
+        """Write per-sample Setting A predictions for downstream error audits."""
+        if not records:
+            return {}
+
+        rows = []
+        for record in records:
+            row = {}
+            for key, value in record.items():
+                if key == "z" or isinstance(value, np.ndarray):
+                    continue
+                row[key] = _s(value)
+            rows.append(row)
+
+        pred_df = pd.DataFrame(rows)
+        if pred_df.empty:
+            return {}
+
+        pred_path = out_dir / "setting_a_predictions.csv"
+        pred_df.to_csv(pred_path, index=False)
+
+        if "correct" in pred_df.columns:
+            err_df = pred_df[pred_df["correct"] == False].copy()
+        elif {"true_class", "pred_class"}.issubset(pred_df.columns):
+            err_df = pred_df[
+                pred_df["true_class"].astype(str) != pred_df["pred_class"].astype(str)
+            ].copy()
+        else:
+            err_df = pd.DataFrame()
+
+        err_path = out_dir / "setting_a_errors.csv"
+        err_df.to_csv(err_path, index=False)
+
+        files = {
+            "predictions": pred_path.name,
+            "errors": err_path.name,
+        }
+        summary_export = {
+            "n_samples": int(len(pred_df)),
+            "n_errors": int(len(err_df)),
+            "error_rate": float(len(err_df) / max(len(pred_df), 1)),
+            "files": files,
+        }
+
+        if {"true_class", "pred_class"}.issubset(pred_df.columns):
+            labels = sorted(
+                set(pred_df["true_class"].astype(str))
+                | set(pred_df["pred_class"].astype(str))
+            )
+            conf = confusion_matrix(
+                pred_df["true_class"].astype(str),
+                pred_df["pred_class"].astype(str),
+                labels=labels,
+            )
+            conf_path = out_dir / "setting_a_confusion_matrix.csv"
+            pd.DataFrame(conf, index=labels, columns=labels).to_csv(conf_path)
+            files["confusion_matrix"] = conf_path.name
+
+            per_class = []
+            for cls_name, group in pred_df.groupby("true_class", sort=True):
+                n = int(len(group))
+                if "correct" in group.columns:
+                    n_correct = int(group["correct"].sum())
+                else:
+                    n_correct = int(
+                        (
+                            group["true_class"].astype(str)
+                            == group["pred_class"].astype(str)
+                        ).sum()
+                    )
+                per_class.append({
+                    "class": str(cls_name),
+                    "n": n,
+                    "correct": n_correct,
+                    "wrong": n - n_correct,
+                    "accuracy": float(n_correct / max(n, 1)),
+                })
+            summary_export["per_class"] = sorted(
+                per_class,
+                key=lambda x: (x["accuracy"], -x["n"], x["class"]),
+            )
+
+        return summary_export
+
     summary = {
         "split": {
             "known_products": split["known_products"],
@@ -1408,6 +1493,9 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
         summary["setting_a_robustness"] = {
             k: _s(v) for k, v in result_a["batch_robustness"].items()
         }
+        summary["setting_a_prediction_exports"] = _s_recursive(
+            _export_setting_a_records(result_a.get("records", []))
+        )
 
     if result_b:
         summary["setting_b"] = {
