@@ -1,0 +1,19 @@
+{
+  // 仅当前工作区生效的 Claude Code 环境，不会影响全局
+  "claudeCode.environmentVariables": [
+    {
+      "name": "ANTHROPIC_BASE_URL",
+      "value": "https://api.deepseek.com/anthropic"
+    },
+    {
+      "name": "ANTHROPIC_AUTH_TOKEN",
+      "value": "sk-be936122daf841d7bb0d1186e77643d0"
+    },
+    {
+      "name": "ANTHROPIC_MODEL",
+      "value": "deepseek-v4-pro[1m]"
+    }
+  ],
+  // 关闭自动读取全局用户配置，防止被别人覆盖
+  "workbench.settings.useSplitJSON": true
+}

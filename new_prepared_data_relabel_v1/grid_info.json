@@ -1,0 +1,44 @@
+{
+  "rt_bins": 1024,
+  "mz_bins": 239,
+  "rt_range": [
+    0.0,
+    40.0
+  ],
+  "mz_range": [
+    0.0,
+    550.0
+  ],
+  "success": 2867,
+  "fail": 1,
+  "prepare_mode": "raw_rt_mz_direct_pca_train_only",
+  "input_pca_fit_source": "training_samples_only",
+  "input_pca_precomputed": true,
+  "input_pca_applied": true,
+  "input_pca_reason": "partial_failed",
+  "input_pca_components": 239,
+  "input_pca_rt_bins": 1024,
+  "input_pca_ref_mz_axis_len": 240,
+  "input_pca_ref_mz_min": 30.0,
+  "input_pca_ref_mz_max": 340.0,
+  "preferred_holdout_products": [
+    "HMD",
+    "XCJ"
+  ],
+  "preferred_holdout_batches": [
+    "20250905",
+    "20250912",
+    "20250920"
+  ],
+  "seed": 42,
+  "tic_pca_enabled": true,
+  "tic_pca_applied": true,
+  "tic_pca_reason": "ok",
+  "tic_pca_components": 64,
+  "tic_pca_fit_scope": "train_only",
+  "tic_pca_dir": "/home/ubuntu/sunlong/gcms_consistency_old/new_prepared_data/tic_pca",
+  "tic_pca_model_path": "/home/ubuntu/sunlong/gcms_consistency_old/new_prepared_data/cache/tic_pca/tic_pca_model.pkl",
+  "tic_pca_converted": 2867,
+  "tic_pca_failed": 1,
+  "tic_vector_length": 1024
+}
