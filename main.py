@@ -368,6 +368,8 @@ def main():
                         help="权重衰减")
     parser.add_argument("--lambda_adv", type=float, default=None,
                         help="批次对抗损失权重")
+    parser.add_argument("--lambda_supcon",type=float,default=None,
+                        help="监督对比损失权重")
     parser.add_argument("--lambda_proto", type=float, default=None,
                         help="原型紧凑损失权重")
     parser.add_argument("--lambda_recon", type=float, default=None,
@@ -543,7 +545,7 @@ def main():
         cfg.prepared_dir = str(Path(args.prepared_dir))
     for name in (
         "seed", "epochs", "batch_size", "lr", "weight_decay",
-        "lambda_adv", "lambda_proto", "lambda_recon", "lambda_cls",
+        "lambda_supcon", "lambda_adv", "lambda_proto", "lambda_recon", "lambda_cls",
         "lambda_hard_pair", "hard_pair_margin",
         "supcon_temperature", "feature_dim", "proj_dim",
         "accept_percentile", "reject_threshold_factor",

@@ -290,6 +290,10 @@ def collect_runs() -> list[dict[str, Any]]:
             continue
         run_config = read_json(run_config_path) or {}
         cfg = run_config.get("config", {})
+        # 兼容扁平结构：如果嵌套 config 为空且顶层有 feature_dim，直接读顶层
+        if not cfg and "feature_dim" in run_config:
+            _meta_keys = {"timestamp", "command", "args"}
+            cfg = {k: v for k, v in run_config.items() if k not in _meta_keys}
         metrics = extract_metrics(summary)
         rows.append(
             {

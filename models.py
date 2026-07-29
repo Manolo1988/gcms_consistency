@@ -580,6 +580,14 @@ class GCMSConsistencyNet(nn.Module):
                 dropout=cfg.dropout,
                 blocks_per_stage=cfg.blocks_per_stage,
             )
+        elif backbone == "plain_cnn":
+            from baselines import PlainEncoder
+            self.encoder = PlainEncoder(
+                in_channels=cfg.in_channels,
+                channels=cfg.encoder_channels,
+                dropout=cfg.dropout,
+                blocks_per_stage=cfg.blocks_per_stage,
+            )
         elif backbone in {"transformer", "vit", "gcms_transformer"}:
             self.encoder = GCMSTransformerEncoder(
                 in_channels=cfg.in_channels,

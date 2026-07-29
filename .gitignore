@@ -241,3 +241,6 @@ output_new/
 
 # 日志
 *.log
+
+# 笔记
+knowledge/

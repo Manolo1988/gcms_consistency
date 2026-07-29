@@ -82,14 +82,14 @@ class Config:
         Path(__file__).resolve().parent / "new_outputs"
     )
     prepared_dir: str = str(
-        Path(__file__).resolve().parent / "new_prepared_data"
+        Path(__file__).resolve().parent / "new_prepared_data_relabel_v1"
     )
 
     # ── RT × m/z 网格 ────────────────────────────────────
     rt_bins: int = 1024
     mz_bins: int = 256
     rt_range: Optional[tuple] = (0.0, 40.0)
-    mz_range: tuple = (0.0, 200.0)
+    mz_range: tuple = (0.0, 550.0)
     log_transform: bool = True
     rt_range_percentiles: tuple = (1.0, 99.5)
     mz_range_percentiles: tuple = (1.0, 99.0)
@@ -165,11 +165,15 @@ class Config:
     supcon_temperature: float = 0.07          # SupCon 温度参数
     proto_margin: float = 1.5                 # 原型损失推斥间距
     hard_pair_margin: float = 0.40            # 易混对最近异类原型至少远出该距离(增大)
-    focal_gamma: float = 2.0                  # Focal Loss gamma 参数
+    focal_gamma: float = 0.0                  # Focal Loss gamma 参数
     hard_pair_names: Tuple[Tuple[str, str], ...] = (
         ("H88", "H99"),
         ("RJD", "YJD"),
     )
+    # ── 开集感知训练 ───────────────────────────────────────
+    lambda_open_set: float = 0.15             # 开集感知损失权重
+    open_set_ema_decay: float = 0.99          # EMA 原型衰减率
+    open_set_base_weight: float = 0.5         # open_score 中 base 权重
 
     # ── 一致性与原型 ─────────────────────────────────────
     accept_percentile: float = 95.0           # 一致性径阈值百分位
@@ -284,3 +288,4 @@ class Config:
     save_prepare_tables: bool = True
 
     seed: int = 42
+    
