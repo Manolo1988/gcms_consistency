@@ -7,6 +7,7 @@
 """
 import json, time
 import os
+import random
 from pathlib import Path
 import numpy as np
 import torch
@@ -33,11 +34,35 @@ def _progress_enabled():
     return os.environ.get("GCMS_SHOW_PROGRESS", "0") == "1"
 
 
-def set_seed(seed):
+def set_seed(seed, deterministic=False):
+    """Seed every random source used by training and, optionally, CUDA kernels."""
+    seed = int(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.use_deterministic_algorithms(True)
+
+
+def _seed_worker(worker_id):
+    """Seed NumPy/random inside each DataLoader worker for augmented samples."""
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def _make_generator(cfg, salt):
+    if not bool(getattr(cfg, "deterministic", False)):
+        return None
+    generator = torch.Generator()
+    generator.manual_seed(int(getattr(cfg, "seed", 42)) + int(salt))
+    return generator
 
 
 def _resolve_early_stop_controls(cfg, total_epochs, initial_lr):
@@ -144,7 +169,7 @@ def _warmup_guard_stop(val_acc, epoch_num, guard_epoch, cfg):
     return True
 
 
-def _loader_runtime_kwargs(cfg, device):
+def _loader_runtime_kwargs(cfg, device, generator=None):
     workers = max(int(getattr(cfg, "dataloader_workers", 0) or 0), 0)
     pin_memory_cfg = bool(getattr(cfg, "dataloader_pin_memory", True))
     pin_memory = bool(pin_memory_cfg and getattr(device, "type", "cpu") == "cuda")
@@ -153,6 +178,10 @@ def _loader_runtime_kwargs(cfg, device):
         "num_workers": workers,
         "pin_memory": pin_memory,
     }
+    if bool(getattr(cfg, "deterministic", False)):
+        kwargs["worker_init_fn"] = _seed_worker
+        if generator is not None:
+            kwargs["generator"] = generator
     if workers > 0:
         kwargs["persistent_workers"] = bool(
             getattr(cfg, "dataloader_persistent_workers", True)
@@ -165,7 +194,8 @@ def _loader_runtime_kwargs(cfg, device):
 
 def _cuda_amp_enabled(cfg, device):
     return bool(
-        getattr(cfg, "amp_enabled", True)
+        not getattr(cfg, "deterministic", False)
+        and getattr(cfg, "amp_enabled", True)
         and getattr(device, "type", "cpu") == "cuda"
         and torch.cuda.is_available()
     )
@@ -198,6 +228,19 @@ def _move_batch_to_device(batch, device, channels_last=False):
 
 def _enable_cuda_fast_paths(cfg, device):
     if getattr(device, "type", "cpu") != "cuda":
+        return
+    deterministic = bool(getattr(cfg, "deterministic", False))
+    torch.backends.cudnn.benchmark = bool(
+        not deterministic and getattr(cfg, "cuda_benchmark", True)
+    )
+    torch.backends.cudnn.deterministic = deterministic
+    if deterministic:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        try:
+            torch.set_float32_matmul_precision("highest")
+        except Exception:
+            pass
         return
     if bool(getattr(cfg, "cuda_benchmark", True)):
         torch.backends.cudnn.benchmark = True
@@ -317,13 +360,18 @@ def build_loaders(metadata_csv, train_idx, val_idx, cfg, product_col,
         ds.num_batches = len(shared_batch_enc.classes_)
 
     device = torch.device("cpu") if device is None else device
-    loader_kwargs = _loader_runtime_kwargs(cfg, device)
+    train_loader_generator = _make_generator(cfg, 101)
+    val_loader_generator = _make_generator(cfg, 102)
+    sampler_generator = _make_generator(cfg, 103)
+    loader_kwargs = _loader_runtime_kwargs(
+        cfg, device, generator=train_loader_generator
+    )
     loader_train = DataLoader(
         ds_train,
         batch_size=cfg.batch_size,
-        sampler=_build_balanced_sampler(ds_train),
+        sampler=_build_balanced_sampler(ds_train, generator=sampler_generator),
         drop_last=True,
-        **loader_kwargs,
+        **_loader_runtime_kwargs(cfg, device, generator=val_loader_generator),
     )
     loader_val = DataLoader(
         ds_val,
@@ -383,7 +431,7 @@ def _build_input_transform_for_training(cfg, metadata_csv, train_idx):
     return RtAxisPcaTransform(pca_model), pca_model
 
 
-def _build_balanced_sampler(dataset):
+def _build_balanced_sampler(dataset, generator=None):
     """
     SAIM 风格类别均衡采样器。
 
@@ -402,6 +450,7 @@ def _build_balanced_sampler(dataset):
         weights=weights.tolist(),
         num_samples=len(dataset),
         replacement=True,
+        generator=generator,
     )
     return sampler
 
@@ -774,7 +823,7 @@ def train_single_model(cfg: Config):
         return train_single_model_raw_pca(cfg)
 
     from config import get_device
-    set_seed(cfg.seed)
+    set_seed(cfg.seed, deterministic=bool(getattr(cfg, "deterministic", False)))
 
     device = get_device()
     metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
@@ -789,6 +838,8 @@ def train_single_model(cfg: Config):
     print(f"\n{'='*60}")
     print(f"训练单一模型, device = {device}")
     print(f"{'='*60}")
+    if bool(getattr(cfg, "deterministic", False)):
+        print("  Deterministic mode: enabled (AMP/TF32/cuDNN benchmark disabled)")
     print(f"  已知产品: {split['known_products']}")
     print(f"  留出产品: {split['holdout_products']}  (Setting B/C)")
     print(f"  留出批次: {split['holdout_batches']}  (Setting A)")
@@ -1005,7 +1056,7 @@ def train_single_model(cfg: Config):
 def train_all_folds(cfg: Config):
     """Leave-one-batch-out 全部 fold 训练 (保留用于交叉验证)。"""
     from dataset import unified_splits
-    set_seed(cfg.seed)
+    set_seed(cfg.seed, deterministic=bool(getattr(cfg, "deterministic", False)))
     metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
 
     product_col = ("product_fine" if cfg.product_granularity == "fine"

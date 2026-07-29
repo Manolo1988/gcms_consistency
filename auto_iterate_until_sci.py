@@ -278,10 +278,20 @@ def search_score(metrics: dict[str, Any]) -> tuple[float, float, float, float, f
     return (-fpr95, auroc, gap, a_score, shot1)
 
 
+def is_ablation_run(run_dir: Path) -> bool:
+    """Exclude explicitly named ablations while retaining full-model reruns."""
+    return any(
+        "ablation" in part.lower() or part.lower().startswith("stage1_no_")
+        for part in run_dir.relative_to(OUTPUTS_DIR).parts
+    )
+
+
 def collect_runs() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for summary_path in OUTPUTS_DIR.glob("**/evaluation_summary.json"):
         run_dir = summary_path.parent
+        if is_ablation_run(run_dir):
+            continue
         run_config_path = run_dir / "run_config.json"
         if not run_config_path.exists() and run_dir.name == "final_model":
             run_config_path = run_dir.parent / "run_config.json"

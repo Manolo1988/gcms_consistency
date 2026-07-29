@@ -449,6 +449,8 @@ def main():
                         help="关闭 DataLoader pin_memory")
     parser.add_argument("--disable_dataloader_persistent_workers", action="store_true",
                         help="关闭 DataLoader persistent_workers")
+    parser.add_argument("--deterministic", action="store_true",
+                        help="启用严格可复现训练：固定 worker/采样/CUDA 随机路径，关闭 AMP/TF32")
     parser.add_argument("--main_backbone", type=str, default=None,
                         help="主干模型: gcms/transformer/resnet18/resnet50/wide_resnet50_2")
     parser.add_argument("--main_backbone_model", type=str, default=None,
@@ -596,6 +598,8 @@ def main():
         cfg.dataloader_pin_memory = False
     if args.disable_dataloader_persistent_workers:
         cfg.dataloader_persistent_workers = False
+    if args.deterministic:
+        cfg.deterministic = True
     if args.warmup_guard_enabled:
         cfg.warmup_guard_enabled = True
     if args.warmup_guard_compare_best:

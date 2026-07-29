@@ -266,6 +266,7 @@ class Config:
     channels_last: bool = True                 # CUDA 卷积使用 NHWC memory format
     torch_compile: bool = False                # PyTorch 2 compile; 首轮较慢
     cuda_benchmark: bool = True                # 固定输入尺寸下启用 cuDNN benchmark
+    deterministic: bool = False                # 正式复现/消融时启用严格确定性路径
 
     # ── 产品标签粒度 ─────────────────────────────────────
     product_granularity: str = "fine"
