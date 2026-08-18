@@ -6,6 +6,7 @@
   5. 可解释性: Grad-CAM (定性)
 """
 import os
+import copy
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -965,8 +966,81 @@ def evaluate_stress_batches(model, loader_train_noaug, make_loader, split,
     return results
 
 
+def _apply_calibrator_to_records(records, calibrator):
+    calibrated = _copy_records(records)
+    for record in calibrated:
+        record["open_set_score"] = float(calibrator.apply({
+            "base_score": record["base_score"],
+            "margin_score": record["margin_score"],
+            "min_dist": record["min_dist"],
+            "radius_norm": record["radius_norm"],
+            "second_dist": record["second_dist"],
+            "second_margin": max(record["second_dist"] - record["min_dist"], 0.0),
+        }))
+    return calibrated
+
+
+def fit_pseudo_unknown_calibrator(model, proto_store, make_loader, dev_indices,
+                                  device, cfg):
+    """Fit calibration on leave-one-known-product-out development data only."""
+    from open_score_calibration import OpenScoreCalibrator, evaluate_calibration
+
+    requested = [x.strip() for x in str(
+        getattr(cfg, "open_score_calibration_products", "")
+    ).split(",") if x.strip()]
+    products = [p for p in requested if p in proto_store.class_names]
+    if not products:
+        raise ValueError("No configured pseudo-unknown products exist in the prototype store")
+    features = [x.strip() for x in str(getattr(
+        cfg, "open_score_features", "base_score,margin_score"
+    )).split(",") if x.strip()]
+    calibrator = OpenScoreCalibrator(
+        mode=getattr(cfg, "open_score_calibration_mode", "logistic"),
+        features=features,
+        seed=int(getattr(cfg, "open_score_calibration_seed", 42)),
+    )
+    _ds, dev_loader = make_loader(dev_indices)
+    all_known, all_unknown, used = [], [], []
+    for product in products:
+        pseudo_store = copy.deepcopy(proto_store)
+        pseudo_store.class_names.remove(product)
+        for mapping in (pseudo_store.prototypes, pseudo_store.radii,
+                        pseudo_store.spherical_prototypes, pseudo_store.spherical_radii):
+            mapping.pop(product, None)
+        records = collect_predictions(model, dev_loader, pseudo_store, device,
+                                      reject_factor=cfg.reject_threshold_factor)
+        unknown = [r for r in records if r["true_class"] == product]
+        known = [r for r in records if r["true_class"] != product]
+        if len(known) < 5 or len(unknown) < 5:
+            continue
+        all_known.extend(known)
+        all_unknown.extend(unknown)
+        used.append({"product": product, "n_known": len(known),
+                     "n_pseudo_unknown": len(unknown)})
+    if not used:
+        raise ValueError("Pseudo-unknown calibration has insufficient development samples")
+
+    def feature_dict(records):
+        return {name: np.asarray([
+            max(r["second_dist"] - r["min_dist"], 0.0) if name == "second_margin"
+            else r.get(name, 0.0) for r in records
+        ], dtype=np.float64) for name in features}
+
+    calibrator.fit([feature_dict(all_known)], [feature_dict(all_unknown)])
+    raw_metrics = evaluate_calibration(
+        [r["open_set_score"] for r in all_known], [r["open_set_score"] for r in all_unknown])
+    calibrated_metrics = evaluate_calibration(
+        [r["open_set_score"] for r in _apply_calibrator_to_records(all_known, calibrator)],
+        [r["open_set_score"] for r in _apply_calibrator_to_records(all_unknown, calibrator)])
+    print("  [Calibration] pseudo-unknown products:", ", ".join(x["product"] for x in used))
+    print(f"  [Calibration] development raw AUROC={raw_metrics['AUROC']:.4f}, FPR95={raw_metrics['FPR_at_95TPR']:.4f}")
+    print(f"  [Calibration] development calibrated AUROC={calibrated_metrics['AUROC']:.4f}, FPR95={calibrated_metrics['FPR_at_95TPR']:.4f}")
+    return calibrator, {"protocol": "leave-one-known-product-out", "products": used,
+                        "development_raw": raw_metrics, "development_calibrated": calibrated_metrics}
+
+
 def evaluate_setting_b(model, proto_store, loader_known, loader_unknown,
-                       device, cfg, fold_name=""):
+                       device, cfg, fold_name="", calibrator=None):
     """Setting B: 开放集 — 已知类 vs 未知类判别。"""
     known_records = collect_predictions(
         model, loader_known, proto_store, device,
@@ -981,7 +1055,7 @@ def evaluate_setting_b(model, proto_store, loader_known, loader_unknown,
     )
     configured_base = float(getattr(cfg, "open_score_base_weight", 0.75))
     configured_margin = float(getattr(cfg, "open_score_margin_weight", 0.25))
-    if bool(getattr(cfg, "open_score_auto_blend", False)) and blend_diag.get("best"):
+    if calibrator is None and bool(getattr(cfg, "open_score_auto_blend", False)) and blend_diag.get("best"):
         best = blend_diag["best"]
         configured_base = float(best["base_weight"])
         configured_margin = float(best["margin_weight"])
@@ -998,6 +1072,9 @@ def evaluate_setting_b(model, proto_store, loader_known, loader_unknown,
         base_weight=base_weight,
         margin_weight=margin_weight,
     )
+    if calibrator is not None and bool(getattr(cfg, "open_score_calibration_apply", True)):
+        known_eval_records = _apply_calibrator_to_records(known_eval_records, calibrator)
+        unknown_eval_records = _apply_calibrator_to_records(unknown_eval_records, calibrator)
 
     osm = open_set_metrics(known_eval_records, unknown_eval_records)
 
@@ -1022,7 +1099,8 @@ def evaluate_setting_b(model, proto_store, loader_known, loader_unknown,
         "score_blend_used": {
             "base_weight": float(base_weight),
             "margin_weight": float(margin_weight),
-            "auto": bool(getattr(cfg, "open_score_auto_blend", False)),
+            "auto": bool(calibrator is None and getattr(cfg, "open_score_auto_blend", False)),
+            "calibrated": bool(calibrator is not None and getattr(cfg, "open_score_calibration_apply", True)),
         },
         "score_blend_diagnostics": blend_diag,
     }
@@ -1230,24 +1308,15 @@ def evaluate_single_model(cfg):
         _, loader_known = _make_loader_main(known_idx)
         ds_unknown, loader_unknown = _make_loader_main(split["test_unknown_idx"])
 
-        # 开集分数校准 (如果启用)
+        # 校准仅使用已知产品的伪未知开发集；最终留出产品不可参与拟合。
         calibrator = None
         cal_metrics = None
         if bool(getattr(cfg, "open_score_calibration_enabled", False)):
             try:
-                from open_score_calibration import (
-                    OpenScoreCalibrator,
-                    calibrate_from_known_unknown,
-                )
                 print("\n── Setting B Calibration ──")
-                calibrator, cal_metrics_uncal, cal_metrics_cal, _, _ = \
-                    calibrate_from_known_unknown(
-                        model, proto_store, loader_known, loader_unknown,
-                        device, cfg)
-                cal_metrics = {
-                    "uncalibrated": cal_metrics_uncal,
-                    "calibrated": cal_metrics_cal,
-                }
+                dev_idx = sorted(set(split["val_idx"]) | set(split["test_batch_idx"]))
+                calibrator, cal_metrics = fit_pseudo_unknown_calibrator(
+                    model, proto_store, _make_loader_main, dev_idx, device, cfg)
                 # Save calibrator
                 cal_dir = out_dir / "final_model" / "calibration"
                 cal_dir.mkdir(parents=True, exist_ok=True)
@@ -1260,7 +1329,7 @@ def evaluate_single_model(cfg):
 
         result_b = evaluate_setting_b(
             model, proto_store, loader_known, loader_unknown,
-            device, cfg, f"留出产品 {split['holdout_products']}")
+            device, cfg, f"留出产品 {split['holdout_products']}", calibrator=calibrator)
         if cal_metrics is not None:
             result_b["calibration"] = cal_metrics
     else:

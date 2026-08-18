@@ -231,6 +231,9 @@ class Config:
     open_score_weights: str = ""              # 保存校准后权重 (JSON string)
     open_score_calibration_holdout_products: int = 1  # 留出伪未知类数量
     open_score_calibration_seed: int = 42
+    # 仅用于开发期校准；最终 Setting B 的 HMD/XCJ 不参与拟合。
+    open_score_calibration_products: str = "H88,H99,RJD,YJD"
+    open_score_calibration_apply: bool = True
 
     # ── TIC Auxiliary Branch ────────────────────────────
     tic_branch_enabled: bool = False          # 启用 TIC 辅助分支

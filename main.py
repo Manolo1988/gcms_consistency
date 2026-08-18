@@ -397,6 +397,10 @@ def main():
                         help="开集分数 margin score 权重")
     parser.add_argument("--no_auto_open_score_blend", action="store_true",
                         help="关闭Setting B自动选择最佳open-score混合")
+    parser.add_argument("--open_score_calibration_products", type=str, default=None,
+                        help="开发期伪未知产品，逗号分隔；不使用最终留出产品")
+    parser.add_argument("--disable_open_score_calibration_apply", action="store_true",
+                        help="仅报告伪未知校准开发结果，不应用到最终 Setting B")
     parser.add_argument("--eval_interval", type=int, default=None,
                         help="验证间隔 epoch")
     parser.add_argument("--eval_interval_search", type=int, default=None,
@@ -560,6 +564,7 @@ def main():
         "supcon_temperature", "feature_dim", "proj_dim",
         "accept_percentile", "reject_threshold_factor",
         "open_score_base_weight", "open_score_margin_weight",
+        "open_score_calibration_products",
         "eval_interval_search", "eval_interval_final", "eval_final_start_ratio",
         "early_stop_patience", "min_epochs_before_early_stop",
         "min_epoch_ratio_before_early_stop", "early_stop_min_lr_ratio",
@@ -602,6 +607,8 @@ def main():
         cfg.auto_create_split_on_train = False
     if args.no_auto_open_score_blend:
         cfg.open_score_auto_blend = False
+    if args.disable_open_score_calibration_apply:
+        cfg.open_score_calibration_apply = False
     if args.skip_readme_baselines:
         cfg.evaluate_readme_baselines = False
     if args.fewshot_repeats is not None:
