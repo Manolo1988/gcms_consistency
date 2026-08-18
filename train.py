@@ -270,8 +270,8 @@ def _model_state_dict_for_save(model):
     return getattr(model, "_orig_mod", model).state_dict()
 
 
-def _load_model_state(model, state_dict):
-    getattr(model, "_orig_mod", model).load_state_dict(state_dict)
+def _load_model_state(model, state_dict, strict=True):
+    getattr(model, "_orig_mod", model).load_state_dict(state_dict, strict=strict)
 
 
 def _build_proto_subset_loader(dataset, cfg, device):
@@ -429,6 +429,28 @@ def _build_input_transform_for_training(cfg, metadata_csv, train_idx):
     # 解码器重建尺寸需要和变换后的输入宽度保持一致。
     cfg.mz_bins = int(n_comp)
     return RtAxisPcaTransform(pca_model), pca_model
+
+
+def _attach_focal_class_weights(cfg, ds_train):
+    """根据训练集类别分布，用有效样本数加权生成 FocalLoss 的 alpha，
+    并写回 cfg.focal_alpha。少数类权重更大。
+    """
+    if ds_train is None or not hasattr(ds_train, "df"):
+        return
+    labels = ds_train.df["product_label"].to_numpy()
+    if labels.size == 0:
+        return
+    counts = np.bincount(labels, minlength=int(ds_train.num_products))
+    # 有效样本数加权 (Cui et al. 2019), beta 越小越强调少数类
+    beta = float(getattr(cfg, "focal_beta", 0.999))
+    eps = 1e-6
+    en = (1.0 - beta ** counts) / (1.0 - beta)
+    en = np.maximum(en, eps)
+    alpha = en.min() / en            # 少数类权重更大
+    alpha = alpha / alpha.mean()     # 归一化到均值 1，保持损失尺度
+    cfg.focal_alpha = alpha.astype(np.float32)
+    print("  [Focal] class weights (alpha):",
+          np.round(alpha, 3).tolist())
 
 
 def _build_balanced_sampler(dataset, generator=None):
@@ -651,6 +673,7 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
 
     model = GCMSConsistencyNet(num_batches, cfg, num_products=ds_train.num_products).to(device)
     model = _maybe_optimize_model(model, cfg, device)
+    _attach_focal_class_weights(cfg, ds_train)
     criterion = UnifiedLoss(cfg).to(device)
     criterion.set_label_names(ds_train.get_label_name_map())
 
@@ -690,6 +713,12 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
     no_improve_checks = 0
     eval_checks = 0
 
+    # ── SWA: 多 checkpoint 权重平均状态 ──
+    swa_enabled = bool(getattr(cfg, "swa_enabled", False))
+    swa_start = int(getattr(cfg, "swa_start_epoch", 100) or 100)
+    swa_state = None
+    swa_count = 0
+
     for epoch in range(cfg.epochs):
         m_train = train_one_epoch(model, loader_train, criterion, optimizer,
                                   device, epoch, cfg.epochs, cfg=cfg, scaler=scaler)
@@ -704,7 +733,6 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
               f"hardpair={m_train.get('hardpair',0):.3f} "
               f"total={m_train.get('total',0):.3f}")
 
-        # 按配置间隔做原型验证；若启用前N轮淘汰，确保该轮次会触发验证
         epoch_num = epoch + 1
         eval_interval, in_final_stage = _resolve_eval_interval(cfg, epoch_num, cfg.epochs)
         guard_epoch = max(int(getattr(cfg, "warmup_guard_epoch", 10)), 1)
@@ -733,7 +761,27 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
             val_metric = float(val_m["metric"])
             val_auroc = float(val_m["auroc_correct"])
             select_score, select_key = _select_checkpoint_score(val_m, cfg)
-            if select_score > (best_metric + early_stop_ctrl["min_delta"]):
+            # ── SWA: 累加 epoch>=swa_start 的 checkpoint 权重 ──
+            if swa_enabled and epoch_num >= swa_start:
+                cur_sd = _model_state_dict_for_save(model)
+                # 只累加可训练参数, 排除 BN running stats (避免平均后 BN 失效)
+                cur_sd_filt = {k: v for k, v in cur_sd.items()
+                               if not (k.endswith("running_mean")
+                                       or k.endswith("running_var")
+                                       or k.endswith("num_batches_tracked"))}
+                if swa_state is None:
+                    swa_state = {k: v.detach().cpu().float().clone()
+                                 for k, v in cur_sd_filt.items()}
+                    swa_count = 1
+                else:
+                    for k in swa_state:
+                        swa_state[k].add_(cur_sd_filt[k].detach().cpu().float())
+                    swa_count += 1
+            # 方案C: 选模最小 epoch 门槛。只在该 epoch 之后才允许更新 best，
+            # 避免早期验证集噪声 checkpoint (e.g. epoch 20) 被选中。
+            sel_min_epoch = int(getattr(cfg, "model_select_min_epoch", 0) or 0)
+            sel_allowed = (epoch_num >= sel_min_epoch)
+            if sel_allowed and select_score > (best_metric + early_stop_ctrl["min_delta"]):
                 best_metric = select_score
                 best_acc = val_acc
                 best_state = {k: v.cpu().clone()
@@ -785,6 +833,15 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
 
     if best_state is not None:
         _load_model_state(model, best_state)
+
+    # ── SWA: 用平均权重替代单点 best ──
+    if swa_enabled and swa_state is not None and swa_count > 0:
+        for v in swa_state.values():
+            v.div_(swa_count)
+        # 平均权重不含 BN running stats, 用当前 model (最后 checkpoint) 的 BN 值
+        _load_model_state(model, swa_state, strict=False)
+        print(f"  [SWA] 已用 {swa_count} 个 checkpoint (epoch>={swa_start}) "
+              f"做权重平均, 替代单点 best (best_metric={best_metric:.4f})")
 
     # 注册最终原型
     proto_store, all_z, all_labels = register_from_loader(
@@ -874,6 +931,7 @@ def train_single_model(cfg: Config):
 
     model = GCMSConsistencyNet(num_batches, cfg, num_products=ds_train.num_products).to(device)
     model = _maybe_optimize_model(model, cfg, device)
+    _attach_focal_class_weights(cfg, ds_train)
     criterion = UnifiedLoss(cfg).to(device)
     criterion.set_label_names(ds_train.get_label_name_map())
 
@@ -910,6 +968,12 @@ def train_single_model(cfg: Config):
     best_state = None
     no_improve_checks = 0
     eval_checks = 0
+
+    # ── SWA: 多 checkpoint 权重平均状态 ──
+    swa_enabled = bool(getattr(cfg, "swa_enabled", False))
+    swa_start = int(getattr(cfg, "swa_start_epoch", 100) or 100)
+    swa_state = None
+    swa_count = 0
 
     for epoch in range(cfg.epochs):
         m_train = train_one_epoch(model, loader_train, criterion, optimizer,
@@ -953,7 +1017,27 @@ def train_single_model(cfg: Config):
             val_metric = float(val_m["metric"])
             val_auroc = float(val_m["auroc_correct"])
             select_score, select_key = _select_checkpoint_score(val_m, cfg)
-            if select_score > (best_metric + early_stop_ctrl["min_delta"]):
+            # ── SWA: 累加 epoch>=swa_start 的 checkpoint 权重 ──
+            if swa_enabled and epoch_num >= swa_start:
+                cur_sd = _model_state_dict_for_save(model)
+                # 只累加可训练参数, 排除 BN running stats (避免平均后 BN 失效)
+                cur_sd_filt = {k: v for k, v in cur_sd.items()
+                               if not (k.endswith("running_mean")
+                                       or k.endswith("running_var")
+                                       or k.endswith("num_batches_tracked"))}
+                if swa_state is None:
+                    swa_state = {k: v.detach().cpu().float().clone()
+                                 for k, v in cur_sd_filt.items()}
+                    swa_count = 1
+                else:
+                    for k in swa_state:
+                        swa_state[k].add_(cur_sd_filt[k].detach().cpu().float())
+                    swa_count += 1
+            # 方案C: 选模最小 epoch 门槛。只在该 epoch 之后才允许更新 best，
+            # 避免早期验证集噪声 checkpoint (e.g. epoch 20) 被选中。
+            sel_min_epoch = int(getattr(cfg, "model_select_min_epoch", 0) or 0)
+            sel_allowed = (epoch_num >= sel_min_epoch)
+            if sel_allowed and select_score > (best_metric + early_stop_ctrl["min_delta"]):
                 best_metric = select_score
                 best_acc = val_acc
                 best_state = {k: v.cpu().clone()
@@ -1005,6 +1089,15 @@ def train_single_model(cfg: Config):
 
     if best_state is not None:
         _load_model_state(model, best_state)
+
+    # ── SWA: 用平均权重替代单点 best ──
+    if swa_enabled and swa_state is not None and swa_count > 0:
+        for v in swa_state.values():
+            v.div_(swa_count)
+        # 平均权重不含 BN running stats, 用当前 model (最后 checkpoint) 的 BN 值
+        _load_model_state(model, swa_state, strict=False)
+        print(f"  [SWA] 已用 {swa_count} 个 checkpoint (epoch>={swa_start}) "
+              f"做权重平均, 替代单点 best (best_metric={best_metric:.4f})")
 
     # ── 注册最终原型 ──
     proto_store, all_z, all_labels = register_from_loader(

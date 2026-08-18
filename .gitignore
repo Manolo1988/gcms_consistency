@@ -244,3 +244,11 @@ output_new/
 
 # 笔记
 knowledge/
+
+# 实验日志与产物（不进 git，自己管理）
+*.log
+run_*/
+new_outputs/
+new_prepared_data_relabel_v1/
+compare.py
+comparison.log

@@ -25,7 +25,11 @@ class FocalLoss(nn.Module):
         logits: (B, C) — raw logits
         targets: (B,)  — class indices
         """
-        ce_loss = F.cross_entropy(logits, targets, weight=self.alpha, reduction="none")
+        alpha = self.alpha
+        if alpha is not None:
+            # 保证 class weight 与 logits 在同一设备
+            alpha = alpha.to(logits.device)
+        ce_loss = F.cross_entropy(logits, targets, weight=alpha, reduction="none")
         pt = torch.exp(-ce_loss)  # p_t for the correct class
         focal_loss = ((1.0 - pt) ** self.gamma) * ce_loss
 
@@ -266,7 +270,10 @@ class UnifiedLoss(nn.Module):
         self.domain_loss = nn.CrossEntropyLoss()
         # Use Focal Loss for classification to handle class imbalance
         focal_gamma = float(getattr(cfg, "focal_gamma", 2.0))
-        self.cls_loss = FocalLoss(gamma=focal_gamma, alpha=None, reduction="mean")
+        focal_alpha = getattr(cfg, "focal_alpha", None)
+        if focal_alpha is not None and not isinstance(focal_alpha, torch.Tensor):
+            focal_alpha = torch.as_tensor(focal_alpha, dtype=torch.float32)
+        self.cls_loss = FocalLoss(gamma=focal_gamma, alpha=focal_alpha, reduction="mean")
         self.recon_loss = nn.MSELoss()
 
         self.lam_supcon = cfg.lambda_supcon

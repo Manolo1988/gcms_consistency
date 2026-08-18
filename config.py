@@ -215,7 +215,11 @@ class Config:
     auto_create_split_on_train: bool = True
     val_ratio: float = 0.1                    # train_batches 内伪验证批次比例
     split_seed: int = 42                      # 数据划分随机种子
+    model_select_min_epoch: int = 0           # 选模最小 epoch (0=不限制, 只在该 epoch 之后才允许更新 best checkpoint)
 
+    # ── SWA (Stochastic Weight Averaging) ────────────────
+    swa_enabled: bool = False                 # 是否启用 SWA 多 checkpoint 权重平均
+    swa_start_epoch: int = 100                # SWA 平均起始 epoch (>= 该 epoch 的验证点才纳入平均)
     # ── Few-shot 重复抽样 ────────────────────────────────
     fewshot_repeats: int = 1                  # 每个 N-shot 重复抽样次数, 1=不重复
     fewshot_seed_start: int = 42              # 重复抽样起始种子

@@ -1282,6 +1282,44 @@ def evaluate_single_model(cfg):
         result_c = evaluate_setting_c(
             model, ds_unknown_full, fs_splits, unknown_label_names,
             device, cfg, f"留出产品 {split['holdout_products']}")
+
+        # ── Few-shot 重复抽样 (fewshot_repeats>1): 降低少样本评估噪声 ──
+        n_repeats = int(getattr(cfg, "fewshot_repeats", 1) or 1)
+        if n_repeats > 1:
+            acc_sums = {n: 0.0 for n in cfg.n_shot_values}
+            f1_sums = {n: 0.0 for n in cfg.n_shot_values}
+            valid_cnt = {n: 0 for n in cfg.n_shot_values}
+            for rep in range(n_repeats):
+                rep_seed = int(cfg.seed) + 1000 * (rep + 1)
+                rep_splits = few_shot_from_unknown(
+                    unknown_idx, metadata_csv, product_col=product_col,
+                    n_shot_values=cfg.n_shot_values, seed=rep_seed)
+                rep_c = evaluate_setting_c(
+                    model, ds_unknown_full, rep_splits, unknown_label_names,
+                    device, cfg, f"留出产品 {split['holdout_products']} (rep {rep+1}/{n_repeats})")
+                for n_shot in cfg.n_shot_values:
+                    m = rep_c["few_shot"].get(n_shot, {})
+                    a = m.get("accuracy", float("nan"))
+                    f = m.get("macro_f1", float("nan"))
+                    if np.isfinite(a):
+                        acc_sums[n_shot] += a
+                        f1_sums[n_shot] += f
+                        valid_cnt[n_shot] += 1
+            # 用均值覆盖单次结果 (保留单次抽样的 n_ref/n_test 作为参考)
+            for n_shot in cfg.n_shot_values:
+                if valid_cnt[n_shot] > 0:
+                    base_m = result_c["few_shot"].get(n_shot, {})
+                    result_c["few_shot"][n_shot] = {
+                        "accuracy": acc_sums[n_shot] / valid_cnt[n_shot],
+                        "macro_f1": f1_sums[n_shot] / valid_cnt[n_shot],
+                        "n_ref": base_m.get("n_ref", 0),
+                        "n_test": base_m.get("n_test", 0),
+                        "repeats": valid_cnt[n_shot],
+                    }
+            print(
+                f"  [Few-shot] 已用 {n_repeats} 次重复抽样取平均 "
+                f"(不同参考样本 seed), 降低少样本评估噪声"
+            )
     else:
         result_c = None
         print("\n── Setting C: 无留出产品测试数据 ──")

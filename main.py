@@ -408,6 +408,12 @@ def main():
     parser.add_argument("--model_select_metric", type=str, default=None,
                         choices=["metric", "acc", "auroc", "auroc_correct"],
                         help="训练中 best checkpoint 的选择指标")
+    parser.add_argument("--model_select_min_epoch", type=int, default=None,
+                        help="选模最小 epoch (只在该 epoch 之后才允许更新 best checkpoint)")
+    parser.add_argument("--swa_enabled", action="store_true",
+                        help="启用 SWA 多 checkpoint 权重平均 (替代单点 best)")
+    parser.add_argument("--swa_start_epoch", type=int, default=None,
+                        help="SWA 平均起始 epoch (默认 100)")
     parser.add_argument("--early_stop_patience", type=int, default=None,
                         help="早停耐心")
     parser.add_argument("--min_epochs_before_early_stop", type=int, default=None,
@@ -514,6 +520,8 @@ def main():
                         help="训练前不自动刷新 split.json")
     parser.add_argument("--skip_readme_baselines", action="store_true",
                         help="评估时跳过 README baselines")
+    parser.add_argument("--fewshot_repeats", type=int, default=None,
+                        help="每个 N-shot 重复抽样次数 (1=不重复, >1 取平均以降低少样本评估噪声)")
 
     # 数据准备选项
     parser.add_argument("--save_plot", dest="save_prepare_plots",
@@ -577,6 +585,12 @@ def main():
         cfg.eval_interval_final = int(args.eval_interval)
     if args.model_select_metric is not None:
         cfg.model_select_metric = args.model_select_metric
+    if args.model_select_min_epoch is not None:
+        cfg.model_select_min_epoch = int(args.model_select_min_epoch)
+    if args.swa_enabled:
+        cfg.swa_enabled = True
+    if args.swa_start_epoch is not None:
+        cfg.swa_start_epoch = int(args.swa_start_epoch)
     if args.open_score_blend_objective is not None:
         cfg.open_score_blend_objective = args.open_score_blend_objective
     if args.stress_test_batches is not None:
@@ -590,6 +604,8 @@ def main():
         cfg.open_score_auto_blend = False
     if args.skip_readme_baselines:
         cfg.evaluate_readme_baselines = False
+    if args.fewshot_repeats is not None:
+        cfg.fewshot_repeats = int(args.fewshot_repeats)
     if args.enable_input_raw_pca:
         cfg.input_raw_pca_enabled = True
     if args.disable_input_raw_pca:
