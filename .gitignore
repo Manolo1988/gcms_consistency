@@ -252,3 +252,6 @@ new_outputs/
 new_prepared_data_relabel_v1/
 compare.py
 comparison.log
+
+# 本地实验结果（不进 git，自己管理）
+results/
