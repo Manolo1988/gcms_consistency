@@ -137,7 +137,10 @@ class Config:
     eval_interval_search: int = 10         # 搜索阶段验证间隔
     eval_interval_final: int = 10          # 收敛阶段验证间隔
     eval_final_start_ratio: float = 0.7    # 从总训练进度该比例起切到收敛阶段
-    model_select_metric: str = "metric"    # metric / acc / auroc_correct
+    model_select_metric: str = "open_set" # open_set / metric / acc / auroc_correct
+    model_select_pseudo_unknown_products: str = "H88,H99,RJD,YJD"
+    model_select_pseudo_unknown_min_samples: int = 5
+    model_select_pseudo_unknown_max_products: int = 2
     early_stop_patience: int = 0           # 早停耐心(验证次数), 0=关闭
     min_epochs_before_early_stop: int = 0  # 早停前最少训练 epoch, 0=按比例自动计算
     min_epoch_ratio_before_early_stop: float = 0.6  # 早停前最少训练比例

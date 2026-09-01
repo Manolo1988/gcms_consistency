@@ -5,6 +5,7 @@
 
 训练单一模型 (非 LOBO), 数据划分由 prepared_data/split.json 决定。
 """
+import copy
 import json, time
 import os
 import random
@@ -128,6 +129,9 @@ def _select_checkpoint_score(val_m, cfg):
         "val_auroc": "auroc_correct",
         "auroc": "auroc_correct",
         "auroc_correct": "auroc_correct",
+        "open": "open_set",
+        "open_set": "open_set",
+        "open_fpr95": "open_set",
     }
     key = aliases.get(mode, mode)
     if key not in val_m:
@@ -135,8 +139,89 @@ def _select_checkpoint_score(val_m, cfg):
         key = "metric"
     value = float(val_m.get(key, float("nan")))
     if not np.isfinite(value):
+        if key == "open_set" and np.isfinite(val_m.get("metric", np.nan)):
+            print("    -> pseudo-open metric unavailable, fallback to metric")
+            return float(val_m["metric"]), "metric"
         value = -1e9
     return value, key
+
+
+@torch.no_grad()
+def _validate_open_set_proxy(model, val_dataset, val_loader, proto_store,
+                             label_names, device, cfg):
+    """Compute development-only pseudo-unknown metrics."""
+    from evaluate import collect_predictions, few_shot_evaluate, open_set_metrics
+
+    product_col = ("product_fine" if cfg.product_granularity == "fine"
+                   else "product_coarse")
+    products = val_dataset.df[product_col].astype(str).to_numpy()
+    counts = {p: int((products == p).sum()) for p in np.unique(products)}
+    min_samples = max(int(getattr(
+        cfg, "model_select_pseudo_unknown_min_samples", 5) or 5), 3)
+    requested = [x.strip() for x in str(getattr(
+        cfg, "model_select_pseudo_unknown_products", ""
+    )).split(",") if x.strip()]
+    candidates = [p for p in requested if counts.get(p, 0) >= min_samples]
+    if not candidates:
+        candidates = [p for p, n in sorted(counts.items()) if n >= min_samples]
+    candidates = candidates[:max(int(getattr(
+        cfg, "model_select_pseudo_unknown_max_products", 2) or 2), 1)]
+
+    aurocs, fprs, used = [], [], []
+    for product in candidates:
+        if product not in proto_store.class_names:
+            continue
+        pseudo_store = copy.deepcopy(proto_store)
+        pseudo_store.class_names.remove(product)
+        for mapping in (pseudo_store.prototypes, pseudo_store.radii,
+                        pseudo_store.spherical_prototypes,
+                        pseudo_store.spherical_radii):
+            mapping.pop(product, None)
+        records = collect_predictions(
+            model, val_loader, pseudo_store, device,
+            reject_factor=cfg.reject_threshold_factor)
+        unknown = [r for r in records if r["true_class"] == product]
+        known = [r for r in records if r["true_class"] != product]
+        if len(unknown) < min_samples or len(known) < min_samples:
+            continue
+        metrics = open_set_metrics(known, unknown)
+        auroc = float(metrics.get("open_set_AUROC", np.nan))
+        fpr95 = float(metrics.get("FPR_at_95TPR", np.nan))
+        if np.isfinite(auroc) and np.isfinite(fpr95):
+            aurocs.append(auroc)
+            fprs.append(fpr95)
+            used.append(product)
+
+    pseudo_auroc = float(np.mean(aurocs)) if aurocs else float("nan")
+    pseudo_fpr95 = float(np.mean(fprs)) if fprs else float("nan")
+    shot3 = float("nan")
+    eligible = [p for p, n in sorted(counts.items()) if n >= 4]
+    if len(eligible) >= 2:
+        rng = np.random.RandomState(int(getattr(cfg, "seed", 42) or 42) + 3107)
+        ref_idx, test_idx = [], []
+        for product in eligible:
+            local_idx = np.flatnonzero(products == product).tolist()
+            rng.shuffle(local_idx)
+            ref_idx.extend(local_idx[:3])
+            test_idx.extend(local_idx[3:])
+        if ref_idx and test_idx:
+            fewshot_m = few_shot_evaluate(
+                model, val_dataset, ref_idx, test_idx,
+                label_names, device, cfg)
+            shot3 = float(fewshot_m.get("accuracy", np.nan))
+
+    select_score = float("nan")
+    if np.isfinite(pseudo_auroc) and np.isfinite(pseudo_fpr95):
+        select_score = 0.45 * pseudo_auroc + 0.35 * (1.0 - pseudo_fpr95)
+        if np.isfinite(shot3):
+            select_score += 0.20 * shot3
+        else:
+            select_score /= 0.80
+    return {"open_set": select_score,
+            "pseudo_unknown_auroc": pseudo_auroc,
+            "pseudo_unknown_fpr95": pseudo_fpr95,
+            "fewshot_3shot_acc": shot3,
+            "pseudo_unknown_products": used}
 
 
 def _warmup_guard_stop(val_acc, epoch_num, guard_epoch, cfg):
@@ -754,12 +839,18 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
             proto_scope = "full" if use_full_proto else "subset"
             print(f"    -> validating: build {proto_scope} prototypes ...", flush=True)
 
-            val_m, _ = validate_with_prototypes(
+            val_m, val_proto = validate_with_prototypes(
                 model, proto_loader, loader_val,
                 label_names, device, cfg)
             val_acc = float(val_m["acc"])
             val_metric = float(val_m["metric"])
             val_auroc = float(val_m["auroc_correct"])
+            if str(getattr(cfg, "model_select_metric", "metric")).lower() in {
+                "open", "open_set", "open_fpr95"
+            }:
+                val_m.update(_validate_open_set_proxy(
+                    model, ds_val, loader_val, val_proto,
+                    label_names, device, cfg))
             select_score, select_key = _select_checkpoint_score(val_m, cfg)
             # ── SWA: 累加 epoch>=swa_start 的 checkpoint 权重 ──
             if swa_enabled and epoch_num >= swa_start:
@@ -808,6 +899,14 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
                 f"\n       radii:     {radii_str}"
                 f"\n       {confusion}"
             )
+
+            if "pseudo_unknown_auroc" in val_m:
+                print(
+                    f"       pseudo-open: AUROC={val_m['pseudo_unknown_auroc']:.3f}, "
+                    f"FPR95={val_m['pseudo_unknown_fpr95']:.3f}, "
+                    f"3shot={val_m['fewshot_3shot_acc']:.3f}, "
+                    f"products={val_m['pseudo_unknown_products']}"
+                )
 
             # 规则: 前N轮若显著落后于当前最佳方案, 直接淘汰该策略
             if _warmup_guard_stop(val_acc, epoch_num, guard_epoch, cfg):
@@ -1010,12 +1109,18 @@ def train_single_model(cfg: Config):
             proto_scope = "full" if use_full_proto else "subset"
             print(f"    -> validating: build {proto_scope} prototypes ...", flush=True)
 
-            val_m, _ = validate_with_prototypes(
+            val_m, val_proto = validate_with_prototypes(
                 model, proto_loader, loader_val,
                 label_names, device, cfg)
             val_acc = float(val_m["acc"])
             val_metric = float(val_m["metric"])
             val_auroc = float(val_m["auroc_correct"])
+            if str(getattr(cfg, "model_select_metric", "metric")).lower() in {
+                "open", "open_set", "open_fpr95"
+            }:
+                val_m.update(_validate_open_set_proxy(
+                    model, ds_val, loader_val, val_proto,
+                    label_names, device, cfg))
             select_score, select_key = _select_checkpoint_score(val_m, cfg)
             # ── SWA: 累加 epoch>=swa_start 的 checkpoint 权重 ──
             if swa_enabled and epoch_num >= swa_start:
@@ -1064,6 +1169,14 @@ def train_single_model(cfg: Config):
                 f"\n       radii:     {radii_str}"
                 f"\n       {confusion}"
             )
+
+            if "pseudo_unknown_auroc" in val_m:
+                print(
+                    f"       pseudo-open: AUROC={val_m['pseudo_unknown_auroc']:.3f}, "
+                    f"FPR95={val_m['pseudo_unknown_fpr95']:.3f}, "
+                    f"3shot={val_m['fewshot_3shot_acc']:.3f}, "
+                    f"products={val_m['pseudo_unknown_products']}"
+                )
 
             # 规则: 前N轮若显著落后于当前最佳方案, 直接淘汰该策略
             if _warmup_guard_stop(val_acc, epoch_num, guard_epoch, cfg):

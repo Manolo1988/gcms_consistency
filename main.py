@@ -410,7 +410,7 @@ def main():
     parser.add_argument("--eval_final_start_ratio", type=float, default=None,
                         help="切换到后期收敛验证间隔的训练进度比例")
     parser.add_argument("--model_select_metric", type=str, default=None,
-                        choices=["metric", "acc", "auroc", "auroc_correct"],
+                        choices=["open_set", "metric", "acc", "auroc", "auroc_correct"],
                         help="训练中 best checkpoint 的选择指标")
     parser.add_argument("--model_select_min_epoch", type=int, default=None,
                         help="选模最小 epoch (只在该 epoch 之后才允许更新 best checkpoint)")
