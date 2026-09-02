@@ -146,6 +146,26 @@ def _select_checkpoint_score(val_m, cfg):
     return value, key
 
 
+def _save_model_selection_artifacts(model, cfg, epoch_num, val_m,
+                                    select_score, select_key):
+    """Persist validation trajectory artifacts for proxy-ranking diagnostics."""
+    if not bool(getattr(cfg, "model_select_save_checkpoints", False)):
+        return
+    root = Path(cfg.output_dir) / "model_selection_checkpoints"
+    root.mkdir(parents=True, exist_ok=True)
+    state = _model_state_dict_for_save(model)
+    torch.save(state, root / f"epoch_{int(epoch_num):04d}.pt")
+    metrics = {"epoch": int(epoch_num), "select_key": str(select_key),
+               "select_score": float(select_score)}
+    for key, value in val_m.items():
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            metrics[key] = float(value)
+        elif key in {"pseudo_unknown_products"}:
+            metrics[key] = list(value)
+    with open(root / "validation_metrics.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(metrics, ensure_ascii=False, allow_nan=True) + "\\n")
+
+
 @torch.no_grad()
 def _validate_open_set_proxy(model, val_dataset, val_loader, proto_store,
                              label_names, device, cfg):
@@ -852,6 +872,8 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
                     model, ds_val, loader_val, val_proto,
                     label_names, device, cfg))
             select_score, select_key = _select_checkpoint_score(val_m, cfg)
+            _save_model_selection_artifacts(
+                model, cfg, epoch_num, val_m, select_score, select_key)
             # ── SWA: 累加 epoch>=swa_start 的 checkpoint 权重 ──
             if swa_enabled and epoch_num >= swa_start:
                 cur_sd = _model_state_dict_for_save(model)
@@ -1122,6 +1144,8 @@ def train_single_model(cfg: Config):
                     model, ds_val, loader_val, val_proto,
                     label_names, device, cfg))
             select_score, select_key = _select_checkpoint_score(val_m, cfg)
+            _save_model_selection_artifacts(
+                model, cfg, epoch_num, val_m, select_score, select_key)
             # ── SWA: 累加 epoch>=swa_start 的 checkpoint 权重 ──
             if swa_enabled and epoch_num >= swa_start:
                 cur_sd = _model_state_dict_for_save(model)

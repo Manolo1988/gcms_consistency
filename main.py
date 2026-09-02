@@ -414,6 +414,8 @@ def main():
                         help="训练中 best checkpoint 的选择指标")
     parser.add_argument("--model_select_min_epoch", type=int, default=None,
                         help="选模最小 epoch (只在该 epoch 之后才允许更新 best checkpoint)")
+    parser.add_argument("--model_select_save_checkpoints", action="store_true",
+                        help="保存各验证点 checkpoint 和选模指标轨迹")
     parser.add_argument("--swa_enabled", action="store_true",
                         help="启用 SWA 多 checkpoint 权重平均 (替代单点 best)")
     parser.add_argument("--swa_start_epoch", type=int, default=None,
@@ -592,6 +594,8 @@ def main():
         cfg.model_select_metric = args.model_select_metric
     if args.model_select_min_epoch is not None:
         cfg.model_select_min_epoch = int(args.model_select_min_epoch)
+    if args.model_select_save_checkpoints:
+        cfg.model_select_save_checkpoints = True
     if args.swa_enabled:
         cfg.swa_enabled = True
     if args.swa_start_epoch is not None:
