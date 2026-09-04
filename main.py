@@ -526,6 +526,8 @@ def main():
                         help="训练前不自动刷新 split.json")
     parser.add_argument("--skip_readme_baselines", action="store_true",
                         help="评估时跳过 README baselines")
+    parser.add_argument("--skip_open_set", action="store_true",
+                        help="评估时跳过 Setting B 开放集检测")
     parser.add_argument("--fewshot_repeats", type=int, default=None,
                         help="每个 N-shot 重复抽样次数 (1=不重复, >1 取平均以降低少样本评估噪声)")
 
@@ -615,6 +617,8 @@ def main():
         cfg.open_score_calibration_apply = False
     if args.skip_readme_baselines:
         cfg.evaluate_readme_baselines = False
+    if args.skip_open_set:
+        cfg.evaluate_open_set = False
     if args.fewshot_repeats is not None:
         cfg.fewshot_repeats = int(args.fewshot_repeats)
     if args.enable_input_raw_pca:

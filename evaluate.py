@@ -506,7 +506,7 @@ def _build_baseline_feature_cache(split, cfg, make_loader,
                 "test": _extract_with_mode(loader_test, mode, cfg),
             }
 
-    if split.get("test_unknown_idx"):
+    if split.get("test_unknown_idx") and bool(getattr(cfg, "evaluate_open_set", True)):
         known_idx = sorted(set(split.get("val_idx", []))
                            | set(split.get("test_batch_idx", [])))
         _, loader_known = make_loader(known_idx)
@@ -517,6 +517,7 @@ def _build_baseline_feature_cache(split, cfg, make_loader,
                 "unknown": _extract_with_mode(loader_unknown, mode, cfg),
             }
 
+    if split.get("test_unknown_idx"):
         unknown_idx = split["test_unknown_idx"]
         ds_unknown = GCMSDataset(
             metadata_csv,
@@ -1300,7 +1301,7 @@ def evaluate_single_model(cfg):
         metadata_csv, product_col, proto_store, device, cfg)
 
     # ═══ Setting B: 开集检测 ═══
-    if split["test_unknown_idx"]:
+    if split["test_unknown_idx"] and bool(getattr(cfg, "evaluate_open_set", True)):
         # 已知类采用 val + 留出批次并集，降低单一批次分布偏差
         known_idx = sorted(
             set(split["val_idx"]) | set(split["test_batch_idx"])
@@ -1332,9 +1333,12 @@ def evaluate_single_model(cfg):
             device, cfg, f"留出产品 {split['holdout_products']}", calibrator=calibrator)
         if cal_metrics is not None:
             result_b["calibration"] = cal_metrics
-    else:
+    elif not split["test_unknown_idx"]:
         result_b = None
         print("\n── Setting B: 无留出产品测试数据 ──")
+    else:
+        result_b = None
+        print("\n── Setting B: 已按配置跳过 ──")
 
     # ═══ Setting C: 少样本 ═══
     if split["test_unknown_idx"]:
