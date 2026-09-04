@@ -71,9 +71,14 @@ def command_commands(args):
         "",
         f"PREPARED_DIR=\"{args.prepared_dir}\"",
         f"OUTPUT_PREFIX=\"{output_prefix}\"",
+        "PYTHON_BIN=\"${PYTHON_BIN:-python}\"",
+        "export CUDA_VISIBLE_DEVICES=\"${CUDA_VISIBLE_DEVICES:-0}\"",
+        "export PYTORCH_CUDA_ALLOC_CONF=\"${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}\"",
         "",
-        "python scripts/paper_gate.py audit --prepared-dir \"${PREPARED_DIR}\"",
-        "python scripts/paper_gate.py episodes --prepared-dir \"${PREPARED_DIR}\" "
+        "\"${PYTHON_BIN}\" -u -c \"import torch; print('Python:', __import__('sys').executable); print('PyTorch:', torch.__version__); print('CUDA available:', torch.cuda.is_available())\"",
+        "",
+        "\"${PYTHON_BIN}\" -u scripts/paper_gate.py audit --prepared-dir \"${PREPARED_DIR}\"",
+        "\"${PYTHON_BIN}\" -u scripts/paper_gate.py episodes --prepared-dir \"${PREPARED_DIR}\" "
         f"--shots {shots} --episodes {args.episodes} "
         f"--episode-seed-start {args.episode_seed_start}",
         "",
@@ -81,7 +86,7 @@ def command_commands(args):
     for seed in args.seeds:
         output_dir = f"outputs/{output_prefix}/main_s{seed}"
         lines.extend([
-            "python main.py train "
+            "\"${PYTHON_BIN}\" -u main.py train "
             f"--output_dir \"{output_dir}\" --prepared_dir \"${{PREPARED_DIR}}\" "
             f"--seed {seed} --epochs {args.epochs} --batch_size {args.batch_size} "
             f"--lr {args.lr} --lambda_adv {args.lambda_adv} "
@@ -90,22 +95,22 @@ def command_commands(args):
             f"--lambda_hard_pair {args.lambda_hard_pair} "
             f"--supcon_temperature {args.supcon_temperature} "
             "--no_auto_create_split_on_train --deterministic",
-            "python main.py evaluate "
+            "\"${PYTHON_BIN}\" -u main.py evaluate "
             f"--output_dir \"{output_dir}\" --prepared_dir \"${{PREPARED_DIR}}\" "
             f"--seed {seed} --skip_open_set --fewshot_repeats 1 --no_save_visualizations",
-            "python scripts/evaluate_paper_checkpoint.py "
+            "\"${PYTHON_BIN}\" -u scripts/evaluate_paper_checkpoint.py "
             f"--run-dir \"{output_dir}\" --prepared-dir \"${{PREPARED_DIR}}\" "
             f"--method-name main --shots {shots} --episodes {args.episodes} "
             f"--episode-seed-start {args.episode_seed_start} "
             "--episode-manifest result/paper_gate/fewshot_episodes.json",
             "",
-            "python scripts/run_paper_dl_baseline.py "
+            "\"${PYTHON_BIN}\" -u scripts/run_paper_dl_baseline.py "
             f"--method plain_cnn_ce --seed {seed} --prepared-dir \"${{PREPARED_DIR}}\" "
             f"--output-dir \"outputs/{output_prefix}/plain_cnn_ce_s{seed}\" "
             f"--epochs {args.epochs} --batch-size {args.batch_size} --lr {args.lr} "
             f"--episodes {args.episodes} --episode-seed-start {args.episode_seed_start} "
             "--episode-manifest result/paper_gate/fewshot_episodes.json",
-            "python scripts/run_paper_dl_baseline.py "
+            "\"${PYTHON_BIN}\" -u scripts/run_paper_dl_baseline.py "
             f"--method plain_cnn_supcon --seed {seed} --prepared-dir \"${{PREPARED_DIR}}\" "
             f"--output-dir \"outputs/{output_prefix}/plain_cnn_supcon_s{seed}\" "
             f"--epochs {args.epochs} --batch-size {args.batch_size} --lr {args.lr} "
@@ -114,7 +119,7 @@ def command_commands(args):
             "",
         ])
     lines.append(
-        f"python scripts/summarize_paper_gate.py --root outputs/{output_prefix} "
+        f"\"${{PYTHON_BIN}}\" -u scripts/summarize_paper_gate.py --root outputs/{output_prefix} "
         "--main-method main"
     )
     output = Path(args.output)
