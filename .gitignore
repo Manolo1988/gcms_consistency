@@ -44,6 +44,7 @@ htmlcov/
 .coverage.*        
 output_new/
 outputs/
+closeandfew_outputs/
 prepared_data_pca171/
 prepared_data_pca192/
 pretrained_models/
