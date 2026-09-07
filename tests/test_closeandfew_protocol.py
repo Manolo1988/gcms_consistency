@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from closeandfew.evaluation import FeatureTable, evaluate_method
-from closeandfew.protocol import (
+from evaluation import FeatureTable, evaluate_method
+from protocol import (
     ProtocolSpec,
     build_protocol_manifests,
     load_metadata,
@@ -134,7 +134,7 @@ class ProtocolTests(unittest.TestCase):
             )
 
     def test_base_metrics_count_predictions_to_novel_as_errors(self):
-        from closeandfew.evaluation import classification_metrics
+        from evaluation import classification_metrics
 
         metrics = classification_metrics(
             np.asarray(["A", "A", "B", "B"]),

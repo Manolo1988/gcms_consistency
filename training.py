@@ -10,14 +10,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .data import load_tensor
-from .evaluation import (
+from data import load_tensor
+from evaluation import (
     classification_metrics,
     fit_mean_prototypes,
     predict_prototypes,
     save_feature_table,
 )
-from .protocol import ProtocolSpec, metadata_fingerprint
+from protocol import ProtocolSpec, metadata_fingerprint
 
 
 @dataclass(frozen=True)
@@ -396,7 +396,9 @@ def train_deep_method(
 
     if not checkpoint_path.exists():
         raise RuntimeError("training did not produce a validation checkpoint")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # The checkpoint is created by this run and contains NumPy normalization
+    # arrays, so PyTorch 2.6 needs the trusted-file opt-out explicitly.
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model"])
     features = _extract(
         model, evaluation_loader, len(df), training.embedding_dim, device, torch

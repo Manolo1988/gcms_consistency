@@ -1,6 +1,6 @@
 # Closed-set recognition and few-shot registration protocol
 
-This directory implements the minimum experiment needed to support one focused
+This repository implements the minimum experiment needed to support one focused
 paper claim: a representation learned from known GC-MS products should remain
 reliable on later batches and should admit new products from 1, 3, or 5
 independent registration samples without retraining the backbone.

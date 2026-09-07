@@ -7,7 +7,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .protocol import ProtocolSpec
+from protocol import ProtocolSpec
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def resolve_tensor_path(
@@ -18,6 +21,10 @@ def resolve_tensor_path(
     original = Path(str(row["tensor_path"]))
     if original.is_file():
         return original
+    if not original.is_absolute():
+        candidate = PROJECT_ROOT / original
+        if candidate.is_file():
+            return candidate
     if tensor_root is None:
         raise FileNotFoundError(
             f"tensor does not exist: {original}; pass --tensor-root to relocate old paths"

@@ -14,13 +14,13 @@ REPOSITORY = Path(__file__).resolve().parents[1]
 if str(REPOSITORY) not in sys.path:
     sys.path.insert(0, str(REPOSITORY))
 
-from closeandfew.evaluation import (  # noqa: E402
+from evaluation import (  # noqa: E402
     FeatureTable,
     evaluate_method,
     paired_method_differences,
     save_evaluation,
 )
-from closeandfew.protocol import (  # noqa: E402
+from protocol import (  # noqa: E402
     ProtocolSpec,
     audit_metadata,
     build_protocol_manifests,
@@ -90,7 +90,7 @@ def command_build(args) -> None:
 
 
 def command_baseline(args) -> None:
-    from closeandfew.baselines import run_traditional_baselines
+    from baselines import run_traditional_baselines
 
     df, manifest, protocol = _load_validated(args.metadata, args.manifest, args)
     paths = run_traditional_baselines(
@@ -102,7 +102,7 @@ def command_baseline(args) -> None:
 
 
 def command_train(args) -> None:
-    from closeandfew.training import TrainingSpec, train_deep_method
+    from training import TrainingSpec, train_deep_method
 
     df, manifest, protocol = _load_validated(args.metadata, args.manifest, args)
     training = TrainingSpec(
@@ -165,8 +165,8 @@ def command_evaluate(args) -> None:
 
 
 def command_matrix(args) -> None:
-    from closeandfew.baselines import run_traditional_baselines
-    from closeandfew.training import TrainingSpec, VALID_METHODS, train_deep_method
+    from baselines import run_traditional_baselines
+    from training import TrainingSpec, VALID_METHODS, train_deep_method
 
     manifests = sorted(Path(args.manifests).glob("products_*.json"))
     if not manifests:
@@ -294,7 +294,7 @@ def build_parser() -> argparse.ArgumentParser:
     baseline = commands.add_parser("baseline", help="fit train-only traditional baselines")
     baseline.add_argument("--metadata", required=True)
     baseline.add_argument("--manifest", required=True)
-    baseline.add_argument("--tensor-root", required=True)
+    baseline.add_argument("--tensor-root", default="new_prepared_data/tensors")
     baseline.add_argument("--output", required=True)
     baseline.add_argument("--pca-components", type=int, default=64)
     baseline.add_argument("--seed", type=int, default=42)
@@ -304,7 +304,7 @@ def build_parser() -> argparse.ArgumentParser:
     train = commands.add_parser("train", help="train one fixed-backbone ablation")
     train.add_argument("--metadata", required=True)
     train.add_argument("--manifest", required=True)
-    train.add_argument("--tensor-root", required=True)
+    train.add_argument("--tensor-root", default="new_prepared_data/tensors")
     train.add_argument("--output", required=True)
     train.add_argument("--method", choices=["cnn_ce", "cnn_supcon", "cnn_supcon_batchadv"], required=True)
     train.add_argument("--seed", type=int, default=42)
@@ -325,7 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
     matrix = commands.add_parser("matrix", help="run the complete folds x methods x seeds matrix")
     matrix.add_argument("--metadata", required=True)
     matrix.add_argument("--manifests", required=True)
-    matrix.add_argument("--tensor-root", required=True)
+    matrix.add_argument("--tensor-root", default="new_prepared_data/tensors")
     matrix.add_argument("--output", required=True)
     matrix.add_argument("--methods", default="tic_pca_proto,tic_pca_mahalanobis,tic_plsda_latent,cnn_ce,cnn_supcon,cnn_supcon_batchadv")
     matrix.add_argument("--seeds", default="41,42,43,44,45")

@@ -10,7 +10,7 @@ from typing import Iterable
 
 import numpy as np
 import pandas as pd
-from .protocol import ProtocolSpec, make_fewshot_episode, metadata_fingerprint
+from protocol import ProtocolSpec, make_fewshot_episode, metadata_fingerprint
 
 
 @dataclass
