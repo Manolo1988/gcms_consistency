@@ -173,10 +173,12 @@ def _evaluate_one(
         episodes["training_seed"] = int(training_seed)
     save_evaluation(result, episodes, output)
     closed = result["closed_set"]
-    few = result["few_shot"]
+    few = result.get("fewshot_registration", result.get("few_shot", {}))
+    fewshot_desc = ",".join(sorted(few)) if isinstance(few, dict) else "n/a"
     log(
         f"evaluate done method={name} closed_acc={closed['accuracy']:.4f} "
         f"closed_macro_f1={closed['macro_f1']:.4f} fewshot_rows={len(few)} "
+        f"fewshot_shots={fewshot_desc} "
         f"in {time.perf_counter() - started:.1f}s"
     )
     return episodes, result
