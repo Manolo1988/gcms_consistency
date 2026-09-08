@@ -60,7 +60,7 @@ cover/
 # Translations
 *.mo
 *.pot
-
+new_outputs/
 # Django stuff:
 
 local_settings.py
