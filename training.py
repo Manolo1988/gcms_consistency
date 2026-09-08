@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -42,6 +43,10 @@ class TrainingSpec:
 
 
 VALID_METHODS = {"cnn_ce", "cnn_supcon", "cnn_supcon_batchadv"}
+
+
+def _log(message: str) -> None:
+    print(f"[training] {time.strftime('%Y-%m-%d %H:%M:%S')} | {message}", flush=True)
 
 
 def _imports():
@@ -263,6 +268,7 @@ def train_deep_method(
     """Train one ablation using validation batches only for checkpoint selection."""
     if training.method not in VALID_METHODS:
         raise ValueError(f"method must be one of {sorted(VALID_METHODS)}")
+    started = time.perf_counter()
     torch, nn, functional, DataLoader, Dataset, Sampler = _imports()
     TensorDataset, BalancedBatchSampler, PlainGCMSCNN = _build_runtime(
         torch, nn, functional, Dataset, Sampler
@@ -275,6 +281,10 @@ def train_deep_method(
     train_idx = np.asarray(manifest["train_idx"], dtype=int)
     val_idx = np.asarray(manifest["val_idx"], dtype=int)
     all_idx = np.arange(len(df), dtype=int)
+    _log(
+        f"start method={training.method} seed={training.seed} fold={manifest.get('fold_id', 'unknown')} "
+        f"train={len(train_idx)} val={len(val_idx)} total={len(df)} device={device}"
+    )
     product_names = sorted(df.iloc[train_idx][protocol.product_col].astype(str).unique())
     batch_names = sorted(df.iloc[train_idx][protocol.batch_col].astype(str).unique())
     product_map = {name: i for i, name in enumerate(product_names)}
@@ -285,6 +295,7 @@ def train_deep_method(
         product_labels[index] = product_map[str(df.iloc[index][protocol.product_col])]
         batch_labels[index] = batch_map[str(df.iloc[index][protocol.batch_col])]
 
+    _log("computing train-only normalization statistics")
     mean, std = _normalization_stats(df, train_idx, tensor_root, protocol)
     train_dataset = TensorDataset(
         df, train_idx, product_labels, batch_labels, tensor_root, protocol, mean, std, True
@@ -323,6 +334,10 @@ def train_deep_method(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(training.epochs, 1)
     )
+    _log(
+        f"model ready products={len(product_names)} batches={len(batch_names)} "
+        f"embedding_dim={training.embedding_dim} batch_size={training.batch_size} epochs={training.epochs}"
+    )
 
     use_supcon = training.method in {"cnn_supcon", "cnn_supcon_batchadv"}
     use_adversarial = training.method == "cnn_supcon_batchadv"
@@ -332,6 +347,7 @@ def train_deep_method(
     history = []
     checkpoint_path = output / "best_checkpoint.pt"
     for epoch in range(1, training.epochs + 1):
+        epoch_started = time.perf_counter()
         model.train()
         totals = {"loss": 0.0, "ce": 0.0, "supcon": 0.0, "batch_adv": 0.0}
         batches_seen = 0
@@ -390,8 +406,23 @@ def train_deep_method(
                 }, checkpoint_path)
             else:
                 stale += 1
+            _log(
+                f"epoch {epoch:03d}/{training.epochs} "
+                f"loss={row['loss']:.4f} ce={row['ce']:.4f} supcon={row['supcon']:.4f} "
+                f"batch_adv={row['batch_adv']:.4f} val_macro_f1={score:.4f} "
+                f"best={best_score:.4f}@{best_epoch} stale={stale} "
+                f"time={time.perf_counter() - epoch_started:.1f}s"
+            )
+        else:
+            _log(
+                f"epoch {epoch:03d}/{training.epochs} "
+                f"loss={row['loss']:.4f} ce={row['ce']:.4f} supcon={row['supcon']:.4f} "
+                f"batch_adv={row['batch_adv']:.4f} lr={row['learning_rate']:.6g} "
+                f"time={time.perf_counter() - epoch_started:.1f}s"
+            )
         history.append(row)
         if should_validate and training.early_stop_patience > 0 and stale >= training.early_stop_patience:
+            _log(f"early stop at epoch={epoch}; best_epoch={best_epoch} best_val_macro_f1={best_score:.4f}")
             break
 
     if not checkpoint_path.exists():
@@ -400,6 +431,7 @@ def train_deep_method(
     # arrays, so PyTorch 2.6 needs the trusted-file opt-out explicitly.
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model"])
+    _log(f"extracting frozen features from best checkpoint epoch={best_epoch}")
     features = _extract(
         model, evaluation_loader, len(df), training.embedding_dim, device, torch
     )
@@ -422,4 +454,5 @@ def train_deep_method(
     (output / "training.json").write_text(
         json.dumps(run_record, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    _log(f"done feature={feature_path.resolve()} elapsed={time.perf_counter() - started:.1f}s")
     return feature_path

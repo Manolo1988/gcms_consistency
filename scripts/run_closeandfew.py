@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -27,6 +28,10 @@ from protocol import (  # noqa: E402
     load_metadata,
     validate_manifest,
 )
+
+
+def log(message: str) -> None:
+    print(f"[closeandfew] {time.strftime('%Y-%m-%d %H:%M:%S')} | {message}", flush=True)
 
 
 def _csv_ints(value: str) -> tuple[int, ...]:
@@ -73,6 +78,12 @@ def command_audit(args) -> None:
 
 
 def command_build(args) -> None:
+    started = time.perf_counter()
+    log(
+        "building manifests "
+        f"metadata={args.metadata} output={Path(args.output).resolve()} "
+        f"folds={args.folds} shots={args.shots} episodes={args.episodes} seed={args.seed}"
+    )
     protocol = ProtocolSpec(
         novel_classes_per_fold=args.novel_classes,
         max_product_folds=args.folds,
@@ -86,24 +97,38 @@ def command_build(args) -> None:
     manifests = build_protocol_manifests(
         args.metadata, args.output, protocol, novel_product_sets=explicit
     )
-    print(f"wrote {len(manifests)} manifests to {Path(args.output).resolve()}")
+    log(f"done: wrote {len(manifests)} manifests in {time.perf_counter() - started:.1f}s")
+    print(f"wrote {len(manifests)} manifests to {Path(args.output).resolve()}", flush=True)
 
 
 def command_baseline(args) -> None:
     from baselines import run_traditional_baselines
 
+    started = time.perf_counter()
+    log(f"baseline start manifest={args.manifest} output={Path(args.output).resolve()}")
     df, manifest, protocol = _load_validated(args.metadata, args.manifest, args)
+    log(
+        f"baseline loaded fold={manifest['fold_id']} "
+        f"train={len(manifest['train_idx'])} val={len(manifest['val_idx'])} "
+        f"test={len(manifest['test_idx'])} novel={len(manifest['novel_idx'])}"
+    )
     paths = run_traditional_baselines(
         df, manifest, args.tensor_root, args.output, protocol,
         pca_components=args.pca_components, seed=args.seed,
     )
     for name, path in paths.items():
-        print(f"{name}={path.resolve()}")
+        print(f"{name}={path.resolve()}", flush=True)
+    log(f"baseline done in {time.perf_counter() - started:.1f}s")
 
 
 def command_train(args) -> None:
     from training import TrainingSpec, train_deep_method
 
+    started = time.perf_counter()
+    log(
+        f"train start method={args.method} seed={args.seed} manifest={args.manifest} "
+        f"epochs={args.epochs} device={args.device} output={Path(args.output).resolve()}"
+    )
     df, manifest, protocol = _load_validated(args.metadata, args.manifest, args)
     training = TrainingSpec(
         method=args.method,
@@ -120,7 +145,8 @@ def command_train(args) -> None:
     path = train_deep_method(
         df, manifest, args.tensor_root, args.output, protocol, training
     )
-    print(path.resolve())
+    log(f"train done method={args.method} seed={args.seed} feature={path.resolve()} in {time.perf_counter() - started:.1f}s")
+    print(path.resolve(), flush=True)
 
 
 def _parse_features(values: list[str]) -> dict[str, Path]:
@@ -136,6 +162,8 @@ def _parse_features(values: list[str]) -> dict[str, Path]:
 def _evaluate_one(
     df, manifest, protocol, name, feature_path, output, bootstrap, training_seed=None,
 ) -> pd.DataFrame:
+    started = time.perf_counter()
+    log(f"evaluate start method={name} feature={Path(feature_path).resolve()} output={Path(output).resolve()}")
     result, episodes = evaluate_method(
         df, FeatureTable.load(feature_path), manifest, protocol, name,
         bootstrap_repeats=bootstrap,
@@ -144,10 +172,19 @@ def _evaluate_one(
         result["training_seed"] = int(training_seed)
         episodes["training_seed"] = int(training_seed)
     save_evaluation(result, episodes, output)
+    closed = result["closed_set"]
+    few = result["few_shot"]
+    log(
+        f"evaluate done method={name} closed_acc={closed['accuracy']:.4f} "
+        f"closed_macro_f1={closed['macro_f1']:.4f} fewshot_rows={len(few)} "
+        f"in {time.perf_counter() - started:.1f}s"
+    )
     return episodes, result
 
 
 def command_evaluate(args) -> None:
+    started = time.perf_counter()
+    log(f"evaluate command start manifest={args.manifest} output={Path(args.output).resolve()}")
     df, manifest, protocol = _load_validated(args.metadata, args.manifest, args)
     all_episodes = []
     for name, path in _parse_features(args.feature).items():
@@ -162,6 +199,7 @@ def command_evaluate(args) -> None:
         paired_method_differences(combined, args.reference).to_csv(
             Path(args.output) / "paired_differences.csv", index=False
         )
+    log(f"evaluate command done in {time.perf_counter() - started:.1f}s")
 
 
 def command_matrix(args) -> None:
@@ -178,6 +216,11 @@ def command_matrix(args) -> None:
     if unknown:
         raise ValueError(f"unknown methods: {sorted(unknown)}")
     seeds = _csv_ints(args.seeds)
+    started = time.perf_counter()
+    log(
+        f"matrix start folds={len(manifests)} methods={','.join(methods)} "
+        f"seeds={','.join(map(str, seeds))} output={Path(args.output).resolve()}"
+    )
     all_episode_tables = []
     all_closed_rows = []
     matrix_record = {
@@ -190,22 +233,32 @@ def command_matrix(args) -> None:
     }
     root = Path(args.output)
     root.mkdir(parents=True, exist_ok=True)
-    for manifest_path in manifests:
+    total_steps = len(manifests) * (
+        len([m for m in methods if m.startswith("tic_")]) * len(seeds)
+        + len([m for m in methods if m in VALID_METHODS]) * len(seeds)
+    )
+    step = 0
+    for fold_number, manifest_path in enumerate(manifests, start=1):
         manifest = _read_manifest(manifest_path)
         protocol = _protocol_from_manifest(manifest, args)
+        log(f"fold {fold_number}/{len(manifests)} load {manifest_path.name}")
         df = load_metadata(args.metadata, protocol)
         validate_manifest(df, manifest, protocol)
         fold_root = root / manifest["fold_id"]
         classical = [method for method in methods if method.startswith("tic_")]
         feature_paths = {}
         if classical:
+            log(f"fold {manifest['fold_id']} baseline feature extraction start methods={','.join(classical)}")
             feature_paths = run_traditional_baselines(
                 df, manifest, args.tensor_root, fold_root / "baseline_features",
                 protocol, pca_components=args.pca_components, seed=protocol.seed,
             )
+            log(f"fold {manifest['fold_id']} baseline feature extraction done")
         for seed in seeds:
             for method in classical:
+                step += 1
                 method_root = fold_root / method / f"seed_{seed}"
+                log(f"step {step}/{total_steps} fold={manifest['fold_id']} method={method} seed={seed} evaluate")
                 episodes, result = _evaluate_one(
                     df, manifest, protocol, method, feature_paths[method],
                     method_root, args.bootstrap, training_seed=seed,
@@ -219,7 +272,12 @@ def command_matrix(args) -> None:
                     )},
                 })
             for method in [item for item in methods if item in VALID_METHODS]:
+                step += 1
                 method_root = fold_root / method / f"seed_{seed}"
+                log(
+                    f"step {step}/{total_steps} fold={manifest['fold_id']} "
+                    f"method={method} seed={seed} train+evaluate"
+                )
                 training = TrainingSpec(
                     method=method, epochs=args.epochs, batch_size=args.batch_size,
                     learning_rate=args.learning_rate, embedding_dim=args.embedding_dim,
@@ -246,6 +304,7 @@ def command_matrix(args) -> None:
     combined = pd.concat(all_episode_tables, ignore_index=True)
     combined.to_csv(root / "all_episodes.csv", index=False)
     pd.DataFrame(all_closed_rows).to_csv(root / "all_closed_set.csv", index=False)
+    log(f"matrix wrote summaries: {root / 'all_episodes.csv'} and {root / 'all_closed_set.csv'}")
     if args.reference in set(combined["method"]):
         paired_method_differences(combined, args.reference).to_csv(
             root / "paired_differences.csv", index=False
@@ -253,6 +312,7 @@ def command_matrix(args) -> None:
     (root / "matrix_config.json").write_text(
         json.dumps(matrix_record, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    log(f"matrix done in {time.perf_counter() - started:.1f}s")
 
 
 def add_shared_evaluation(parser) -> None:
