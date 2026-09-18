@@ -6,7 +6,6 @@ import argparse
 import copy
 import json
 import math
-import random
 import sys
 from pathlib import Path
 
@@ -14,6 +13,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from sklearn.metrics import accuracy_score, balanced_accuracy_score
+from sklearn.preprocessing import LabelEncoder
 from torch.utils.data import DataLoader, Sampler
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -98,12 +98,6 @@ def configure_grid(cfg):
     cfg.mz_bins = int(grid.get("input_pca_components", grid.get("mz_bins", cfg.mz_bins)))
 
 
-def seed_worker(worker_id):
-    worker_seed = torch.initial_seed() % (2 ** 32)
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
-
-
 def align_dataset(metadata_csv, indices, source, augmentation=None, input_transform=None):
     dataset = GCMSDataset(
         metadata_csv,
@@ -129,6 +123,40 @@ def make_datasets(metadata_csv, split, cfg, input_transform):
         indices=split["train_idx"],
         input_transform=input_transform,
     )
+    raw_val = GCMSDataset(
+        metadata_csv,
+        product_col="product_fine",
+        indices=split["val_idx"],
+        input_transform=input_transform,
+    )
+    raw_closed = GCMSDataset(
+        metadata_csv,
+        product_col="product_fine",
+        indices=split["test_batch_idx"],
+        input_transform=input_transform,
+    )
+
+    # LOBO/跨批次划分可能把验证批次或 Setting A 留出批次完全放在
+    # train 之外。所有会被加载的数据集必须共用覆盖完整范围的编码器。
+    shared_product_enc = LabelEncoder().fit(np.concatenate([
+        train.df["product_fine"].to_numpy(),
+        raw_val.df["product_fine"].to_numpy(),
+        raw_closed.df["product_fine"].to_numpy(),
+    ]))
+    shared_batch_enc = LabelEncoder().fit(np.concatenate([
+        train.df["batch_idx"].to_numpy(),
+        raw_val.df["batch_idx"].to_numpy(),
+        raw_closed.df["batch_idx"].to_numpy(),
+    ]))
+    train.product_enc = shared_product_enc
+    train.batch_enc = shared_batch_enc
+    train.df["product_label"] = shared_product_enc.transform(
+        train.df["product_fine"]
+    )
+    train.df["batch_label"] = shared_batch_enc.transform(train.df["batch_idx"])
+    train.num_products = len(shared_product_enc.classes_)
+    train.num_batches = len(shared_batch_enc.classes_)
+
     train_noaug = align_dataset(
         metadata_csv, split["train_idx"], train, input_transform=input_transform
     )
