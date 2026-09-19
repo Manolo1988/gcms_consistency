@@ -1269,6 +1269,22 @@ def evaluate_single_model(cfg):
     # 训练集 loader (Setting A 计算 cross-batch gap)
     _, loader_train = _make_loader_main(split["train_idx"])
 
+    # 某些独立训练脚本只保存模型权重，没有预先保存原型库。
+    # 评估时用训练集重新注册原型，保证这些 checkpoint 仍可进入统一 A/B/C 评估。
+    if not proto_store.class_names:
+        label_names = _resolve_product_label_name_map(loader_train)
+        proto_store, _, _ = register_from_loader(
+            model,
+            loader_train,
+            label_names,
+            device,
+            percentile=cfg.accept_percentile,
+            cfg=cfg,
+            use_spherical=getattr(cfg, "use_spherical_prototypes", True),
+        )
+        proto_store.save(proto_dir)
+        print(f"  [Prototype] 未找到已保存原型库，已由训练集重新注册: {proto_dir}")
+
     print(f"\n{'='*60}")
     print("单模型评估")
     print(f"{'='*60}")
