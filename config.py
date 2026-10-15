@@ -1,4 +1,5 @@
 """全局配置：路径、网格参数、模型参数、训练超参数。"""
+import json
 import os
 import sys
 import subprocess
@@ -8,6 +9,56 @@ from typing import Optional, Tuple, List
 
 # MPS fallback: 某些算子在 MPS 上未实现时回退到 CPU
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+
+def apply_prepared_input_config(cfg):
+    """Use the frozen preprocessing variants as saved, without refitting inputs."""
+    prepared = Path(cfg.prepared_dir)
+    split_path = prepared / "split.json"
+    grid_path = prepared / "grid_info.json"
+    if not grid_path.exists():
+        if split_path.exists():
+            split = json.loads(split_path.read_text(encoding="utf-8"))
+            if split.get("fixed_split") and split.get("stage") == "metadata_only":
+                raise ValueError("当前目录只有样本清单，请选择 representations 下已生成的输入目录")
+        return None
+
+    info = json.loads(grid_path.read_text(encoding="utf-8"))
+    representation = info.get("input_representation")
+    if representation not in {
+        "fixed_grid_log1p", "dual_channel_no_pca", "dual_channel_pca",
+    }:
+        return None
+    split = json.loads(split_path.read_text(encoding="utf-8"))
+    if not split.get("fixed_split") or split.get("stage") != "prepared":
+        raise ValueError("预处理对照目录需要完整张量和冻结的 prepared 划分")
+    fingerprint = info.get("source_manifest_fingerprint")
+    if not fingerprint or fingerprint != split.get("manifest_fingerprint"):
+        raise ValueError("预处理输入与冻结划分的样本指纹不一致")
+
+    channels, height, width = (int(info[key]) for key in ("in_channels", "rt_bins", "mz_bins"))
+    if min(channels, height, width) <= 0:
+        raise ValueError("预处理张量尺寸必须为正数")
+    precomputed = representation == "dual_channel_pca"
+    if precomputed and (
+        not info.get("input_pca_precomputed")
+        or info.get("pca_fit_scope") != "train_idx_only"
+        or int(info.get("input_pca_components", 0)) != width
+        or int(info.get("input_pca_rt_bins", 0)) != height
+    ):
+        raise ValueError("PCA 对照输入缺少训练集拟合或预计算尺寸标识")
+
+    cfg.in_channels, cfg.rt_bins, cfg.mz_bins = channels, height, width
+    cfg.rt_range, cfg.mz_range = tuple(info["rt_range"]), tuple(info["mz_range"])
+    cfg.auto_create_split_on_train = False
+    # All variants are final inputs; even the no-PCA group must skip runtime PCA.
+    cfg.input_raw_pca_enabled = False
+    if precomputed:
+        cfg.input_raw_pca_components = width
+    cfg._input_pca_precomputed_active = precomputed
+    cfg._input_representation = representation
+    cfg._source_manifest_fingerprint = fingerprint
+    return info
 
 
 def get_device():
@@ -82,11 +133,14 @@ class Config:
         Path(__file__).resolve().parent / "new_outputs"
     )
     prepared_dir: str = str(
-        Path(__file__).resolve().parent / "new_prepared_data_relabel_v1"
+        Path(__file__).resolve().parent
+        / "new_prepared_data_preproc_v1"
+        / "representations"
+        / "dual_channel_pca"
     )
 
     # ── RT × m/z 网格 ────────────────────────────────────
-    rt_bins: int = 1024
+    rt_bins: int = 2048
     mz_bins: int = 256
     rt_range: Optional[tuple] = (0.0, 40.0)
     mz_range: tuple = (0.0, 550.0)

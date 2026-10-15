@@ -1137,6 +1137,9 @@ def evaluate_single_model(cfg):
     Setting B: 已知类 vs 留出产品类 → 开集检测
     Setting C: 留出产品类 N-shot 注册 → 少样本识别
     """
+    from config import apply_prepared_input_config
+
+    prepared_info = apply_prepared_input_config(cfg)
     if str(getattr(cfg, "primary_model", "")).strip().lower() == "raw_pca_mlp":
         from raw_pca_pipeline import evaluate_single_model_raw_pca
 
@@ -1177,6 +1180,8 @@ def evaluate_single_model(cfg):
     # ── 输入变换: raw -> PCA(沿 m/z 轴) ──
     input_transform = None
     input_pca_path = model_dir / "input_rt_pca.pkl"
+    if prepared_info is not None and input_pca_path.exists():
+        raise ValueError("冻结预处理输入不能再应用模型目录中的运行时 PCA，请核对数据和模型目录")
     if input_pca_path.exists():
         from input_pca import load_rt_axis_pca, RtAxisPcaTransform
 
@@ -1201,6 +1206,13 @@ def evaluate_single_model(cfg):
     if meta_path.exists():
         with open(meta_path) as f:
             train_meta = json.load(f)
+        saved_representation = train_meta.get("input_representation")
+        if saved_representation and (
+            prepared_info is None
+            or saved_representation != prepared_info["input_representation"]
+            or train_meta.get("source_manifest_fingerprint") != prepared_info["source_manifest_fingerprint"]
+        ):
+            raise ValueError("当前输入类型或样本清单与训练模型不一致，请使用训练时的 prepared_dir")
         num_batches_model = train_meta["num_batches"]
         num_products_model = train_meta.get("num_products", None)
         cfg.feature_dim = int(train_meta.get("feature_dim", getattr(cfg, "feature_dim", 256)))
@@ -1208,6 +1220,11 @@ def evaluate_single_model(cfg):
         if bool(train_meta.get("input_raw_pca_enabled", False)):
             cfg.mz_bins = int(train_meta.get("input_raw_pca_components", cfg.mz_bins))
         cfg.rt_bins = int(train_meta.get("input_raw_pca_rt_bins", cfg.rt_bins))
+        saved_shape = train_meta.get("input_tensor_shape")
+        if saved_shape is not None:
+            if prepared_info is not None and list(saved_shape) != [cfg.in_channels, cfg.rt_bins, cfg.mz_bins]:
+                raise ValueError("当前输入尺寸与模型保存的输入尺寸不一致")
+            cfg.in_channels, cfg.rt_bins, cfg.mz_bins = map(int, saved_shape)
     else:
         # 回退: 从 state_dict 推断
         sd = torch.load(model_dir / "model.pt", map_location="cpu",

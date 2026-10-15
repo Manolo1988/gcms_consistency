@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from config import Config
+from config import Config, apply_prepared_input_config
 
 
 def _parse_int_tuple(value: str):
@@ -83,18 +83,23 @@ def _persist_run_metadata(cfg, args):
 
 def cmd_prepare(cfg):
     def _impl():
-        from data_prepare import scan_dataset, convert_all
+        from data_prepare import scan_dataset, prepare_metadata, convert_all
         from dataset import create_data_split
         metadata = scan_dataset(cfg.dataset_root)
         print("\n产品分布:")
         print(metadata["code"].value_counts().to_string())
-        convert_all(metadata, cfg.prepared_dir, cfg)
 
-        # 创建固定数据划分
-        metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
+        # 先固定数据划分，再拟合 PCA，避免留出样本参与拟合。
+        metadata, metadata_csv = prepare_metadata(metadata, cfg.prepared_dir, cfg)
         product_col = ("product_fine" if cfg.product_granularity == "fine"
                        else "product_coarse")
-        create_data_split(metadata_csv, cfg, product_col=product_col)
+        split = create_data_split(
+            str(metadata_csv), cfg, product_col=product_col
+        )
+        convert_all(
+            metadata, cfg.prepared_dir, cfg,
+            fit_indices=split["train_idx"],
+        )
 
     return _run_with_log(cfg, "prepare.log", _impl)
 
@@ -355,7 +360,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default=None,
                         help="输出目录。prepare/train 默认会在该目录下创建 run_时间戳 子目录")
     parser.add_argument("--prepared_dir", type=str, default=None,
-                        help="prepared data 目录")
+                        help="prepared data 目录；默认使用双通道 + PCA，A/B 方案请传入对应目录")
     parser.add_argument("--seed", type=int, default=None,
                         help="随机种子")
     parser.add_argument("--epochs", type=int, default=None,
@@ -561,6 +566,13 @@ def main():
         cfg.output_dir = str(Path(args.output_dir))
     if args.prepared_dir:
         cfg.prepared_dir = str(Path(args.prepared_dir))
+    elif args.command == "prepare":
+        # Keep the legacy preparation command's output separate from frozen variants.
+        cfg.prepared_dir = str(
+            Path(__file__).resolve().parent / "new_prepared_data_relabel_v1"
+        )
+        if args.rt_bins is None:
+            cfg.rt_bins = 1024
     for name in (
         "seed", "epochs", "batch_size", "lr", "weight_decay",
         "lambda_supcon", "lambda_adv", "lambda_proto", "lambda_recon", "lambda_cls",
@@ -658,6 +670,9 @@ def main():
         if mz_max <= mz_min:
             raise ValueError(f"m/z 范围非法: mz_min={mz_min}, mz_max={mz_max}")
         cfg.mz_range = (float(mz_min), float(mz_max))
+
+    if args.command in ("train", "evaluate", "interpret", "register"):
+        apply_prepared_input_config(cfg)
 
     if args.command == "evaluate" and Path(cfg.output_dir).name == "final_model":
         cfg.output_dir = str(Path(cfg.output_dir).parent)

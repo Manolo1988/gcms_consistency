@@ -382,8 +382,8 @@ def _fit_or_load_raw_direct_input_pca(metadata_csv: Path, cfg: Config, n_compone
     """
     基于原始 RT×m/z 矩阵拟合/加载 PCA 模型。
 
-    fit_indices: 若提供, 则仅用这些行索引(原始 CSV 行号)拟合 PCA,
-                 而非全部 metadata。用于防止数据泄漏。
+    fit_indices: 若提供, 则使用过滤 BLANK/特殊样品后的行位置拟合 PCA,
+                 与数据划分索引保持一致。
     """
     # 当指定 fit_indices 时, 不使用缓存 (缓存键不含 fit_indices)
     use_cache = fit_indices is None
@@ -419,8 +419,8 @@ def _fit_or_load_raw_direct_input_pca(metadata_csv: Path, cfg: Config, n_compone
         filtered_df = meta_df[
             (meta_df["product_fine"] != "BLANK") & (~meta_df["is_special"])
         ].reset_index(drop=True)
-        fit_set = set(fit_indices)
-        pca_meta_df = filtered_df.iloc[list(fit_set)]
+        fit_positions = [int(i) for i in fit_indices]
+        pca_meta_df = filtered_df.iloc[fit_positions]
         print(
             f"  [Input PCA] 仅用 {len(pca_meta_df)}/{len(filtered_df)} 个样本拟合 PCA"
             f" (fit_indices 已指定)"
@@ -585,6 +585,19 @@ def _build_tensor_paths(metadata: pd.DataFrame, tensor_dir: Path, cfg: Config):
     return tensor_paths
 
 
+def prepare_metadata(metadata: pd.DataFrame, out_dir: str, cfg: Config):
+    """Assign stable tensor paths and save metadata before creating the split."""
+    out_dir = Path(out_dir)
+    tensor_dir = out_dir / "tensors"
+    tensor_dir.mkdir(parents=True, exist_ok=True)
+
+    prepared = metadata.copy()
+    prepared["tensor_path"] = _build_tensor_paths(prepared, tensor_dir, cfg)
+    meta_path = out_dir / "metadata.csv"
+    prepared.to_csv(meta_path, index=False, encoding="utf-8-sig")
+    return prepared, meta_path
+
+
 def _convert_all_raw_direct_pca(metadata: pd.DataFrame, out_dir: Path, cfg: Config,
                                   fit_indices=None):
     """
@@ -592,14 +605,7 @@ def _convert_all_raw_direct_pca(metadata: pd.DataFrame, out_dir: Path, cfg: Conf
 
     fit_indices: 若提供, 则仅用这些行索引拟合 PCA (防止数据泄漏)。
     """
-    tensor_dir = out_dir / "tensors"
-    tensor_dir.mkdir(parents=True, exist_ok=True)
-
-    metadata = metadata.copy()
-    metadata["tensor_path"] = _build_tensor_paths(metadata, tensor_dir, cfg)
-
-    meta_path = out_dir / "metadata.csv"
-    metadata.to_csv(meta_path, index=False, encoding="utf-8-sig")
+    metadata, meta_path = prepare_metadata(metadata, out_dir, cfg)
 
     scope_tag = "train_only" if fit_indices is not None else "all"
     print(
@@ -653,8 +659,7 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config, fit_indices=N
     """
     逐样本读取 .D 并生成 .npz 张量。
 
-    fit_indices: 若提供, 则仅用这些行索引拟合 PCA (防止数据泄漏)。
-                 仅在 prepare_direct_raw_pca 路径生效。
+    fit_indices: 若提供, 则仅用过滤后 metadata 中这些行拟合 PCA；所有样本仍会转换。
     """
     out_dir = Path(out_dir)
 
@@ -663,8 +668,7 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config, fit_indices=N
     ):
         return _convert_all_raw_direct_pca(metadata, out_dir, cfg, fit_indices=fit_indices)
 
-    tensor_dir = out_dir / "tensors"
-    tensor_dir.mkdir(parents=True, exist_ok=True)
+    metadata, meta_path = prepare_metadata(metadata, out_dir, cfg)
     table_dir = out_dir / "tables"
     if cfg.save_prepare_tables:
         table_dir.mkdir(parents=True, exist_ok=True)
@@ -673,7 +677,6 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config, fit_indices=N
         plot_dir.mkdir(parents=True, exist_ok=True)
 
     success, fail = 0, 0
-    tensor_paths = []
     mz_global_min = np.inf
     mz_global_max = -np.inf
     mz_stat_samples = 0
@@ -682,17 +685,7 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config, fit_indices=N
     print(f"\n使用固定范围: RT={rt_range_use}, m/z={mz_range_use}")
 
     for idx, row in tqdm(metadata.iterrows(), total=len(metadata), desc="转换中"):
-        batch_tag = _safe_tag(row["batch_name"])
-        product_tag = _safe_tag(row["code"])
-        sample_tag = _safe_tag(row["sample_id"])
-
-        if cfg.tag_output_with_batch_and_product:
-            tensor_subdir = tensor_dir / batch_tag / product_tag
-            tensor_subdir.mkdir(parents=True, exist_ok=True)
-            npz_path = tensor_subdir / f"{idx:04d}_{sample_tag}.npz"
-        else:
-            npz_path = tensor_dir / f"{idx:04d}.npz"
-        tensor_paths.append(str(npz_path))
+        npz_path = Path(row["tensor_path"])
 
         if cfg.save_prepare_tables:
             if cfg.tag_output_with_batch_and_product:
@@ -798,13 +791,9 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config, fit_indices=N
             np.savez_compressed(npz_path, tensor=empty, grid=np.zeros(1))
             fail += 1
 
-    metadata = metadata.copy()
-    metadata["tensor_path"] = tensor_paths
-
-    meta_path = out_dir / "metadata.csv"
-    metadata.to_csv(meta_path, index=False, encoding="utf-8-sig")
-
-    pca_prepare_info = _precompute_input_pca_tensors(meta_path, cfg)
+    pca_prepare_info = _precompute_input_pca_tensors(
+        meta_path, cfg, fit_indices=fit_indices
+    )
 
     info = {
         "rt_bins": cfg.rt_bins,
@@ -820,6 +809,9 @@ def convert_all(metadata: pd.DataFrame, out_dir: str, cfg: Config, fit_indices=N
     }
 
     if pca_prepare_info is not None:
+        info["input_pca_fit_scope"] = (
+            "train_only" if fit_indices is not None else "all"
+        )
         info["input_pca_precomputed"] = bool(pca_prepare_info.get("enabled", False))
         info["input_pca_applied"] = bool(pca_prepare_info.get("applied", False))
         info["input_pca_reason"] = str(pca_prepare_info.get("reason", "unknown"))
@@ -873,4 +865,17 @@ if __name__ == "__main__":
         ans = input("\n开始转换张量? (y/n): ").strip().lower()
 
     if ans == "y":
-        convert_all(metadata, cfg.prepared_dir, cfg)
+        from dataset import create_data_split
+
+        metadata, metadata_csv = prepare_metadata(metadata, cfg.prepared_dir, cfg)
+        product_col = (
+            "product_fine" if cfg.product_granularity == "fine"
+            else "product_coarse"
+        )
+        split = create_data_split(
+            str(metadata_csv), cfg, product_col=product_col
+        )
+        convert_all(
+            metadata, cfg.prepared_dir, cfg,
+            fit_indices=split["train_idx"],
+        )

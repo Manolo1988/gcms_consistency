@@ -18,7 +18,7 @@ from sklearn.metrics import roc_auc_score
 
 from sklearn.preprocessing import LabelEncoder
 
-from config import Config
+from config import Config, apply_prepared_input_config
 from dataset import (
     GCMSDataset,
     GCMSAugmentation,
@@ -489,6 +489,16 @@ def build_loaders(metadata_csv, train_idx, val_idx, cfg, product_col,
 
 def _build_input_transform_for_training(cfg, metadata_csv, train_idx):
     """可选输入变换: raw tensor 先做 RT 轴 PCA 再送入 README 主模型。"""
+    prepared_info = apply_prepared_input_config(cfg)
+    if prepared_info is not None:
+        split = load_data_split(cfg)
+        if sorted(map(int, train_idx)) != sorted(map(int, split["train_idx"])):
+            raise ValueError("预处理对照张量只适用于冻结的训练划分，不能另建交叉验证划分")
+        print(
+            f"  [Input] {prepared_info['input_representation']}: "
+            f"直接使用落盘张量 {cfg.in_channels}x{cfg.rt_bins}x{cfg.mz_bins}，不再拟合 PCA"
+        )
+        return None, None
     enabled = bool(getattr(cfg, "input_raw_pca_enabled", False))
     if not enabled:
         return None, None
@@ -995,6 +1005,7 @@ def train_single_model(cfg: Config):
             val_idx   → 伪 holdout 批次验证 (模型选择)
     训练结束后注册原型并保存。
     """
+    apply_prepared_input_config(cfg)
     if str(getattr(cfg, "primary_model", "")).strip().lower() == "raw_pca_mlp":
         from raw_pca_pipeline import train_single_model_raw_pca
 
@@ -1272,6 +1283,9 @@ def train_single_model(cfg: Config):
             "input_raw_pca_precomputed": pca_precomputed,
             "input_raw_pca_components": int(cfg.mz_bins),
             "input_raw_pca_rt_bins": int(getattr(cfg, "rt_bins", 0)),
+            "input_tensor_shape": [int(cfg.in_channels), int(cfg.rt_bins), int(cfg.mz_bins)],
+            "input_representation": getattr(cfg, "_input_representation", None),
+            "source_manifest_fingerprint": getattr(cfg, "_source_manifest_fingerprint", None),
         }, f, indent=2)
 
     print(f"\n模型已保存到 {model_dir}")

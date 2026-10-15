@@ -12,7 +12,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from config import Config
+from config import Config, apply_prepared_input_config
 from train import train_single_model
 from evaluate import evaluate_single_model
 
@@ -138,7 +138,7 @@ def main():
     parser.add_argument("--input_raw_pca_components", type=int, default=None,
                         help="PCA components for deep_consistency input projection")
     parser.add_argument("--prepared_dir", type=str, default=None,
-                        help="Prepared data directory (e.g. prepared_data_pca171)")
+                        help="Prepared data directory (default: dual_channel_pca; pass another representation directory to compare A/B)")
     parser.add_argument("--rt_bins", type=int, default=None,
                         help="Override RT bins (decoder target/input shape hint)")
     parser.add_argument("--mz_bins", type=int, default=None,
@@ -217,6 +217,8 @@ def main():
         cfg.warmup_guard_compare_best = False
     if args.encoder_channels is not None:
         cfg.encoder_channels = _parse_int_tuple(args.encoder_channels)
+
+    apply_prepared_input_config(cfg)
 
     out_dir = Path(cfg.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

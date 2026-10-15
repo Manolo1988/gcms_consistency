@@ -250,6 +250,7 @@ knowledge/
 run_*/
 new_outputs/
 new_prepared_data_relabel_v1/
+new_prepared_data_preproc_v1/
 compare.py
 comparison.log
 
