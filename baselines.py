@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import warnings
+import time
 from pathlib import Path
 from sklearn.decomposition import PCA
 from sklearn.neural_network import MLPClassifier
@@ -631,12 +632,16 @@ def train_baseline_epoch(model, loader, criterion, optimizer, device):
     """DL 基线单 epoch 训练。"""
     model.train()
     running = {}
+    correct, samples = 0, 0
     for batch in loader:
         x = batch["input"].to(device)
         batch_dev = {k: (v.to(device) if torch.is_tensor(v) else v)
                      for k, v in batch.items()}
         out = model(x)
         losses = criterion(out, batch_dev)
+        if "logits" in out:
+            correct += int((out["logits"].argmax(dim=1) == batch_dev["product"]).sum().item())
+            samples += int(x.shape[0])
 
         optimizer.zero_grad()
         losses["total"].backward()
@@ -647,7 +652,10 @@ def train_baseline_epoch(model, loader, criterion, optimizer, device):
             running[k] = running.get(k, 0.0) + v.item()
 
     n = max(len(loader), 1)
-    return {k: v / n for k, v in running.items()}
+    metrics = {k: v / n for k, v in running.items()}
+    if samples:
+        metrics["acc"] = correct / samples
+    return metrics
 
 
 @torch.no_grad()
@@ -655,6 +663,7 @@ def validate_baseline(model, loader, criterion, device):
     """DL 基线验证。"""
     model.eval()
     running = {}
+    samples = 0
     all_pred, all_true = [], []
     for batch in loader:
         x = batch["input"].to(device)
@@ -663,12 +672,13 @@ def validate_baseline(model, loader, criterion, device):
         out = model(x)
         losses = criterion(out, batch_dev)
 
+        samples += int(x.shape[0])
         for k, v in losses.items():
-            running[k] = running.get(k, 0.0) + v.item()
+            running[k] = running.get(k, 0.0) + v.item() * int(x.shape[0])
         all_pred.append(out["logits"].argmax(dim=1).cpu())
         all_true.append(batch["product"])
 
-    n = max(len(loader), 1)
+    n = max(samples, 1)
     metrics = {k: v / n for k, v in running.items()}
     all_pred = torch.cat(all_pred)
     all_true = torch.cat(all_true)
@@ -677,7 +687,8 @@ def validate_baseline(model, loader, criterion, device):
 
 
 def train_dl_baseline_fold(method_name, train_idx, val_idx, batch_name,
-                           metadata_csv, cfg):
+                           metadata_csv, cfg, *, augmentation_enabled=True,
+                           epoch_callback=None):
     """训练一个 DL 基线方法的单 fold, 返回 (model, ds_train, ds_val, loader_val)。"""
     from train import build_loaders
     from register import register_from_loader
@@ -688,7 +699,8 @@ def train_dl_baseline_fold(method_name, train_idx, val_idx, batch_name,
                    else "product_coarse")
 
     ds_train, ds_val, loader_train, loader_val = build_loaders(
-        metadata_csv, train_idx, val_idx, cfg, product_col
+        metadata_csv, train_idx, val_idx, cfg, product_col,
+        augmentation_enabled=augmentation_enabled,
     )
 
     num_classes = ds_train.num_products
@@ -711,8 +723,9 @@ def train_dl_baseline_fold(method_name, train_idx, val_idx, batch_name,
         optimizer, T_max=cfg.epochs
     )
 
-    best_acc = 0
+    best_acc = float("-inf")
     best_state = None
+    best_epoch = None
 
     # 构建无增强训练 loader (用于 SupCon 原型验证)
     from dataset import GCMSDataset
@@ -729,13 +742,18 @@ def train_dl_baseline_fold(method_name, train_idx, val_idx, batch_name,
     label_names = ds_train.get_label_name_map()
 
     for epoch in range(cfg.epochs):
-        train_baseline_epoch(model, loader_train, criterion, optimizer, device)
+        started = time.perf_counter()
+        learning_rate = float(optimizer.param_groups[0]["lr"])
+        m_train = train_baseline_epoch(model, loader_train, criterion, optimizer, device)
         scheduler.step()
 
+        val_acc, val_loss = None, None
+        improved = False
         if (epoch + 1) % 10 == 0 or epoch == cfg.epochs - 1:
             if use_softmax_val:
                 m_val = validate_baseline(model, loader_val, criterion, device)
                 val_acc = m_val["acc"]
+                val_loss = m_val["total"]
             else:
                 # 原型匹配验证
                 from train import validate_with_prototypes
@@ -745,12 +763,27 @@ def train_dl_baseline_fold(method_name, train_idx, val_idx, batch_name,
 
             if val_acc > best_acc:
                 best_acc = val_acc
+                best_epoch = epoch + 1
+                improved = True
                 best_state = {k: v.cpu().clone()
                               for k, v in model.state_dict().items()}
 
             if (epoch + 1) % 40 == 0:
                 print(f"    Epoch {epoch+1}/{cfg.epochs} "
                       f"val_acc={val_acc:.3f}")
+
+        if epoch_callback is not None:
+            epoch_callback({
+                "epoch": epoch + 1,
+                "lr": learning_rate,
+                "train_loss": float(m_train["total"]),
+                "train_accuracy": m_train.get("acc"),
+                "val_loss": val_loss,
+                "val_accuracy": val_acc,
+                "best_epoch": best_epoch,
+                "best_val_accuracy": best_acc if best_epoch is not None else None,
+                "epoch_seconds": time.perf_counter() - started,
+            }, best_state if improved else None)
 
     if best_state is not None:
         model.load_state_dict(best_state)

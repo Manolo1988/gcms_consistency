@@ -429,8 +429,8 @@ def _build_proto_subset_loader(dataset, cfg, device):
 
 
 def build_loaders(metadata_csv, train_idx, val_idx, cfg, product_col,
-                  input_transform=None, device=None):
-    aug = GCMSAugmentation(cfg)
+                  input_transform=None, device=None, augmentation_enabled=True):
+    aug = GCMSAugmentation(cfg) if augmentation_enabled else None
     ds_train = GCMSDataset(metadata_csv, product_col=product_col,
                                                      augmentation=aug, indices=train_idx,
                                                      input_transform=input_transform)
