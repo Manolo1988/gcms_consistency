@@ -138,7 +138,7 @@ def main():
     parser.add_argument("--input_raw_pca_components", type=int, default=None,
                         help="PCA components for deep_consistency input projection")
     parser.add_argument("--prepared_dir", type=str, default=None,
-                        help="Prepared data directory (default: dual_channel_pca; pass another representation directory to compare A/B)")
+                        help="Prepared data directory (default: C, dual_channel_no_pca; pass another representation directory to compare A/B)")
     parser.add_argument("--rt_bins", type=int, default=None,
                         help="Override RT bins (decoder target/input shape hint)")
     parser.add_argument("--mz_bins", type=int, default=None,

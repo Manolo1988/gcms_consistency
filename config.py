@@ -136,14 +136,14 @@ class Config:
         Path(__file__).resolve().parent
         / "new_prepared_data_preproc_v1"
         / "representations"
-        / "dual_channel_pca"
+        / "dual_channel_no_pca"
     )
 
     # ── RT × m/z 网格 ────────────────────────────────────
     rt_bins: int = 2048
-    mz_bins: int = 256
+    mz_bins: int = 503
     rt_range: Optional[tuple] = (0.0, 40.0)
-    mz_range: tuple = (0.0, 550.0)
+    mz_range: tuple = (30.0, 532.0)
     log_transform: bool = True
     rt_range_percentiles: tuple = (1.0, 99.5)
     mz_range_percentiles: tuple = (1.0, 99.0)
@@ -171,7 +171,7 @@ class Config:
 
     # ── 主算法选择 (默认回到 README 主模型) ─────────────────
     primary_model: str = "deep_consistency"   # deep_consistency / raw_pca_mlp
-    input_raw_pca_enabled: bool = True         # 仅 deep_consistency: raw -> PCA -> model
+    input_raw_pca_enabled: bool = False        # 默认直接使用 C；历史输入可显式开启运行时 PCA
     input_raw_pca_components: int = 256
     raw_pca_components: int = 128
     raw_pca_hidden: str = "128,64"

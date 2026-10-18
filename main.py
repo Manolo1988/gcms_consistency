@@ -360,7 +360,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default=None,
                         help="输出目录。prepare/train 默认会在该目录下创建 run_时间戳 子目录")
     parser.add_argument("--prepared_dir", type=str, default=None,
-                        help="prepared data 目录；默认使用双通道 + PCA，A/B 方案请传入对应目录")
+                        help="prepared data 目录；默认 C：双通道、不做 PCA；A/B 方案请传入对应目录")
     parser.add_argument("--seed", type=int, default=None,
                         help="随机种子")
     parser.add_argument("--epochs", type=int, default=None,

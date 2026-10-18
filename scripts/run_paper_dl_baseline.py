@@ -99,7 +99,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--method", choices=["plain_cnn_ce", "plain_cnn_supcon"], required=True)
     parser.add_argument("--seed", type=int, required=True)
-    parser.add_argument("--prepared-dir", default="new_prepared_data_relabel_v1")
+    parser.add_argument("--prepared-dir", default=Config().prepared_dir,
+                        help="Prepared input directory (default: C, dual_channel_no_pca)")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=64)

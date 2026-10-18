@@ -1,5 +1,10 @@
 更新说明：
 
+当前默认输入为 **C：双通道、不做 PCA**，目录为
+`new_prepared_data_preproc_v1/representations/dual_channel_no_pca`，
+每个样本形状为 `(2, 2048, 503)`。训练、评估使用该目录中已固定的划分和预处理结果。
+主入口通过 `--prepared_dir`、独立 baseline 通过 `--prepared-dir` 可选择 A/B 输入目录。
+
 # 启动命令：
 
 1. **数据准备**：
