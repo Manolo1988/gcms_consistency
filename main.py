@@ -358,7 +358,7 @@ def main():
     parser.add_argument("--methods", type=str, default=None,
                         help="对比方法 (逗号分隔), 默认全部运行")
     parser.add_argument("--output_dir", type=str, default=None,
-                        help="输出目录。prepare/train 默认会在该目录下创建 run_时间戳 子目录")
+                        help="直接使用指定的输出目录；未指定时 prepare/train 自动创建 run_时间戳 子目录")
     parser.add_argument("--prepared_dir", type=str, default=None,
                         help="prepared data 目录；默认 C：双通道、不做 PCA；A/B 方案请传入对应目录")
     parser.add_argument("--seed", type=int, default=None,
@@ -682,11 +682,23 @@ def main():
         or output_name.startswith("run_seed")
         or output_name.startswith("iter_auto")
     )
-    if args.command in ("prepare", "train") and not explicit_run_dir:
+    if (args.command in ("prepare", "train")
+            and args.output_dir is None and not explicit_run_dir):
         import time as _time
         cfg.output_dir = str(
             Path(cfg.output_dir) / f"run_{_time.strftime('%Y%m%d_%H%M%S')}"
         )
+
+    if args.command in ("prepare", "train"):
+        existing_artifacts = [
+            name for name in ("run_config.json", "prepare.log", "train.log", "final_model")
+            if (Path(cfg.output_dir) / name).exists()
+        ]
+        if existing_artifacts:
+            raise FileExistsError(
+                f"输出目录 {cfg.output_dir} 已有实验产物 {existing_artifacts}，"
+                "请用 --output_dir 指定新的目录，避免覆盖已有结果。"
+            )
 
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
     if args.command in ("prepare", "train", "evaluate"):
