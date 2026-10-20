@@ -56,6 +56,18 @@ def _resolve_batch_label_name_map(loader):
     return {}
 
 
+def _resolve_sample_batch_name_map(loader):
+    """从 DataLoader/Subset 链路解析 sample_id -> human-readable batch name。"""
+    ds = getattr(loader, "dataset", None)
+    while ds is not None:
+        frame = getattr(ds, "df", None)
+        if frame is not None and {"sample_id", "batch_name"}.issubset(frame.columns):
+            return dict(zip(frame["sample_id"].astype(str),
+                            frame["batch_name"].astype(str)))
+        ds = getattr(ds, "dataset", None)
+    return {}
+
+
 # ═══════════════════════════════════════════════════════════
 #  核心收集函数
 # ═══════════════════════════════════════════════════════════
@@ -93,6 +105,7 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
     records = []
     label_name_map = _resolve_product_label_name_map(loader)
     batch_name_map = _resolve_batch_label_name_map(loader)
+    sample_batch_name_map = _resolve_sample_batch_name_map(loader)
 
     for batch in tqdm(
         loader,
@@ -106,6 +119,9 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
         result = proto_store.predict(z, use_spherical=False)
 
         for i in range(x.size(0)):
+            sample_id = (batch["sample_id"][i]
+                         if isinstance(batch["sample_id"], list)
+                         else batch["sample_id"])
             pred_idx = result["pred_idx"][i].item()
             score = result["scores"][i].item()
             base_score = result["base_scores"][i].item()
@@ -126,7 +142,7 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
             )[0]
 
             records.append({
-                "sample_id": batch["sample_id"][i] if isinstance(batch["sample_id"], list) else batch["sample_id"],
+                "sample_id": sample_id,
                 "true_product": true_label,
                 "true_class": true_class_name,
                 "pred_product": pred_idx,
@@ -144,6 +160,11 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
                 "batch_label": batch["batch"][i].item(),
                 "batch_idx": batch_name_map.get(
                     int(batch["batch"][i].item()), str(batch["batch"][i].item())
+                ),
+                "batch_name": sample_batch_name_map.get(
+                    str(sample_id), batch_name_map.get(
+                        int(batch["batch"][i].item()), str(batch["batch"][i].item())
+                    )
                 ),
             })
     return records
@@ -1676,7 +1697,7 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
             return {}
 
         columns = [
-            "evaluation_group", "sample_id", "batch_idx", "true_class",
+            "evaluation_group", "sample_id", "batch_name", "true_class",
             "pred_class", "correct", "prototype_accept", "open_set_score",
             "base_score", "margin_score", "consistency_score", "min_dist",
             "second_dist", "radius_norm",
