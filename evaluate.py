@@ -44,6 +44,18 @@ def _resolve_product_label_name_map(loader):
     return {}
 
 
+def _resolve_batch_label_name_map(loader):
+    """从 DataLoader/Subset 链路解析 batch_label -> batch_idx 映射。"""
+    ds = getattr(loader, "dataset", None)
+    while ds is not None:
+        enc = getattr(ds, "batch_enc", None)
+        if enc is not None and hasattr(enc, "classes_"):
+            classes = list(enc.classes_)
+            return {int(i): str(name) for i, name in enumerate(classes)}
+        ds = getattr(ds, "dataset", None)
+    return {}
+
+
 # ═══════════════════════════════════════════════════════════
 #  核心收集函数
 # ═══════════════════════════════════════════════════════════
@@ -80,6 +92,7 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
     model.eval()
     records = []
     label_name_map = _resolve_product_label_name_map(loader)
+    batch_name_map = _resolve_batch_label_name_map(loader)
 
     for batch in tqdm(
         loader,
@@ -129,6 +142,9 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
                 "correct": pred_class_name == true_class_name,
                 "z": z[i].cpu().numpy(),
                 "batch_label": batch["batch"][i].item(),
+                "batch_idx": batch_name_map.get(
+                    int(batch["batch"][i].item()), str(batch["batch"][i].item())
+                ),
             })
     return records
 
@@ -1097,6 +1113,13 @@ def evaluate_setting_b(model, proto_store, loader_known, loader_unknown,
 
     return {
         "open_set": osm,
+        "prediction_records": [
+            {"evaluation_group": "known", **record}
+            for record in known_eval_records
+        ] + [
+            {"evaluation_group": "unknown", **record}
+            for record in unknown_eval_records
+        ],
         "score_blend_used": {
             "base_weight": float(base_weight),
             "margin_weight": float(margin_weight),
@@ -1647,6 +1670,33 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
 
         return summary_export
 
+    def _export_setting_b_records(records):
+        """Write per-sample known/unknown scores used for Setting B metrics."""
+        if not records:
+            return {}
+
+        columns = [
+            "evaluation_group", "sample_id", "batch_idx", "true_class",
+            "pred_class", "correct", "prototype_accept", "open_set_score",
+            "base_score", "margin_score", "consistency_score", "min_dist",
+            "second_dist", "radius_norm",
+        ]
+        rows = []
+        for record in records:
+            row = {key: _s(record.get(key)) for key in columns}
+            row["prototype_accept"] = _s(record.get("is_known"))
+            rows.append(row)
+        pred_df = pd.DataFrame(rows, columns=columns)
+        pred_path = out_dir / "setting_b_predictions.csv"
+        pred_df.to_csv(pred_path, index=False)
+        group_counts = pred_df["evaluation_group"].value_counts().to_dict()
+        return {
+            "n_samples": int(len(pred_df)),
+            "n_known": int(group_counts.get("known", 0)),
+            "n_unknown": int(group_counts.get("unknown", 0)),
+            "file": pred_path.name,
+        }
+
     summary = {
         "split": {
             "known_products": split["known_products"],
@@ -1676,6 +1726,9 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
         summary["setting_b"] = {
             k: _s(v) for k, v in result_b["open_set"].items()
         }
+        summary["setting_b_prediction_exports"] = _s_recursive(
+            _export_setting_b_records(result_b.get("prediction_records", []))
+        )
         if result_b.get("score_blend_used"):
             summary["setting_b_score_blend_used"] = _s_recursive(
                 result_b["score_blend_used"]
