@@ -288,27 +288,31 @@ class UnifiedLoss(nn.Module):
 
     def forward(self, model_out, batch):
         labels = batch["product"]
-        batch_labels = batch["batch"]
+        zero = model_out["z"].new_zeros(())
 
         # 监督对比损失 (在投影空间, 类间可分)
-        l_supcon = self.supcon_loss(model_out["proj"], labels)
+        l_supcon = (self.supcon_loss(model_out["proj"], labels)
+                    if self.lam_supcon > 0 else zero)
 
         # 批次对抗损失 (GRL, 去批次)
-        l_adv = self.domain_loss(model_out["domain_logits"], batch_labels)
+        l_adv = (self.domain_loss(model_out["domain_logits"], batch["batch"])
+                 if self.lam_adv > 0 else zero)
 
         # Focal 分类辅助损失 (处理类别不平衡)
-        l_cls = torch.tensor(0.0, device=labels.device)
-        if model_out.get("cls_logits") is not None:
+        l_cls = zero
+        if self.lam_cls > 0 and model_out.get("cls_logits") is not None:
             l_cls = self.cls_loss(model_out["cls_logits"], labels)
 
         # 原型距离损失 (在嵌入空间, 类内紧凑)
-        l_proto = self.proto_loss(model_out["z"], labels)
+        l_proto = self.proto_loss(model_out["z"], labels) if self.lam_proto > 0 else zero
 
         # 易混产品对边界损失 (带 EMA 原型)
-        l_hard_pair = self.hard_pair_loss(model_out["z"], labels)
+        l_hard_pair = (self.hard_pair_loss(model_out["z"], labels)
+                       if self.lam_hard_pair > 0 else zero)
 
         # 重建损失 (防止表征退化)
-        l_recon = self.recon_loss(model_out["recon"], batch["input"])
+        l_recon = (self.recon_loss(model_out["recon"], batch["input"])
+                   if self.lam_recon > 0 else zero)
 
         total = (self.lam_supcon * l_supcon
                  + self.lam_adv * l_adv

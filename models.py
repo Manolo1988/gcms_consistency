@@ -570,6 +570,15 @@ class GCMSConsistencyNet(nn.Module):
     def __init__(self, num_batches, cfg, num_products=None):
         super().__init__()
         self.embed_normalize = cfg.embed_normalize
+        # Opt-in branch gating preserves all historical state_dict keys.
+        self.active_heads = None
+        if getattr(cfg, "skip_disabled_loss_heads", False):
+            self.active_heads = {
+                "proj": float(cfg.lambda_supcon) > 0,
+                "domain_logits": float(cfg.lambda_adv) > 0,
+                "cls_logits": float(getattr(cfg, "lambda_cls", 0)) > 0,
+                "recon": float(cfg.lambda_recon) > 0,
+            }
 
         backbone = str(getattr(cfg, "main_backbone", "gcms") or "gcms").lower()
         if backbone in {"gcms", "deep_consistency"}:
@@ -647,10 +656,13 @@ class GCMSConsistencyNet(nn.Module):
         else:
             z = z_raw
 
-        proj = self.proj_head(z_raw)
-        domain_logits = self.domain_head(z_raw)
-        cls_logits = self.cls_head(z_raw) if self.cls_head is not None else None
-        recon = self.decoder(feat_map)
+        active = self.active_heads
+        proj = self.proj_head(z_raw) if active is None or active["proj"] else None
+        domain_logits = (self.domain_head(z_raw)
+                         if active is None or active["domain_logits"] else None)
+        cls_logits = (self.cls_head(z_raw) if self.cls_head is not None
+                      and (active is None or active["cls_logits"]) else None)
+        recon = self.decoder(feat_map) if active is None or active["recon"] else None
 
         out = {
             "z": z,

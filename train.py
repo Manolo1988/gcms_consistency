@@ -603,7 +603,8 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch,
     # DANN alpha 渐进增大
     p = epoch / total_epochs
     alpha = 2.0 / (1.0 + np.exp(-10.0 * p)) - 1.0
-    model.domain_head.set_alpha(alpha)
+    if cfg is None or float(getattr(cfg, "lambda_adv", 0)) > 0:
+        model.domain_head.set_alpha(alpha)
 
     pbar = tqdm(
         loader,

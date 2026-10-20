@@ -213,8 +213,18 @@ def _normalize_rows(values):
     return values / np.clip(norms, 1e-12, None)
 
 
-def evaluate_embedding_episodes(embeddings, manifest, method_name, train_seed):
-    embeddings = _normalize_rows(embeddings)
+def evaluate_embedding_episodes(embeddings, manifest, method_name, train_seed,
+                                distance="cosine"):
+    """Use legacy cosine by default, or unchanged unit embeddings and raw means."""
+    if distance not in {"cosine", "euclidean_raw_mean"}:
+        raise ValueError(f"Unsupported episode distance: {distance}")
+    embeddings = (_normalize_rows(embeddings) if distance == "cosine"
+                  else np.asarray(embeddings, dtype=np.float64))
+    if not np.isfinite(embeddings).all():
+        raise ValueError("Episode embeddings must be finite")
+    if distance == "euclidean_raw_mean" and not np.allclose(
+            np.linalg.norm(embeddings, axis=1), 1.0, atol=1e-4):
+        raise ValueError("euclidean_raw_mean expects unit embeddings from model.encode")
     rows = []
     for episode in manifest["episodes"]:
         for shot_value in manifest["shots"]:
@@ -226,16 +236,21 @@ def evaluate_embedding_episodes(embeddings, manifest, method_name, train_seed):
             for product, block in episode["products"].items():
                 ref_indices = block["shots"][str(shot)]["ref_local_indices"]
                 prototype = embeddings[ref_indices].mean(axis=0, keepdims=True)
-                prototypes.append(_normalize_rows(prototype)[0])
+                prototypes.append(_normalize_rows(prototype)[0] if distance == "cosine"
+                                  else prototype[0])
                 classes.append(product)
                 product_queries = [int(value) for value in block["query_local_indices"]]
                 query_indices.extend(product_queries)
                 query_true.extend([product] * len(product_queries))
             prototype_matrix = np.stack(prototypes)
             query_true = np.asarray(query_true)
-            predictions = np.asarray(classes)[
-                np.argmax(embeddings[query_indices] @ prototype_matrix.T, axis=1)
-            ]
+            if distance == "cosine":
+                predicted_ids = np.argmax(embeddings[query_indices] @ prototype_matrix.T, axis=1)
+            else:
+                distances = np.linalg.norm(
+                    embeddings[query_indices, None, :] - prototype_matrix[None, :, :], axis=2)
+                predicted_ids = np.argmin(distances, axis=1)
+            predictions = np.asarray(classes)[predicted_ids]
             base = {
                 "method": str(method_name),
                 "train_seed": int(train_seed),
