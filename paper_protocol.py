@@ -216,6 +216,8 @@ def _normalize_rows(values):
 def evaluate_embedding_episodes(embeddings, manifest, method_name, train_seed,
                                 distance="cosine"):
     """Use legacy cosine by default, or unchanged unit embeddings and raw means."""
+    from sklearn.metrics import f1_score
+
     if distance not in {"cosine", "euclidean_raw_mean"}:
         raise ValueError(f"Unsupported episode distance: {distance}")
     embeddings = (_normalize_rows(embeddings) if distance == "cosine"
@@ -260,6 +262,8 @@ def evaluate_embedding_episodes(embeddings, manifest, method_name, train_seed,
                 "scope": "pooled",
                 "product": "__pooled__",
                 "accuracy": float(np.mean(predictions == query_true)),
+                "macro_f1": float(f1_score(query_true, predictions, labels=classes,
+                                           average="macro", zero_division=0)),
                 "n_query": int(len(query_true)),
             }
             rows.append(base)
@@ -270,6 +274,8 @@ def evaluate_embedding_episodes(embeddings, manifest, method_name, train_seed,
                     "scope": "product",
                     "product": product,
                     "accuracy": float(np.mean(predictions[mask] == query_true[mask])),
+                    "macro_f1": float(f1_score(query_true, predictions, labels=[product],
+                                               average="macro", zero_division=0)),
                     "n_query": int(mask.sum()),
                 })
     return rows

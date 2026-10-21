@@ -123,8 +123,30 @@ def get_device():
     return torch.device("cpu")
 
 
+def restore_saved_config(cfg):
+    """Restore a trained run before applying explicit evaluation CLI overrides."""
+    output = Path(cfg.output_dir)
+    if output.name == "final_model":
+        output = output.parent
+    for path in (output / "final_model" / "train_meta.json", output / "run_config.json"):
+        if not path.exists():
+            continue
+        saved = json.loads(path.read_text(encoding="utf-8")).get("config")
+        if not isinstance(saved, dict):
+            continue
+        for key, value in saved.items():
+            if not key.startswith("_") and key != "output_dir":
+                setattr(cfg, key, value)
+        cfg.output_dir = str(output)
+        cfg._restored_config_path = str(path)
+        return str(path)
+    return None
+
+
 @dataclass
 class Config:
+    experiment_preset: str = ""
+    evaluation_protocol: str = "standard"  # standard / light_cnn_v1
     # ── 路径 ──────────────────────────────────────────────
     dataset_root: str = str(
         Path(__file__).resolve().parent / "dataset"
@@ -156,6 +178,7 @@ class Config:
     blocks_per_stage: int = 2                 # 每阶段 ResBlock 数量
     num_axial_heads: int = 4
     dropout: float = 0.3
+    skip_disabled_loss_heads: bool = False    # 权重为0的辅助头不参与前向计算
     embed_normalize: bool = True              # L2 归一化嵌入
     pretrained_feature_model: str = ""        # 预训练特征提取权重路径
     pretrained_feature_arch: str = "auto"    # auto/resnet18/resnet50/wide_resnet50_2
@@ -191,7 +214,7 @@ class Config:
     eval_interval_search: int = 10         # 搜索阶段验证间隔
     eval_interval_final: int = 10          # 收敛阶段验证间隔
     eval_final_start_ratio: float = 0.7    # 从总训练进度该比例起切到收敛阶段
-    model_select_metric: str = "open_set" # open_set / metric / acc / auroc_correct
+    model_select_metric: str = "open_set" # open_set / metric / acc / auroc_correct / macro_f1
     model_select_pseudo_unknown_products: str = "H88,H99,HRJ,HRY,HYZ,RJD,YJD"
     model_select_pseudo_unknown_min_samples: int = 5
     model_select_pseudo_unknown_max_products: int = 7

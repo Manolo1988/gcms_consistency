@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from config import Config, apply_prepared_input_config
+from config import Config, apply_prepared_input_config, restore_saved_config
 
 
 def _parse_int_tuple(value: str):
@@ -68,6 +68,7 @@ def _persist_run_metadata(cfg, args):
         payload["last_evaluate"] = {
             "timestamp": timestamp,
             "args": vars(args),
+            "config": cfg.__dict__,
         }
     else:
         payload = {
@@ -361,6 +362,8 @@ def main():
                         help="直接使用指定的输出目录；未指定时 prepare/train 自动创建 run_时间戳 子目录")
     parser.add_argument("--prepared_dir", type=str, default=None,
                         help="prepared data 目录；默认 C：双通道、不做 PCA；A/B 方案请传入对应目录")
+    parser.add_argument("--experiment_preset", choices=["light_cnn_v1_attention_1block"],
+                        default=None, help="沿用上一轮两损失设置：每阶段1块，保留双轴注意力")
     parser.add_argument("--seed", type=int, default=None,
                         help="随机种子")
     parser.add_argument("--epochs", type=int, default=None,
@@ -383,6 +386,8 @@ def main():
                         help="分类辅助头损失权重")
     parser.add_argument("--lambda_hard_pair", type=float, default=None,
                         help="易混产品对 hard margin 权重")
+    parser.add_argument("--skip_disabled_loss_heads", action="store_true",
+                        help="权重为0的辅助损失头不参与模型前向计算")
     parser.add_argument("--supcon_temperature", type=float, default=None,
                         help="SupCon 温度参数")
     parser.add_argument("--embed_dim", "--feature_dim", dest="feature_dim",
@@ -402,6 +407,8 @@ def main():
                         help="开集分数 margin score 权重")
     parser.add_argument("--no_auto_open_score_blend", action="store_true",
                         help="关闭Setting B自动选择最佳open-score混合")
+    parser.add_argument("--disable_open_score_calibration", action="store_true",
+                        help="评估时完全关闭开集分数校准")
     parser.add_argument("--open_score_calibration_products", type=str, default=None,
                         help="开发期伪未知产品，逗号分隔；不使用最终留出产品")
     parser.add_argument("--disable_open_score_calibration_apply", action="store_true",
@@ -415,7 +422,7 @@ def main():
     parser.add_argument("--eval_final_start_ratio", type=float, default=None,
                         help="切换到后期收敛验证间隔的训练进度比例")
     parser.add_argument("--model_select_metric", type=str, default=None,
-                        choices=["open_set", "metric", "acc", "auroc", "auroc_correct"],
+                        choices=["open_set", "metric", "acc", "auroc", "auroc_correct", "macro_f1"],
                         help="训练中 best checkpoint 的选择指标")
     parser.add_argument("--model_select_min_epoch", type=int, default=None,
                         help="选模最小 epoch (只在该 epoch 之后才允许更新 best checkpoint)")
@@ -553,10 +560,10 @@ def main():
                         help="评估时不保存可视化图")
 
     # 范围参数
-    parser.add_argument("--rt_min", type=float, default=3.17)
-    parser.add_argument("--rt_max", type=float, default=36.91)
-    parser.add_argument("--mz_min", type=float, default=30)
-    parser.add_argument("--mz_max", type=float, default=200)
+    parser.add_argument("--rt_min", type=float, default=None)
+    parser.add_argument("--rt_max", type=float, default=None)
+    parser.add_argument("--mz_min", type=float, default=None)
+    parser.add_argument("--mz_max", type=float, default=None)
 
     args = parser.parse_args()
 
@@ -564,6 +571,16 @@ def main():
 
     if args.output_dir:
         cfg.output_dir = str(Path(args.output_dir))
+    if args.command == "evaluate":
+        restored = restore_saved_config(cfg)
+        if restored:
+            print(f"  [Config] 已恢复训练配置: {restored}")
+    if args.experiment_preset:
+        if args.command != "train":
+            parser.error("--experiment_preset 仅用于 train；evaluate 自动读取训练配置")
+        from light_cnn_protocol import build_attention_ablation_config
+        cfg = build_attention_ablation_config(
+            args.prepared_dir or cfg.prepared_dir, cfg.output_dir)
     if args.prepared_dir:
         cfg.prepared_dir = str(Path(args.prepared_dir))
     elif args.command == "prepare":
@@ -610,6 +627,8 @@ def main():
         cfg.model_select_min_epoch = int(args.model_select_min_epoch)
     if args.model_select_save_checkpoints:
         cfg.model_select_save_checkpoints = True
+    if args.skip_disabled_loss_heads:
+        cfg.skip_disabled_loss_heads = True
     if args.swa_enabled:
         cfg.swa_enabled = True
     if args.swa_start_epoch is not None:
@@ -625,6 +644,8 @@ def main():
         cfg.auto_create_split_on_train = False
     if args.no_auto_open_score_blend:
         cfg.open_score_auto_blend = False
+    if args.disable_open_score_calibration:
+        cfg.open_score_calibration_enabled = False
     if args.disable_open_score_calibration_apply:
         cfg.open_score_calibration_apply = False
     if args.skip_readme_baselines:
@@ -673,6 +694,12 @@ def main():
 
     if args.command in ("train", "evaluate", "interpret", "register"):
         apply_prepared_input_config(cfg)
+
+    if args.command == "train" and cfg.evaluation_protocol == "light_cnn_v1":
+        from light_cnn_protocol import validate_inputs
+        _, _, audit = validate_inputs(cfg.prepared_dir)
+        cfg._frozen_input_audit = audit
+        print(f"  [Input] 冻结清单、划分和全部张量头已核对: {audit['counts']}")
 
     if args.command == "evaluate" and Path(cfg.output_dir).name == "final_model":
         cfg.output_dir = str(Path(cfg.output_dir).parent)

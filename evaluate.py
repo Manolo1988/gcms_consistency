@@ -1173,6 +1173,40 @@ def evaluate_setting_c(model, unknown_dataset, unknown_idx_splits,
 #  单模型评估 (使用 prepared_data/split.json 划分)
 # ═══════════════════════════════════════════════════════════
 
+def evaluate_setting_c_frozen(model, loader_unknown, metadata_csv, split, device, cfg):
+    """Reuse frozen cross-batch episodes through the common eval entry point."""
+    from light_cnn_protocol import write_json
+    from paper_protocol import (build_cross_batch_episodes, validate_episode_manifest,
+                                evaluate_embedding_episodes, write_rows_csv)
+
+    episodes = build_cross_batch_episodes(
+        metadata_csv, split["test_unknown_idx"], shots=cfg.n_shot_values,
+        episode_count=cfg.fewshot_repeats, seed_start=cfg.fewshot_seed_start)
+    audit = validate_episode_manifest(episodes)
+    if audit["status"] != "pass":
+        raise ValueError(audit)
+    out_dir = Path(cfg.output_dir)
+    write_json(episodes, out_dir / "fewshot_episodes.json")
+    records = collect_embeddings(model, loader_unknown, device)
+    rows = evaluate_embedding_episodes(
+        np.stack([r["z"] for r in records]), episodes, cfg.experiment_preset,
+        cfg.seed, distance="euclidean_raw_mean")
+    write_rows_csv(rows, out_dir / "setting_c_episodes.csv")
+    summary = {}
+    for shot in cfg.n_shot_values:
+        pooled = [r for r in rows if r["shot"] == shot and r["scope"] == "pooled"]
+        summary[shot] = {
+            "accuracy": float(np.mean([r["accuracy"] for r in pooled])),
+            "macro_f1": float(np.mean([r["macro_f1"] for r in pooled])),
+            "episode_std": float(np.std([r["accuracy"] for r in pooled])),
+            "repeats": len(pooled),
+            "n_ref": int(shot * len(episodes["episodes"][0]["products"])),
+            "n_test": float(np.mean([r["n_query"] for r in pooled])),
+        }
+    print(f"\nSetting C: {len(episodes['episodes'])} fixed cross-batch episodes; raw mean, Euclidean, no finetuning")
+    return {"few_shot": summary}
+
+
 def evaluate_single_model(cfg):
     """
     评估单一模型在三个 Setting 上的表现。
@@ -1181,8 +1215,12 @@ def evaluate_single_model(cfg):
     Setting B: 已知类 vs 留出产品类 → 开集检测
     Setting C: 留出产品类 N-shot 注册 → 少样本识别
     """
-    from config import apply_prepared_input_config
+    from config import apply_prepared_input_config, restore_saved_config
 
+    if not getattr(cfg, "_restored_config_path", None):
+        restored = restore_saved_config(cfg)
+        if restored:
+            print(f"  [Config] 已恢复训练配置: {restored}")
     prepared_info = apply_prepared_input_config(cfg)
     if str(getattr(cfg, "primary_model", "")).strip().lower() == "raw_pca_mlp":
         from raw_pca_pipeline import evaluate_single_model_raw_pca
@@ -1279,6 +1317,12 @@ def evaluate_single_model(cfg):
     model = GCMSConsistencyNet(num_batches_model, cfg, num_products=num_products_model).to(device)
     model.load_state_dict(torch.load(
         model_dir / "model.pt", map_location=device, weights_only=True))
+    frozen_protocol = getattr(cfg, "evaluation_protocol", "standard") == "light_cnn_v1"
+    if frozen_protocol:
+        from train import _enable_cuda_fast_paths, _maybe_optimize_model, set_seed
+        set_seed(cfg.seed, deterministic=cfg.deterministic)
+        _enable_cuda_fast_paths(cfg, device)
+        model = _maybe_optimize_model(model, cfg, device)
 
     proto_store = PrototypeStore()
     proto_dir = model_dir / "prototypes"
@@ -1379,17 +1423,16 @@ def evaluate_single_model(cfg):
 
     # ═══ Setting B: 开集检测 ═══
     if split["test_unknown_idx"] and bool(getattr(cfg, "evaluate_open_set", True)):
-        # 已知类采用 val + 留出批次并集，降低单一批次分布偏差
-        known_idx = sorted(
-            set(split["val_idx"]) | set(split["test_batch_idx"])
-        )
+        # 冻结协议仅使用已知测试集；标准流程使用 val + 留出批次并集。
+        known_idx = (split["test_batch_idx"] if frozen_protocol else sorted(
+            set(split["val_idx"]) | set(split["test_batch_idx"])))
         _, loader_known = _make_loader_main(known_idx)
         ds_unknown, loader_unknown = _make_loader_main(split["test_unknown_idx"])
 
         # 校准仅使用已知产品的伪未知开发集；最终留出产品不可参与拟合。
         calibrator = None
         cal_metrics = None
-        if bool(getattr(cfg, "open_score_calibration_enabled", False)):
+        if not frozen_protocol and bool(getattr(cfg, "open_score_calibration_enabled", False)):
             try:
                 print("\n── Setting B Calibration ──")
                 dev_idx = sorted(set(split["val_idx"]) | set(split["test_batch_idx"]))
@@ -1405,9 +1448,22 @@ def evaluate_single_model(cfg):
             except Exception as e:
                 print(f"  [Calibration] Failed: {e}")
 
-        result_b = evaluate_setting_b(
-            model, proto_store, loader_known, loader_unknown,
-            device, cfg, f"留出产品 {split['holdout_products']}", calibrator=calibrator)
+        if frozen_protocol:
+            from light_cnn_protocol import frozen_setting_b
+            _, loader_validation = _make_loader_main(split["val_idx"])
+            known_records = collect_predictions(model, loader_known, proto_store, device)
+            unknown_records = collect_predictions(model, loader_unknown, proto_store, device)
+            validation_records = collect_predictions(model, loader_validation, proto_store, device)
+            result_b = frozen_setting_b(known_records, unknown_records, validation_records)
+            osm = result_b["open_set"]
+            print(f"\nSetting B: known={len(known_records)}, unknown={len(unknown_records)}")
+            print(f"  AUROC={osm['open_set_AUROC']:.4f}, FPR95={osm['FPR_at_95TPR']:.4f}")
+            print(f"  Validation threshold={osm['validation_accept_threshold']:.5f}, "
+                  f"unknown false acceptance={osm['unknown_false_acceptance']:.4f}")
+        else:
+            result_b = evaluate_setting_b(
+                model, proto_store, loader_known, loader_unknown,
+                device, cfg, f"留出产品 {split['holdout_products']}", calibrator=calibrator)
         if cal_metrics is not None:
             result_b["calibration"] = cal_metrics
     elif not split["test_unknown_idx"]:
@@ -1418,7 +1474,11 @@ def evaluate_single_model(cfg):
         print("\n── Setting B: 已按配置跳过 ──")
 
     # ═══ Setting C: 少样本 ═══
-    if split["test_unknown_idx"]:
+    if split["test_unknown_idx"] and frozen_protocol:
+        _, loader_c = _make_loader_main(split["test_unknown_idx"])
+        result_c = evaluate_setting_c_frozen(
+            model, loader_c, metadata_csv, split, device, cfg)
+    elif split["test_unknown_idx"]:
         unknown_idx = split["test_unknown_idx"]
         ds_unknown_full = GCMSDataset(
             metadata_csv, product_col=product_col,
@@ -1701,11 +1761,15 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
             "pred_class", "correct", "prototype_accept", "open_set_score",
             "base_score", "margin_score", "consistency_score", "min_dist",
             "second_dist", "radius_norm",
+            "validation_accept_threshold",
+            "validation_accept",
         ]
         rows = []
         for record in records:
             row = {key: _s(record.get(key)) for key in columns}
-            row["prototype_accept"] = _s(record.get("is_known"))
+            row["prototype_accept"] = _s(record.get("prototype_accept", record.get("is_known")))
+            if "validation_accept_threshold" in record:
+                row["validation_accept"] = bool(record["is_known"])
             rows.append(row)
         pred_df = pd.DataFrame(rows, columns=columns)
         pred_path = out_dir / "setting_b_predictions.csv"
@@ -1719,6 +1783,7 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
         }
 
     summary = {
+        "evaluation_protocol": getattr(cfg, "evaluation_protocol", "standard"),
         "split": {
             "known_products": split["known_products"],
             "holdout_products": split["holdout_products"],

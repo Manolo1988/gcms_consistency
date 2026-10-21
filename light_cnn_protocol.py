@@ -180,6 +180,48 @@ def build_config(prepared, output, group):
     return cfg
 
 
+def build_attention_ablation_config(prepared, output):
+    """The approved middle model; keep the frozen A/B training settings."""
+    cfg = build_config(prepared, output, "A_original_2loss")
+    cfg.blocks_per_stage = 1
+    cfg.experiment_preset = "light_cnn_v1_attention_1block"
+    cfg.evaluation_protocol = "light_cnn_v1"
+    # Setting A consistency uses the distance-decay score; Setting B uses -d/r.
+    cfg.open_score_base_weight = 1.0
+    cfg.open_score_margin_weight = 0.0
+    cfg.evaluate_save_visualizations = True
+    return cfg
+
+
+def frozen_setting_b(known_records, unknown_records, validation_records):
+    """Keep the v1 score/threshold while fitting the common reporting schema."""
+    score = lambda rows: np.asarray([-float(r["radius_norm"]) for r in rows])
+    threshold = validation_threshold(score(validation_records))
+    known_scores, unknown_scores = score(known_records), score(unknown_records)
+    metrics = open_set_metrics(known_scores, unknown_scores, threshold)
+    metrics.update(
+        open_set_AUROC=metrics["auroc"], FPR_at_95TPR=metrics["fpr95"],
+        known_score_mean=float(known_scores.mean()),
+        unknown_score_mean=float(unknown_scores.mean()),
+    )
+    records = []
+    for group, source, scores in (("known", known_records, known_scores),
+                                  ("unknown", unknown_records, unknown_scores)):
+        for record, value in zip(source, scores):
+            records.append({**record, "evaluation_group": group,
+                            "open_set_score": float(value),
+                            "prototype_accept": bool(record["is_known"]),
+                            "is_known": bool(value >= threshold),
+                            "validation_accept_threshold": threshold})
+    for product in sorted({r["true_class"] for r in unknown_records}):
+        selected = [r for r in records if r["evaluation_group"] == "unknown"
+                    and r["true_class"] == product]
+        metrics[f"{product}_false_acceptance"] = float(np.mean([r["is_known"] for r in selected]))
+    return {"open_set": metrics, "prediction_records": records,
+            "score_blend_used": {"auto": False, "calibrated": False,
+                                 "definition": metrics["score_definition"]}}
+
+
 def classification_metrics(truth, prediction, classes=KNOWN):
     truth, prediction = np.asarray(truth), np.asarray(prediction)
     if not len(truth) or len(truth) != len(prediction):

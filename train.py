@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 from tqdm import tqdm
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import f1_score, roc_auc_score
 
 from sklearn.preprocessing import LabelEncoder
 
@@ -33,6 +33,17 @@ from register import register_from_loader
 def _progress_enabled():
     """控制是否显示 tqdm 进度条。默认关闭，避免污染日志。"""
     return os.environ.get("GCMS_SHOW_PROGRESS", "0") == "1"
+
+
+def _macro_f1_score(y_true, y_pred, num_classes):
+    """Macro-F1 across every declared class, including classes never predicted."""
+    return float(f1_score(
+        y_true,
+        y_pred,
+        labels=np.arange(int(num_classes)),
+        average="macro",
+        zero_division=0,
+    ))
 
 
 def set_seed(seed, deterministic=False):
@@ -144,6 +155,13 @@ def _select_checkpoint_score(val_m, cfg):
             return float(val_m["metric"]), "metric"
         value = -1e9
     return value, key
+
+
+def _checkpoint_improved(val_m, cfg, score, best_score, best_tiebreak, min_delta):
+    if getattr(cfg, "evaluation_protocol", "standard") == "light_cnn_v1":
+        from light_cnn_protocol import selection_key
+        return selection_key(val_m) > (best_score, best_tiebreak)
+    return score > best_score + min_delta
 
 
 def _save_model_selection_artifacts(model, cfg, epoch_num, val_m,
@@ -745,6 +763,10 @@ def validate_with_prototypes(model, train_loader_noaug, val_loader,
 
     return {
         "acc": float(val_acc),
+        "macro_f1": _macro_f1_score(all_labels_arr, all_preds_arr, n_classes),
+        "balanced_accuracy": float(np.mean(
+            np.divide(conf_mat.diagonal(), conf_mat.sum(axis=1),
+                      out=np.zeros(n_classes), where=conf_mat.sum(axis=1) > 0))),
         "auroc_correct": float(auroc_correct),
         "metric": float(val_metric),
         "train_proto_acc": float(train_proto_acc),
@@ -1064,6 +1086,13 @@ def train_single_model(cfg: Config):
 
     model = GCMSConsistencyNet(num_batches, cfg, num_products=ds_train.num_products).to(device)
     model = _maybe_optimize_model(model, cfg, device)
+    frozen_protocol = getattr(cfg, "evaluation_protocol", "standard") == "light_cnn_v1"
+    if frozen_protocol:
+        for module in (model.domain_head, model.decoder):
+            module.requires_grad_(False)
+        print(f"  模型: {cfg.main_backbone}, 每阶段 {cfg.blocks_per_stage} 个残差块, "
+              f"双轴注意力={'保留' if cfg.main_backbone == 'gcms' else '移除'}")
+        print(f"  损失: {cfg.lambda_supcon} × SupCon + {cfg.lambda_cls} × 分类损失")
     _attach_focal_class_weights(cfg, ds_train)
     criterion = UnifiedLoss(cfg).to(device)
     criterion.set_label_names(ds_train.get_label_name_map())
@@ -1083,13 +1112,14 @@ def train_single_model(cfg: Config):
         ds_train_noaug,
         batch_size=cfg.batch_size,
         shuffle=False,
-        **_loader_runtime_kwargs(cfg, device),
+        **_loader_runtime_kwargs(cfg, device, generator=(
+            _make_generator(cfg, 104) if frozen_protocol else None)),
     )
     loader_train_noaug_subset = _build_proto_subset_loader(ds_train_noaug, cfg, device)
     label_names = ds_train.get_label_name_map()
 
     # ── 训练 ──
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
+    optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=cfg.lr,
                                   weight_decay=cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=cfg.epochs)
@@ -1098,6 +1128,9 @@ def train_single_model(cfg: Config):
 
     best_acc = 0
     best_metric = -1e9
+    best_tiebreak = -1e9
+    best_epoch = None
+    training_history, validation_history = [], []
     best_state = None
     no_improve_checks = 0
     eval_checks = 0
@@ -1112,6 +1145,10 @@ def train_single_model(cfg: Config):
         m_train = train_one_epoch(model, loader_train, criterion, optimizer,
                                   device, epoch, cfg.epochs, cfg=cfg, scaler=scaler)
         scheduler.step()
+        if frozen_protocol:
+            from light_cnn_protocol import write_json
+            training_history.append({"epoch": epoch + 1, **m_train})
+            write_json(training_history, Path(cfg.output_dir) / "training_history.json")
 
         # 关闭 tqdm 时仍保留每轮可观测日志，避免看起来像“卡住”
         print(f"  Epoch {epoch+1}/{cfg.epochs}  "
@@ -1178,14 +1215,25 @@ def train_single_model(cfg: Config):
             # 避免早期验证集噪声 checkpoint (e.g. epoch 20) 被选中。
             sel_min_epoch = int(getattr(cfg, "model_select_min_epoch", 0) or 0)
             sel_allowed = (epoch_num >= sel_min_epoch)
-            if sel_allowed and select_score > (best_metric + early_stop_ctrl["min_delta"]):
+            improved = sel_allowed and _checkpoint_improved(
+                val_m, cfg, select_score, best_metric, best_tiebreak, early_stop_ctrl["min_delta"])
+            if improved:
                 best_metric = select_score
+                best_tiebreak = float(val_m.get("balanced_accuracy", 0.0))
+                best_epoch = epoch_num
                 best_acc = val_acc
                 best_state = {k: v.cpu().clone()
                               for k, v in _model_state_dict_for_save(model).items()}
                 no_improve_checks = 0
             else:
                 no_improve_checks += 1
+            if frozen_protocol:
+                validation_history.append({"epoch": epoch_num, "selected": improved,
+                    "best_epoch": best_epoch, "accuracy": val_acc,
+                    "macro_f1": val_m["macro_f1"], "balanced_accuracy": val_m["balanced_accuracy"]})
+                write_json(validation_history, Path(cfg.output_dir) / "validation_history.json")
+                print(f"    -> Macro-F1={val_m['macro_f1']:.4f}, "
+                      f"Balanced Accuracy={val_m['balanced_accuracy']:.4f}, best_epoch={best_epoch}")
             train_pa = float(val_m.get("train_proto_acc", float("nan")))
             pa = val_m.get("per_class_acc", {})
             radii = val_m.get("radii", {})
@@ -1275,6 +1323,9 @@ def train_single_model(cfg: Config):
         json.dump({
             "num_batches": int(num_batches),
             "num_products": int(ds_train.num_products),
+            "best_epoch": best_epoch,
+            "config": {k: v.tolist() if isinstance(v, np.ndarray) else v
+                       for k, v in vars(cfg).items() if not k.startswith("_")},
             "model_select_metric": str(getattr(cfg, "model_select_metric", "metric")),
             "best_select_score": float(best_metric),
             "best_val_acc": float(best_acc),
