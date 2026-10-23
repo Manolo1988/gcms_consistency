@@ -28,7 +28,8 @@ GRID = np.arange(RT_LO, RT_HI + STEP_MIN / 2, STEP_MIN)
 def read_metadata(prepared: Path):
     import pandas as pd
 
-    frame = pd.read_csv(prepared / "metadata.csv")
+    # batch_name 全是数字，pandas 默认读成 int64，会和字符串的 --ref-batch 比较失败。
+    frame = pd.read_csv(prepared / "metadata.csv", dtype={"batch_name": str})
     frame["tensor_abs"] = [
         prepared / str(value).replace("\\", "/") for value in frame["tensor_path"]
     ]
@@ -49,7 +50,16 @@ def normalize(values: np.ndarray) -> np.ndarray:
     return values / norm if norm > 1e-12 else values
 
 
-def best_shift(ref: np.ndarray, cur: np.ndarray, max_lag_min=1.5):
+def zero_lag_corr(ref: np.ndarray, cur: np.ndarray) -> float:
+    """Correlation with no shift applied; immune to the cross-correlation
+    jumping onto a neighbouring peak."""
+    a = ref - ref.mean()
+    b = cur - cur.mean()
+    denom = np.linalg.norm(a) * np.linalg.norm(b)
+    return float(np.dot(a, b) / denom) if denom > 1e-12 else 0.0
+
+
+def best_shift(ref: np.ndarray, cur: np.ndarray, max_lag_min=25.0 / 60.0):
     """Return lag in minutes so that cur[i] ~ ref[i + lag]."""
     n = len(ref)
     max_lag = int(round(max_lag_min / STEP_MIN))
@@ -69,7 +79,8 @@ def best_shift(ref: np.ndarray, cur: np.ndarray, max_lag_min=1.5):
         r = float(np.dot(a, b) / denom)
         if r > best_r:
             best_lag, best_r = lag, r
-    return best_lag * STEP_MIN, best_r
+    at_edge = abs(best_lag) >= max_lag - 1
+    return best_lag * STEP_MIN, best_r, at_edge
 
 
 def batch_offsets(prepared: Path, ref_batch: str, samples_per_batch: int, rt_bins: int):
@@ -83,26 +94,40 @@ def batch_offsets(prepared: Path, ref_batch: str, samples_per_batch: int, rt_bin
                   if Path(p).exists()]
         if traces:
             ref_traces[product] = np.mean(traces, axis=0)
+    if not ref_traces:
+        missing = int((~frame["tensor_abs"].map(lambda p: Path(p).exists())).sum())
+        raise RuntimeError(
+            f"参考批次 {ref_batch} 没有可用样本：tensor_path 指向的文件缺失 {missing} 个。"
+            f"请确认 --before-dir/--after-dir 指向 representations 下的双通道目录，"
+            f"且该目录下的 metadata.csv 与本机路径一致。")
 
     per_batch, detail = {}, []
     for batch, group in frame.groupby("batch_name"):
-        offsets, corrs = [], []
+        offsets, corrs, zero_corrs, edges = [], [], [], []
         for product, ref in ref_traces.items():
             rows = group[group["product_fine"] == product]
             for _, row in rows.head(samples_per_batch).iterrows():
                 path = Path(row["tensor_abs"])
                 if not path.exists():
                     continue
-                lag, corr = best_shift(ref, normalize(pseudo_tic(path, rt_bins)))
+                trace = normalize(pseudo_tic(path, rt_bins))
+                lag, corr, at_edge = best_shift(ref, trace)
+                zc = zero_lag_corr(ref, trace)
                 offsets.append(lag * 60.0)
                 corrs.append(corr)
+                zero_corrs.append(zc)
+                edges.append(at_edge)
                 detail.append({"batch": batch, "product": product,
                                "sample_id": row["sample_id"],
                                "offset_seconds": round(lag * 60.0, 2),
-                               "correlation": round(corr, 4)})
+                               "correlation": round(corr, 4),
+                               "zero_lag_correlation": round(zc, 4),
+                               "lag_hit_search_edge": bool(at_edge)})
         per_batch[batch] = {
             "offset_seconds": round(float(np.median(offsets)), 2) if offsets else None,
+            "zero_lag_correlation": round(float(np.median(zero_corrs)), 4) if zero_corrs else None,
             "n_products_used": len(offsets),
+            "n_hit_search_edge": int(sum(edges)),
             "min_correlation": round(min(corrs), 4) if corrs else None,
         }
     return per_batch, detail
@@ -140,17 +165,21 @@ def main():
             "offset_after_seconds": a,
             "abs_after_seconds": None if a is None else round(abs(a), 2),
             "delta_seconds": None if (a is None or b is None) else round(a - b, 2),
+            "zero_corr_before": before.get(batch, {}).get("zero_lag_correlation"),
+            "zero_corr_after": after.get(batch, {}).get("zero_lag_correlation"),
             "n_products_used": after.get(batch, {}).get("n_products_used"),
             "min_correlation_after": after.get(batch, {}).get("min_correlation"),
+            "hits_search_edge_after": after.get(batch, {}).get("n_hit_search_edge"),
         })
 
     with open(args.output_dir / "rt_shift_before_after.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+    detail_fields = ["stage", "batch", "product", "sample_id", "offset_seconds",
+                     "correlation", "zero_lag_correlation", "lag_hit_search_edge"]
     with open(args.output_dir / "rt_shift_samples.csv", "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["stage", "batch", "product", "sample_id",
-                                               "offset_seconds", "correlation"])
+        writer = csv.DictWriter(f, fieldnames=detail_fields)
         writer.writeheader()
         for stage, detail in (("before", before_detail), ("after", after_detail)):
             for item in detail:
@@ -163,6 +192,14 @@ def main():
     zero_batches = [r["batch"] for r in rows if r["offset_before_seconds"] == 0.0]
     zero_after = [r["offset_after_seconds"] for r in rows
                   if r["offset_before_seconds"] == 0.0 and r["offset_after_seconds"] is not None]
+    zc_before = np.array([r["zero_corr_before"] for r in rows
+                          if r["zero_corr_before"] is not None], dtype=float)
+    zc_after = np.array([r["zero_corr_after"] for r in rows
+                         if r["zero_corr_after"] is not None], dtype=float)
+    improved = sum(1 for r in rows
+                   if r["zero_corr_before"] is not None and r["zero_corr_after"] is not None
+                   and r["zero_corr_after"] > r["zero_corr_before"])
+    suspects = [r["batch"] for r in rows if r["hits_search_edge_after"]]
 
     summary = {
         "reference_batch": args.ref_batch,
@@ -181,6 +218,15 @@ def main():
             "max_abs": round(float(np.abs(after_vals).max()), 2) if after_vals.size else None,
             "n_within_1s": int((np.abs(after_vals) <= 1.0).sum()) if after_vals.size else None,
         },
+        "zero_lag_correlation": {
+            "before_mean": round(float(zc_before.mean()), 4) if zc_before.size else None,
+            "after_mean": round(float(zc_after.mean()), 4) if zc_after.size else None,
+            "n_batches_improved": improved,
+            "n_batches": len(rows),
+            "interpretation": "越接近 1 表示跨批次峰位越一致；该指标不做位移搜索，"
+                              "不受互相关跳峰影响，应作为主判据",
+        },
+        "suspect_batches_search_edge": suspects,
         "control_batches_offset_zero": {
             "batches": zero_batches,
             "after_seconds": zero_after,
@@ -219,6 +265,21 @@ def main():
     ax.grid(alpha=0.25, axis="y")
     fig.tight_layout()
     fig.savefig(args.output_dir / "rt_shift_after_hist.png", dpi=150)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(11, 4.2))
+    zb = [np.nan if r["zero_corr_before"] is None else r["zero_corr_before"] for r in rows]
+    za = [np.nan if r["zero_corr_after"] is None else r["zero_corr_after"] for r in rows]
+    ax.plot(x, zb, "o-", ms=4, lw=1.2, color="#888780", label="before alignment")
+    ax.plot(x, za, "s-", ms=4, lw=1.2, color="#1D9E75", label="after alignment")
+    ax.set_xticks(x)
+    ax.set_xticklabels([r["batch"] for r in rows], rotation=90, fontsize=7)
+    ax.set_ylabel("zero-shift correlation")
+    ax.set_title("cross-batch similarity without any shift search (higher = better aligned)")
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(args.output_dir / "zero_shift_correlation.png", dpi=150)
     plt.close(fig)
 
     print(json.dumps(summary, indent=2, ensure_ascii=False))
