@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import pickle
@@ -119,27 +120,45 @@ def _read_raw_matrix(row):
     return rts.astype(np.float32), mzs.astype(np.float32), matrix.astype(np.float32)
 
 
-def _resample_raw_to_physical_axes(rts, mzs, matrix, rt_axis, mz_axis):
+def _load_rt_offset_table(path):
+    """Read batch -> RT offset in seconds; empty map when no table is given."""
+    if path is None:
+        return {}
+    table = {}
+    with open(path, encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            batch = (row.get("batch") or "").strip()
+            raw = (row.get("offset_seconds") or "").strip()
+            if batch and raw:
+                table[batch] = float(raw)
+    return table
+
+
+def _resample_raw_to_physical_axes(rts, mzs, matrix, rt_axis, mz_axis, rt_offset_min=0.0):
     logged = np.log1p(np.maximum(matrix, 0.0)).astype(np.float32)
     aligned_mz = interp1d(
         mzs, logged, axis=1, kind="linear", bounds_error=False,
         fill_value=0.0, assume_sorted=True,
     )(mz_axis).astype(np.float32)
+    # A positive offset means this run eluted early, so shift the sample later:
+    # y'(t) = y(t - offset), i.e. sample the original trace at rt_axis - offset.
+    target_rt = rt_axis - rt_offset_min if rt_offset_min else rt_axis
     aligned_rt = interp1d(
         rts, aligned_mz, axis=0, kind="linear", bounds_error=False,
         fill_value=0.0, assume_sorted=True,
-    )(rt_axis).astype(np.float32)
+    )(target_rt).astype(np.float32)
     return aligned_rt
 
 
-def _fixed_grid_log1p(rts, mzs, matrix, rt_bins, rt_range, mz_bins, mz_range):
+def _fixed_grid_log1p(rts, mzs, matrix, rt_bins, rt_range, mz_bins, mz_range, rt_offset_min=0.0):
     rt_lo, rt_hi = rt_range
     mz_lo, mz_hi = mz_range
-    keep_rt = (rts >= rt_lo) & (rts <= rt_hi)
+    shifted_rts = rts + rt_offset_min if rt_offset_min else rts
+    keep_rt = (shifted_rts >= rt_lo) & (shifted_rts <= rt_hi)
     keep_mz = (mzs >= mz_lo) & (mzs < mz_hi)
     if not keep_rt.any() or not keep_mz.any():
         raise ValueError("样本不在指定 RT 或 m/z 范围内")
-    rt_indices = np.floor((rts[keep_rt] - rt_lo) / (rt_hi - rt_lo) * rt_bins).astype(np.int64)
+    rt_indices = np.floor((shifted_rts[keep_rt] - rt_lo) / (rt_hi - rt_lo) * rt_bins).astype(np.int64)
     rt_indices = np.clip(rt_indices, 0, rt_bins - 1)
     mz_indices = np.floor((mzs[keep_mz] - mz_lo) / (mz_hi - mz_lo) * mz_bins).astype(np.int64)
     mz_indices = np.clip(mz_indices, 0, mz_bins - 1)
@@ -158,6 +177,15 @@ def _row_path(row, sample_index):
     product = str(row["product_fine"])
     filename = f"{sample_index:04d}_{row['sample_id']}.npz"
     return Path("tensors") / batch / product / filename
+
+
+def _tensor_shape(tensor):
+    """Shape text for the QA table; empty when this variant was not generated."""
+    return "x".join(map(str, tensor.shape)) if tensor is not None else ""
+
+
+def _tensor_nonzero(tensor):
+    return int(np.count_nonzero(tensor)) if tensor is not None else ""
 
 
 def _write_variant_metadata(directory, metadata, original_indices, split, grid_info):
@@ -234,7 +262,7 @@ def _plot_shapes(output_dir: Path, shapes):
     widths = [shapes[name][-1] for name in names]
     fig, ax = plt.subplots(figsize=(9, 4.8))
     colors = ["#1B7F79", "#C66A3D", "#5B6C9A"]
-    bars = ax.barh([labels[name] for name in names], widths, color=colors, height=0.56)
+    bars = ax.barh([labels[name] for name in names], widths, color=colors[:len(names)], height=0.56)
     ax.set_xlabel("m/z feature width")
     ax.set_title("Feature width by input representation")
     ax.grid(axis="x", color="#D8DDE3", linewidth=0.8)
@@ -257,7 +285,7 @@ def _validate_overwrite_target(output_dir, manifest_dir, fingerprint):
     old = json.loads((output_dir / "prepare_summary.json").read_text(encoding="utf-8"))
     if old.get("stage") != "prepared" or old.get("manifest_fingerprint") != fingerprint:
         raise ValueError("旧输入必须是同一冻结清单生成的完整版本")
-    for name in VARIANTS:
+    for name in (old.get("variants") or VARIANTS):
         info = json.loads((output_dir / name / "grid_info.json").read_text(encoding="utf-8"))
         if info.get("source_manifest_fingerprint") != fingerprint or info.get("input_representation") != name:
             raise ValueError(f"覆盖目标 {name} 的输入身份不匹配")
@@ -291,6 +319,18 @@ def prepare(args):
     manifest_dir = args.manifest_dir.resolve()
     output_dir = args.output_dir.resolve()
     overwrite = bool(getattr(args, "overwrite", False))
+    requested = tuple(getattr(args, "variants", None) or VARIANTS)
+    unknown = [name for name in requested if name not in VARIANTS]
+    if unknown:
+        raise ValueError(f"未知的输入变体: {unknown}")
+    variants = {name: VARIANTS[name] for name in VARIANTS if name in requested}
+    if not variants:
+        raise ValueError("至少要选择一个输入变体")
+    need_fixed = "fixed_grid_log1p" in variants
+    need_dual = bool({"dual_channel_no_pca", "dual_channel_pca"} & set(variants))
+    need_pca = "dual_channel_pca" in variants
+    if overwrite and set(variants) != set(VARIANTS):
+        raise ValueError("覆盖已发布目录时必须生成全部变体，避免留下残缺的旧版本")
     if output_dir.exists() and not overwrite:
         raise FileExistsError(f"输出目录已存在，拒绝覆盖: {output_dir}")
     if overwrite and args.sample_limit is not None:
@@ -308,7 +348,7 @@ def prepare(args):
         selected_original_indices = metadata["metadata_index"].astype(int).tolist()
         selected_set = set(selected_original_indices)
         train_indices = [i for i in roles["train_idx"] if i in selected_set]
-        if not train_indices:
+        if need_pca and not train_indices:
             raise ValueError("抽样范围没有训练样本，无法做 PCA 冒烟检查")
         print(f"冒烟检查: 处理前 {len(metadata)}/{original_count} 条样本；不是完整数据集。")
     else:
@@ -318,50 +358,69 @@ def prepare(args):
     rt_axis = np.linspace(args.rt_range[0], args.rt_range[1], args.rt_bins, dtype=np.float32)
     mz_axis = np.arange(args.raw_mz_min, args.raw_mz_max + args.raw_mz_step / 2,
                         args.raw_mz_step, dtype=np.float32)
-    if len(mz_axis) < args.pca_components:
+    if need_pca and len(mz_axis) < args.pca_components:
         raise ValueError("统一物理 m/z 轴宽度小于 PCA 维数")
-    if len(train_indices) * 2 * args.rt_bins < args.pca_components:
+    if need_pca and len(train_indices) * 2 * args.rt_bins < args.pca_components:
         raise ValueError("训练样本行数不足以拟合指定 PCA 维数")
 
     stage = output_dir.with_name(f".{output_dir.name}.tmp-{os.getpid()}-{int(time.time())}")
     stage.mkdir(parents=True, exist_ok=False)
     print(f"统一物理 m/z 轴: {mz_axis[0]:g}..{mz_axis[-1]:g}, step={args.raw_mz_step:g}, width={len(mz_axis)}")
     print(f"固定划分训练样本: {len(train_indices)}；PCA 维数: {args.pca_components}")
-    print(f"RT 点数: {args.rt_bins}；临时生成目录: {stage}", flush=True)
+    print(f"RT 点数: {args.rt_bins}；生成变体: {list(variants)}；临时生成目录: {stage}", flush=True)
 
-    pca, fit_rows, fit_seconds = _fit_train_pca(
-        metadata=metadata,
-        train_indices=train_indices,
-        rt_axis=rt_axis,
-        mz_axis=mz_axis,
-        components=args.pca_components,
-        batch_rows=args.pca_batch_rows,
-        progress_every=args.progress_every,
-    )
+    if need_pca:
+        pca, fit_rows, fit_seconds = _fit_train_pca(
+            metadata=metadata,
+            train_indices=train_indices,
+            rt_axis=rt_axis,
+            mz_axis=mz_axis,
+            components=args.pca_components,
+            batch_rows=args.pca_batch_rows,
+            progress_every=args.progress_every,
+        )
+    else:
+        pca, fit_rows, fit_seconds = None, 0, 0.0
+        print("未选择 dual_channel_pca，跳过 PCA 拟合。", flush=True)
 
-    variant_dirs = {name: stage / name for name in VARIANTS}
+    variant_dirs = {name: stage / name for name in variants}
     for directory in variant_dirs.values():
         (directory / "tensors").mkdir(parents=True, exist_ok=True)
     qa_rows = []
     started = time.monotonic()
+    offset_map = _load_rt_offset_table(args.rt_offset_table)
+    if args.rt_offset_table is not None:
+        missing = sorted({str(b) for b in metadata["batch_name"].unique()} - set(offset_map))
+        if missing:
+            raise ValueError(f"RT 偏移表缺少批次，拒绝按 0 静默处理: {missing}")
+        peak = max(abs(v) for v in offset_map.values()) if offset_map else 0.0
+        print(f"RT 对齐已启用：{len(offset_map)} 个批次，最大偏移 {peak:.2f} 秒", flush=True)
     for order, (original_index, (_, row)) in enumerate(zip(selected_original_indices, metadata.iterrows()), start=1):
         rts, mzs, matrix = _read_raw_matrix(row)
-        grid = _fixed_grid_log1p(
-            rts, mzs, matrix, args.rt_bins, args.rt_range, args.mz_bins, args.mz_range,
-        )
-        fixed_tensor = build_dual_channel(grid)
-        raw_base = _resample_raw_to_physical_axes(rts, mzs, matrix, rt_axis, mz_axis)
-        dual_tensor = build_dual_channel(raw_base)
-        pca_tensor = np.stack(
-            [pca.transform(dual_tensor[channel]).astype(np.float32) for channel in range(dual_tensor.shape[0])],
-            axis=0,
-        )
-
-        tensors = {
-            "fixed_grid_log1p": fixed_tensor,
-            "dual_channel_no_pca": dual_tensor,
-            "dual_channel_pca": pca_tensor,
-        }
+        rt_offset_min = offset_map.get(str(row["batch_name"]), 0.0) / 60.0
+        fixed_tensor = dual_tensor = pca_tensor = None
+        tensors = {}
+        if need_fixed:
+            grid = _fixed_grid_log1p(
+                rts, mzs, matrix, args.rt_bins, args.rt_range, args.mz_bins, args.mz_range,
+                rt_offset_min=rt_offset_min,
+            )
+            fixed_tensor = build_dual_channel(grid)
+            tensors["fixed_grid_log1p"] = fixed_tensor
+        if need_dual:
+            raw_base = _resample_raw_to_physical_axes(
+                rts, mzs, matrix, rt_axis, mz_axis, rt_offset_min=rt_offset_min,
+            )
+            dual_tensor = build_dual_channel(raw_base)
+            if "dual_channel_no_pca" in variants:
+                tensors["dual_channel_no_pca"] = dual_tensor
+            if need_pca:
+                pca_tensor = np.stack(
+                    [pca.transform(dual_tensor[channel]).astype(np.float32)
+                     for channel in range(dual_tensor.shape[0])],
+                    axis=0,
+                )
+                tensors["dual_channel_pca"] = pca_tensor
         for name, tensor in tensors.items():
             if tensor.shape[0] != 2 or tensor.shape[1] != args.rt_bins:
                 raise ValueError(f"{name} 张量形状不符合预期: {tensor.shape}")
@@ -377,23 +436,24 @@ def prepare(args):
             "split_role": row["split_role"],
             "quality_flags": row["preprocessing_quality_flags"],
             "raw_matrix_shape": f"{len(rts)}x{len(mzs)}",
-            "fixed_grid_shape": "x".join(map(str, fixed_tensor.shape)),
-            "dual_no_pca_shape": "x".join(map(str, dual_tensor.shape)),
-            "dual_pca_shape": "x".join(map(str, pca_tensor.shape)),
+            "fixed_grid_shape": _tensor_shape(fixed_tensor),
+            "dual_no_pca_shape": _tensor_shape(dual_tensor),
+            "dual_pca_shape": _tensor_shape(pca_tensor),
             "all_finite": True,
-            "fixed_grid_nonzero": int(np.count_nonzero(fixed_tensor)),
-            "dual_no_pca_nonzero": int(np.count_nonzero(dual_tensor)),
-            "dual_pca_nonzero": int(np.count_nonzero(pca_tensor)),
+            "fixed_grid_nonzero": _tensor_nonzero(fixed_tensor),
+            "dual_no_pca_nonzero": _tensor_nonzero(dual_tensor),
+            "dual_pca_nonzero": _tensor_nonzero(pca_tensor),
         })
         if order % args.progress_every == 0 or order == len(metadata):
             elapsed = time.monotonic() - started
             print(f"张量生成 {order}/{len(metadata)}，用时 {elapsed:.1f}s", flush=True)
 
-    shapes = {
+    all_shapes = {
         "fixed_grid_log1p": [2, args.rt_bins, args.mz_bins],
         "dual_channel_no_pca": [2, args.rt_bins, len(mz_axis)],
         "dual_channel_pca": [2, args.rt_bins, args.pca_components],
     }
+    shapes = {name: all_shapes[name] for name in variants}
     for name, directory in variant_dirs.items():
         grid_info = {
             "rt_bins": args.rt_bins,
@@ -406,19 +466,21 @@ def prepare(args):
             "split_file": "split.json" if args.sample_limit is None else None,
             "pca_fit_scope": "train_idx_only" if name == "dual_channel_pca" else "not_applicable",
             "pca_components": args.pca_components if name == "dual_channel_pca" else None,
+            "rt_alignment_applied": args.rt_offset_table is not None,
         }
         _write_variant_metadata(
             directory, metadata, selected_original_indices,
             split if args.sample_limit is None else None, grid_info,
         )
 
-    pca_dir = variant_dirs["dual_channel_pca"]
-    with (pca_dir / "input_mz_pca.pkl").open("wb") as handle:
-        pickle.dump(pca, handle)
-    np.save(pca_dir / "reference_mz_axis.npy", mz_axis)
-    np.save(pca_dir / "reference_rt_axis.npy", rt_axis)
-    fit_ids = metadata.iloc[train_indices][["metadata_index", "sample_id", "source_relpath"]].copy()
-    fit_ids.to_csv(pca_dir / "pca_fit_samples.csv", index=False, encoding="utf-8-sig")
+    if need_pca:
+        pca_dir = variant_dirs["dual_channel_pca"]
+        with (pca_dir / "input_mz_pca.pkl").open("wb") as handle:
+            pickle.dump(pca, handle)
+        np.save(pca_dir / "reference_mz_axis.npy", mz_axis)
+        np.save(pca_dir / "reference_rt_axis.npy", rt_axis)
+        fit_ids = metadata.iloc[train_indices][["metadata_index", "sample_id", "source_relpath"]].copy()
+        fit_ids.to_csv(pca_dir / "pca_fit_samples.csv", index=False, encoding="utf-8-sig")
 
     summary = {
         "stage": "smoke_test_subset" if args.sample_limit is not None else "prepared",
@@ -430,13 +492,22 @@ def prepare(args):
         "pca_fit_rows": fit_rows,
         "pca_fit_seconds": round(fit_seconds, 2),
         "pca_components": args.pca_components,
-        "pca_explained_variance_ratio_sum": float(pca.explained_variance_ratio_.sum()),
+        "pca_explained_variance_ratio_sum": (
+            float(pca.explained_variance_ratio_.sum()) if pca is not None else None),
         "pca_batch_rows": args.pca_batch_rows,
         "rt_axis": {"bins": args.rt_bins, "range": list(args.rt_range)},
         "fixed_grid_mz_axis": {"bins": args.mz_bins, "range": list(args.mz_range)},
         "dual_mz_axis": {"min": float(mz_axis[0]), "max": float(mz_axis[-1]), "step": args.raw_mz_step, "bins": len(mz_axis)},
+        "rt_alignment": {
+            "applied": args.rt_offset_table is not None,
+            "table": str(args.rt_offset_table) if args.rt_offset_table else None,
+            "n_batches": len(offset_map),
+            "max_abs_offset_seconds": round(
+                max((abs(v) for v in offset_map.values()), default=0.0), 3),
+            "direction": "positive offset shifts the sample later along RT",
+        },
         "tensor_shapes": shapes,
-        "variants": VARIANTS,
+        "variants": variants,
         "elapsed_tensor_generation_seconds": round(time.monotonic() - started, 2),
         "sample_limit": args.sample_limit,
         "quality_flags": {
@@ -449,20 +520,30 @@ def prepare(args):
     flagged = metadata[metadata["preprocessing_quality_flags"] != ""]
     flagged.to_csv(stage / "preprocessing_quality_flags.csv", index=False, encoding="utf-8-sig")
     _plot_shapes(stage, shapes)
-    readme = (
-        "# 预处理输入对照\n\n"
-        "三组输入复用同一份样本清单和固定划分，均使用双通道。\n"
-        "固定网格组先在物理 RT/m/z 网格中累加原始强度，再取 log1p；\n"
-        "另外两组先对原始强度取 log1p，再插值到公共 m/z 轴与固定 RT 轴；\n"
-        "两组的前置处理完全相同，区别仅为是否做 PCA；新流程不是旧 relabel 的完全复刻。\n"
-        f"时间轴为 {args.rt_range[0]:g}～{args.rt_range[1]:g} 分钟、{args.rt_bins} 点或格子。\n"
-        f"PCA 只在 train_idx 对应样本上拟合，随后转换全部样本。当前 {args.pca_components} 维 PCA 保留的训练输入方差比例为 "
-        f"{float(pca.explained_variance_ratio_.sum()):.4%}；这不是分类性能指标。未训练模型。\n\n"
-        "训练/评估入口会读取 grid_info.json 中的输入尺寸并沿用冻结划分，不再执行输入 PCA。\n"
-        "双通道会逐样本标准化、裁剪；第二通道使用 log 强度比例，并非原始峰面积比例。\n"
-        "`preprocessing_quality_flags.csv` 记录保留的异常样本和达到信号上限值的样本。\n"
-    )
-    (stage / "README.md").write_text(readme, encoding="utf-8")
+    readme_lines = [
+        "# 预处理输入对照",
+        "",
+        f"本次生成的输入组：{', '.join(f'{n}（{variants[n]}）' for n in variants)}。",
+        "所有组复用同一份样本清单和固定划分，均使用双通道。",
+        "固定网格组先在物理 RT/m/z 网格中累加原始强度，再取 log1p；",
+        "统一 m/z 轴的两组先对原始强度取 log1p，再插值到公共 m/z 轴与固定 RT 轴，二者仅差是否做 PCA。",
+        f"时间轴为 {args.rt_range[0]:g}～{args.rt_range[1]:g} 分钟、{args.rt_bins} 点或格子。",
+    ]
+    if need_pca:
+        readme_lines.append(
+            f"PCA 只在 train_idx 对应样本上拟合，随后转换全部样本；当前 {args.pca_components} 维保留的训练输入方差比例为 "
+            f"{float(pca.explained_variance_ratio_.sum()):.4%}，这不是分类性能指标。")
+    if args.rt_offset_table is not None:
+        readme_lines.append(
+            f"已启用按批次 RT 对齐，偏移表：{args.rt_offset_table}；正值表示该批次更早出峰、已向后平移。")
+    readme_lines += [
+        "未训练模型。",
+        "训练/评估入口会读取 grid_info.json 中的输入尺寸并沿用冻结划分，不再执行输入 PCA。",
+        "双通道会逐样本标准化、裁剪；第二通道使用 log 强度比例，并非原始峰面积比例。",
+        "`preprocessing_quality_flags.csv` 记录保留的异常样本和达到信号上限值的样本。",
+        "",
+    ]
+    (stage / "README.md").write_text("\n".join(readme_lines), encoding="utf-8")
 
     if overwrite:
         from audit_preprocessing_inputs import audit
@@ -491,6 +572,11 @@ def main():
     parser.add_argument("--raw-mz-min", type=float, default=30.0)
     parser.add_argument("--raw-mz-max", type=float, default=532.0)
     parser.add_argument("--raw-mz-step", type=float, default=1.0)
+    parser.add_argument("--rt-offset-table", type=Path, default=None,
+                        help="批次→RT 偏移秒数 CSV（列 batch,offset_seconds）；"
+                             "不提供则完全沿用旧的未对齐流程")
+    parser.add_argument("--variants", nargs="+", choices=list(VARIANTS), default=list(VARIANTS),
+                        help="要生成的输入变体；默认三组全生成，可只指定一组以节省磁盘")
     parser.add_argument("--pca-components", type=int, default=256)
     parser.add_argument("--pca-batch-rows", type=int, default=8192)
     parser.add_argument("--progress-every", type=int, default=100)
