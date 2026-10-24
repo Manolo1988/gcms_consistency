@@ -170,6 +170,23 @@ def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
     return records
 
 
+def _apply_eval_exclusions(records, cfg, label="records"):
+    """按 cfg.evaluate_exclude_products 剔除真值属于指定产品的预测记录。
+
+    默认空元组时原样返回，不改变任何既有行为。剔除后 Setting A 的指标、
+    逐批次统计、可视化以及 Setting B 的验证集阈值都会自动基于剩余产品重算。
+    """
+    exclude = tuple(str(p) for p in getattr(cfg, "evaluate_exclude_products", ()) or ())
+    if not exclude:
+        return records
+    exclude_set = set(exclude)
+    kept = [r for r in records if str(r.get("true_class", "")) not in exclude_set]
+    if len(kept) != len(records):
+        print(f"  [Eval-Exclude] {label}: {len(records)} -> {len(kept)} "
+              f"(剔除真值为 {'/'.join(exclude)} 的样本)")
+    return kept
+
+
 # ═══════════════════════════════════════════════════════════
 #  指标组 1: 产品识别 (Setting A)
 # ═══════════════════════════════════════════════════════════
@@ -938,6 +955,8 @@ def evaluate_setting_a(model, loader_train_noaug, loader_val, proto_store,
     val_records = collect_predictions(
         model, loader_val, proto_store, device,
         reject_factor=cfg.reject_threshold_factor)
+    train_records = _apply_eval_exclusions(train_records, cfg, "Setting A 同批次(训练集)")
+    val_records = _apply_eval_exclusions(val_records, cfg, f"Setting A 跨批次[{fold_name}]")
 
     pid = product_identification_metrics(val_records, train_records)
     con = consistency_scoring_metrics(val_records)
@@ -1249,6 +1268,19 @@ def evaluate_single_model(cfg):
         split = load_data_split(cfg)
         print(f"  [Split] 使用全局 split: {Path(cfg.prepared_dir) / 'split.json'}")
     metadata_csv = str(Path(cfg.prepared_dir) / "metadata.csv")
+    _exclude_products = tuple(
+        str(p) for p in (getattr(cfg, "evaluate_exclude_products", ()) or ())
+    )
+    if _exclude_products:
+        _known = set(str(p) for p in split.get("known_products", []))
+        _missing = [p for p in _exclude_products if p not in _known]
+        if _missing:
+            raise ValueError(
+                f"evaluate_exclude_products 中的产品不在已知产品里: {_missing}; "
+                f"已知产品: {sorted(_known)}"
+            )
+        print(f"  [Eval-Exclude] 评估口径排除: {'/'.join(_exclude_products)} "
+              f"(仅影响 Setting A/B 统计与阈值标定, 不改动模型与训练)")
     product_col = ("product_fine" if cfg.product_granularity == "fine"
                    else "product_coarse")
     viz_enabled = bool(getattr(cfg, "evaluate_save_visualizations", False))
@@ -1454,6 +1486,9 @@ def evaluate_single_model(cfg):
             known_records = collect_predictions(model, loader_known, proto_store, device)
             unknown_records = collect_predictions(model, loader_unknown, proto_store, device)
             validation_records = collect_predictions(model, loader_validation, proto_store, device)
+            # 评估口径排除: 已知集与阈值标定集同步剔除，未知池不受影响
+            known_records = _apply_eval_exclusions(known_records, cfg, "Setting B 已知集")
+            validation_records = _apply_eval_exclusions(validation_records, cfg, "Setting B 阈值标定集")
             result_b = frozen_setting_b(known_records, unknown_records, validation_records)
             osm = result_b["open_set"]
             print(f"\nSetting B: known={len(known_records)}, unknown={len(unknown_records)}")
@@ -1784,6 +1819,9 @@ def _save_single_summary(result_a, result_b, result_c, split, out_dir,
 
     summary = {
         "evaluation_protocol": getattr(cfg, "evaluation_protocol", "standard"),
+        "evaluate_exclude_products": [
+            str(p) for p in (getattr(cfg, "evaluate_exclude_products", ()) or ())
+        ],
         "split": {
             "known_products": split["known_products"],
             "holdout_products": split["holdout_products"],

@@ -266,6 +266,8 @@ class Config:
     open_score_blend_objective: str = "fpr95" # fpr95 / auroc / balanced
     evaluate_readme_baselines: bool = True    # 完整评估时是否重跑 README baselines
     evaluate_open_set: bool = True            # 是否评估 Setting B；论文闭集/少样本流程可关闭
+    # 评估口径: 剔除真值属于这些产品的记录(含验证集阈值) 默认空=不剔除
+    evaluate_exclude_products: Tuple[str, ...] = ()
 
     # ── 增量注册微调 ─────────────────────────────────────
     finetune_epochs: int = 20                 # 微调轮数

@@ -540,6 +540,8 @@ def main():
                         help="评估时跳过 README baselines")
     parser.add_argument("--skip_open_set", action="store_true",
                         help="评估时跳过 Setting B 开放集检测")
+    parser.add_argument("--evaluate_exclude_products", type=str, default=None,
+                        help="评估口径排除: 剔除真值属于这些产品的记录(含阈值标定), 逗号分隔, 如 RJD")
     parser.add_argument("--fewshot_repeats", type=int, default=None,
                         help="每个 N-shot 重复抽样次数 (1=不重复, >1 取平均以降低少样本评估噪声)")
 
@@ -652,6 +654,10 @@ def main():
         cfg.evaluate_readme_baselines = False
     if args.skip_open_set:
         cfg.evaluate_open_set = False
+    if args.evaluate_exclude_products:
+        cfg.evaluate_exclude_products = tuple(
+            p.strip() for p in args.evaluate_exclude_products.split(",") if p.strip()
+        )
     if args.fewshot_repeats is not None:
         cfg.fewshot_repeats = int(args.fewshot_repeats)
     if args.enable_input_raw_pca:
