@@ -207,12 +207,17 @@ def product_identification_metrics(records, train_records=None):
         y_true = [r["true_product"] for r in records]
         y_pred = [r["pred_product"] for r in records]
 
+    # 评估标签空间以"真值中出现过的类"为准。被 evaluate_exclude_products 剔除的产品
+    # 不应再以空类身份占据 macro 平均的分母，也不应出现在混淆矩阵里。
+    eval_labels = sorted(set(y_true))
     metrics = {
         "accuracy": accuracy_score(y_true, y_pred),
-        "macro_f1": f1_score(y_true, y_pred, average="macro", zero_division=0),
+        "macro_f1": f1_score(y_true, y_pred, labels=eval_labels,
+                             average="macro", zero_division=0),
         "balanced_acc": balanced_accuracy_score(y_true, y_pred),
-        "confusion": confusion_matrix(y_true, y_pred).tolist(),
-        "report": classification_report(y_true, y_pred, zero_division=0),
+        "confusion": confusion_matrix(y_true, y_pred, labels=eval_labels).tolist(),
+        "report": classification_report(y_true, y_pred, labels=eval_labels,
+                                        zero_division=0),
     }
 
     if train_records is not None:
