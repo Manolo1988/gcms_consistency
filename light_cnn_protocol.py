@@ -193,6 +193,21 @@ def build_attention_ablation_config(prepared, output):
     return cfg
 
 
+def build_original_2loss_config(prepared, output):
+    """A_original_2loss 走 main.py 统一流程的入口。
+
+    与 build_attention_ablation_config 的唯一差别是 blocks_per_stage=2，
+    评估口径（light_cnn_v1 + -d/r 分数）保持一致，便于同表对比。
+    """
+    cfg = build_config(prepared, output, "A_original_2loss")
+    cfg.experiment_preset = "light_cnn_v1_2loss"
+    cfg.evaluation_protocol = "light_cnn_v1"
+    cfg.open_score_base_weight = 1.0
+    cfg.open_score_margin_weight = 0.0
+    cfg.evaluate_save_visualizations = True
+    return cfg
+
+
 def frozen_setting_b(known_records, unknown_records, validation_records):
     """Keep the v1 score/threshold while fitting the common reporting schema."""
     score = lambda rows: np.asarray([-float(r["radius_norm"]) for r in rows])

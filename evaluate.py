@@ -1111,6 +1111,9 @@ def evaluate_setting_b(model, proto_store, loader_known, loader_unknown,
         model, loader_unknown, proto_store, device,
         reject_factor=cfg.reject_threshold_factor)
 
+    # 评估口径排除: 已知集同步剔除，未知池不受影响（standard 路径）
+    known_records = _apply_eval_exclusions(known_records, cfg, "Setting B 已知集")
+
     blend_objective = getattr(cfg, "open_score_blend_objective", "fpr95")
     blend_diag = open_set_score_blend_diagnostics(
         known_records, unknown_records, objective=blend_objective

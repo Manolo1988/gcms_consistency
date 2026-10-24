@@ -362,8 +362,11 @@ def main():
                         help="直接使用指定的输出目录；未指定时 prepare/train 自动创建 run_时间戳 子目录")
     parser.add_argument("--prepared_dir", type=str, default=None,
                         help="prepared data 目录；默认 C：双通道、不做 PCA；A/B 方案请传入对应目录")
-    parser.add_argument("--experiment_preset", choices=["light_cnn_v1_attention_1block"],
-                        default=None, help="沿用上一轮两损失设置：每阶段1块，保留双轴注意力")
+    parser.add_argument("--experiment_preset",
+                        choices=["light_cnn_v1_attention_1block", "light_cnn_v1_2loss"],
+                        default=None,
+                        help="沿用两损失冻结设置: light_cnn_v1_2loss=每阶段2块(原架构), "
+                             "light_cnn_v1_attention_1block=每阶段1块; 均保留双轴注意力")
     parser.add_argument("--seed", type=int, default=None,
                         help="随机种子")
     parser.add_argument("--epochs", type=int, default=None,
@@ -580,8 +583,15 @@ def main():
     if args.experiment_preset:
         if args.command != "train":
             parser.error("--experiment_preset 仅用于 train；evaluate 自动读取训练配置")
-        from light_cnn_protocol import build_attention_ablation_config
-        cfg = build_attention_ablation_config(
+        from light_cnn_protocol import (
+            build_attention_ablation_config,
+            build_original_2loss_config,
+        )
+        presets = {
+            "light_cnn_v1_attention_1block": build_attention_ablation_config,
+            "light_cnn_v1_2loss": build_original_2loss_config,
+        }
+        cfg = presets[args.experiment_preset](
             args.prepared_dir or cfg.prepared_dir, cfg.output_dir)
     if args.prepared_dir:
         cfg.prepared_dir = str(Path(args.prepared_dir))
