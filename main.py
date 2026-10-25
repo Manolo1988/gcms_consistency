@@ -545,6 +545,10 @@ def main():
                         help="评估时跳过 Setting B 开放集检测")
     parser.add_argument("--evaluate_exclude_products", type=str, default=None,
                         help="评估口径排除: 剔除真值属于这些产品的记录(含阈值标定), 逗号分隔, 如 RJD")
+    parser.add_argument("--evaluation_protocol", type=str, default=None,
+                        choices=["standard", "light_cnn_v1"],
+                        help="强制指定评估协议(默认沿用训练配置); "
+                             "评估历史模型时用它统一到同一口径")
     parser.add_argument("--fewshot_repeats", type=int, default=None,
                         help="每个 N-shot 重复抽样次数 (1=不重复, >1 取平均以降低少样本评估噪声)")
 
@@ -668,6 +672,8 @@ def main():
         cfg.evaluate_exclude_products = tuple(
             p.strip() for p in args.evaluate_exclude_products.split(",") if p.strip()
         )
+    if args.evaluation_protocol:
+        cfg.evaluation_protocol = args.evaluation_protocol
     if args.fewshot_repeats is not None:
         cfg.fewshot_repeats = int(args.fewshot_repeats)
     if args.enable_input_raw_pca:
