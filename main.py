@@ -400,6 +400,10 @@ def main():
                         help="SupCon 投影头维度")
     parser.add_argument("--hard_pair_margin", type=float, default=None,
                         help="易混产品对 hard margin 距离")
+    parser.add_argument("--hard_pair_names", type=str, default=None,
+                        help="易混产品对, 格式 HRY:H99;RJD:YJD; 不传则沿用配置默认")
+    parser.add_argument("--proto_margin", type=float, default=None,
+                        help="原型损失推斥间距; 设 0 则只保留类内拉近项")
     parser.add_argument("--accept_percentile", type=float, default=None,
                         help="一致性半径百分位")
     parser.add_argument("--reject_threshold_factor", type=float, default=None,
@@ -609,7 +613,7 @@ def main():
     for name in (
         "seed", "epochs", "batch_size", "lr", "weight_decay",
         "lambda_supcon", "lambda_adv", "lambda_proto", "lambda_recon", "lambda_cls",
-        "lambda_hard_pair", "hard_pair_margin",
+        "lambda_hard_pair", "hard_pair_margin", "proto_margin",
         "supcon_temperature", "feature_dim", "proj_dim",
         "accept_percentile", "reject_threshold_factor",
         "open_score_base_weight", "open_score_margin_weight",
@@ -672,6 +676,19 @@ def main():
         cfg.evaluate_exclude_products = tuple(
             p.strip() for p in args.evaluate_exclude_products.split(",") if p.strip()
         )
+    if args.hard_pair_names:
+        pairs = []
+        for chunk in args.hard_pair_names.split(";"):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            parts = [x.strip() for x in chunk.split(":")]
+            if len(parts) != 2 or not all(parts):
+                parser.error(
+                    f"--hard_pair_names 格式错误: {chunk!r}, 应为 A:B 或 A:B;C:D"
+                )
+            pairs.append((parts[0], parts[1]))
+        cfg.hard_pair_names = tuple(pairs)
     if args.evaluation_protocol:
         cfg.evaluation_protocol = args.evaluation_protocol
     if args.fewshot_repeats is not None:
