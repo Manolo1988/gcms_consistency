@@ -2,7 +2,7 @@
   1. 产品识别 (Setting A): Macro-F1, Accuracy, 跨批次 Δ
   2. 开放集 + 新品 (Setting B & C): AUROC, FPR@95TPR, N-shot Accuracy
   3. 一致性评分 (Setting A): AUROC(correct/wrong), Cohen's d
-  4. 批次鲁棒性 (Setting A): 批次可预测性, Silhouette
+  4. 批次鲁棒性 (Setting A): 同产品内跨批次 MMD (主), Silhouette, 批次可预测性
   5. 可解释性: Grad-CAM (定性)
 """
 import os
@@ -276,6 +276,238 @@ def consistency_scoring_metrics(records):
 #  指标组 4: 批次鲁棒性 (Setting A)
 # ═══════════════════════════════════════════════════════════
 
+def _rbf_mmd2(X, Y, gamma):
+    """无偏 MMD² 估计 (RBF 核, 排除对角项)。
+
+    MMD² = E[k(x,x')] + E[k(y,y')] - 2·E[k(x,y)]
+    两组同分布时接近 0; 分布不同时为正, 越大差异越大。
+    """
+    def _k(A, B):
+        aa = (A * A).sum(axis=1)[:, None]
+        bb = (B * B).sum(axis=1)[None, :]
+        d2 = np.maximum(aa + bb - 2.0 * (A @ B.T), 0.0)
+        return np.exp(-gamma * d2)
+
+    n, m = X.shape[0], Y.shape[0]
+    if n < 2 or m < 2:
+        return np.nan
+    Kxx = _k(X, X)
+    np.fill_diagonal(Kxx, 0.0)
+    Kyy = _k(Y, Y)
+    np.fill_diagonal(Kyy, 0.0)
+    Kxy = _k(X, Y)
+    return float(
+        Kxx.sum() / (n * (n - 1))
+        + Kyy.sum() / (m * (m - 1))
+        - 2.0 * Kxy.mean()
+    )
+
+
+def mmd_batch_metrics(records, n_perm=200, seed=42, min_group=4):
+    """批次效应量化: 只在同一产品内部比较不同批次。
+
+    为什么必须按产品分层:
+      各批次测到的「产品构成」并不相同 (本项目 20260313 只有 HRY, 20240308 有
+      6 个产品)。如果直接跨批次比整个集合, MMD 里混进的是「产品组成不同」而不是
+      「同一样品在不同批次漂了」。所以每次只拿同一个产品、两个不同批次来比。
+
+    主指标 (展示值 = sqrt(MMD²), 0 表示两组分布一致):
+      mmd_batch_mean    : 各产品跨批次 MMD 的平均 (每产品先对自己的批次对平均,
+                          再对产品等权平均)。越低越好。
+      mmd_batch_max     : 最差产品的值; mmd_batch_argmax 给出它是谁。
+      mmd_per_product   : 每个产品各自的 MMD (只看 ≥2 个批次的产品)。
+      mmd_null_q95      : 「无批次效应」时 MMD 的 95% 上限 (判别刻度);
+                          观测值明显大于它才算真的有批次效应。
+      mmd_z_strat       : 分层置换检验 z 分数。零分布 = 在每个产品内部随机打乱
+                          「样本属于哪个批次」, 保持每个 (产品,批次) 样本数不变。
+                          注意: 256 维嵌入 + 20 个批次对, 统计功效极高, 只要存在
+                          肉眼可见的漂移 z 就会很大; 判断「有多大」请看
+                          mmd_batch_mean / mmd_per_product, 而不是看 z。
+      mmd_p_strat       : 上述检验 p 值 (整体有没有批次效应)。
+      mmd_p_max         : 针对「最差产品」统计量的 p 值 (有没有某个产品特别漂)。
+
+    核带宽: 每个产品用「自己各批次内部」两两距离的中位数 —— 即该产品自身的
+    噪声尺度。这样 MMD 的单位是「该产品自己的噪声标准差」, 本身更分散的产品
+    不会被算得更严重, 产品之间也可直接横向比较。
+    """
+    result = {
+        "mmd_batch_mean": np.nan,
+        "mmd_batch_max": np.nan,
+        "mmd_batch_argmax": "",
+        "mmd_batch_min": np.nan,
+        "mmd_n_products": 0,
+        "mmd_n_pairs": 0,
+        "mmd_z_strat": np.nan,
+        "mmd_p_strat": np.nan,
+        "mmd_p_max": np.nan,
+        "mmd_null_mean": np.nan,
+        "mmd_null_std": np.nan,
+        "mmd_null_q95": np.nan,
+        "mmd_n_perm": 0,
+        "mmd_per_product": {},
+        "mmd_pairs_per_product": {},
+        "mmd_unevaluable_products": [],
+    }
+    if not records:
+        return result
+
+    try:
+        zs = np.stack([np.asarray(r["z"], dtype=np.float64) for r in records])
+    except (KeyError, ValueError):
+        return result
+    if zs.ndim != 2 or zs.shape[0] < 4:
+        return result
+
+    groups = np.array([
+        str(r.get("batch_name", r.get("batch_label", -1))) for r in records
+    ])
+    prods = np.array([
+        str(r.get("true_class", r.get("true_product", -1))) for r in records
+    ])
+    if len(set(groups)) < 2:
+        return result
+
+    rng = np.random.default_rng(seed)
+
+    # ── 核带宽: 每个产品用「自己批内」两两距离的中位数 (该产品自身的噪声尺度) ──
+    #    这样 MMD 的单位是「该产品自己的噪声标准差」, 本身很散的产品不会被算得更严重。
+    def _cell_d2(sel):
+        idx = np.where(sel)[0]
+        if idx.size < 3:
+            return None
+        if idx.size > 64:
+            idx = rng.choice(idx, 64, replace=False)
+        X = zs[idx]
+        aa = (X * X).sum(axis=1)[:, None]
+        dd = np.maximum(aa + aa.T - 2.0 * (X @ X.T), 0.0)
+        return dd[np.triu_indices(idx.size, 1)]
+
+    gamma_by_product, all_cell_d2 = {}, []
+    for p in sorted(set(prods)):
+        parts = []
+        for g in sorted(set(groups)):
+            v = _cell_d2((prods == p) & (groups == g))
+            if v is not None:
+                parts.append(v)
+        if parts:
+            pool = np.concatenate(parts)
+            pool = pool[pool > 1e-12]
+            if pool.size:
+                gamma_by_product[p] = 1.0 / (2.0 * float(np.median(pool)) + 1e-12)
+                all_cell_d2.append(pool)
+    if all_cell_d2:
+        pool_all = np.concatenate(all_cell_d2)
+        default_gamma = 1.0 / (2.0 * float(np.median(pool_all)) + 1e-12)
+    else:
+        # 兜底: 用全体两两距离中位数
+        sub = zs if zs.shape[0] <= 600 else zs[rng.choice(zs.shape[0], 600, replace=False)]
+        aa = (sub * sub).sum(axis=1)[:, None]
+        d2 = np.maximum(aa + aa.T - 2.0 * (sub @ sub.T), 0.0)
+        pos = d2[d2 > 1e-12]
+        default_gamma = 1.0 / (2.0 * float(np.median(pos)) + 1e-12) if pos.size else 1.0
+    result["mmd_kernel_sigma"] = {
+        str(p): float(np.sqrt(0.5 / g)) for p, g in gamma_by_product.items()
+    }
+
+    def _product_pairs(p, g_arr):
+        """该产品在 g_arr 标注下的所有跨批次 MMD² (跳过样本数不足的批次)。
+
+        保留原始值 (无偏估计可以是负数, 不在此处截断), 这样置换检验的统计量
+        仍然无偏; 只在展示时开方。
+        """
+        pm = (prods == p)
+        vals = []
+        if pm.sum() < 2 * min_group:
+            return vals
+        gamma = gamma_by_product.get(p, default_gamma)
+        batches = sorted(set(g_arr[pm]))
+        for i in range(len(batches)):
+            if (pm & (g_arr == batches[i])).sum() < min_group:
+                continue
+            for j in range(i + 1, len(batches)):
+                if (pm & (g_arr == batches[j])).sum() < min_group:
+                    continue
+                X = zs[pm & (g_arr == batches[i])]
+                Y = zs[pm & (g_arr == batches[j])]
+                v = _rbf_mmd2(X, Y, gamma)
+                if not np.isnan(v):
+                    vals.append(float(v))
+        return vals
+
+    def _mean_m2(vals):
+        """多个 MMD² 的均值 —— 检验统计量本身 (无偏, 可为负, 不截断)。"""
+        return float(np.mean(vals)) if vals else np.nan
+
+    def _mmd(v):
+        """把 MMD² 开方成可直接比较的距离; 负值截到 0。"""
+        return float(np.sqrt(v)) if (v is not None and v > 0) else 0.0
+
+    # ── 实测: 每个产品一个 MMD² (检验与展示都用它, 展示时开方) ──
+    m2_per_product, pairs_per_product, unevaluable = {}, {}, []
+    for p in sorted(set(prods)):
+        vals = _product_pairs(p, groups)
+        pairs_per_product[str(p)] = int(len(vals))
+        if not vals:
+            unevaluable.append(str(p))
+            continue
+        m2_per_product[str(p)] = _mean_m2(vals)
+
+    result["mmd_pairs_per_product"] = pairs_per_product
+    result["mmd_unevaluable_products"] = [str(p) for p in unevaluable]
+    if not m2_per_product:
+        return result
+
+    obs_m2 = np.array(list(m2_per_product.values()), dtype=np.float64)
+    stat_mean = float(obs_m2.mean())      # 检验统计量 1: 各产品 MMD² 平均
+    stat_max = float(obs_m2.max())        # 检验统计量 2: 最差产品的 MMD²
+    argmax = max(m2_per_product, key=lambda k: m2_per_product[k])
+
+    result["mmd_per_product"] = {k: _mmd(v) for k, v in m2_per_product.items()}
+    result["mmd_batch_mean"] = _mmd(stat_mean)
+    result["mmd_batch_max"] = _mmd(stat_max)
+    result["mmd_batch_argmax"] = str(argmax)
+    result["mmd_batch_min"] = _mmd(float(obs_m2.min()))
+    result["mmd_n_products"] = int(len(m2_per_product))
+    result["mmd_n_pairs"] = int(sum(pairs_per_product.values()))
+
+    # ── 分层置换检验: 产品内部随机打乱批次归属, 保持 (产品,批次) 样本数不变 ──
+    if n_perm > 0:
+        prod_idx = {p: np.where(prods == p)[0] for p in sorted(set(prods))}
+        null_mean, null_max = [], []
+        for _ in range(int(n_perm)):
+            g_perm = groups.copy()
+            for p, idx in prod_idx.items():
+                if idx.size < 2:
+                    continue
+                g_perm[idx] = groups[idx][rng.permutation(idx.size)]
+            vals = {}
+            for p in prod_idx:
+                vv = _product_pairs(p, g_perm)
+                if vv:
+                    vals[str(p)] = _mean_m2(vv)
+            if vals:
+                null_mean.append(float(np.mean(list(vals.values()))))
+                null_max.append(float(np.max(list(vals.values()))))
+        if null_mean:
+            nm, ns = float(np.mean(null_mean)), float(np.std(null_mean))
+            result["mmd_null_mean"] = nm
+            result["mmd_null_std"] = ns
+            result["mmd_null_q95"] = _mmd(float(np.percentile(null_mean, 95)))
+            result["mmd_n_perm"] = int(len(null_mean))
+            if ns > 1e-12:
+                result["mmd_z_strat"] = float((stat_mean - nm) / ns)
+            result["mmd_p_strat"] = float(
+                (sum(1 for v in null_mean if v >= stat_mean) + 1)
+                / (len(null_mean) + 1)
+            )
+            result["mmd_p_max"] = float(
+                (sum(1 for v in null_max if v >= stat_max) + 1)
+                / (len(null_max) + 1)
+            )
+
+    return result
+
+
 def batch_robustness_metrics(records):
     """批次鲁棒性指标。"""
     zs = np.stack([r["z"] for r in records])
@@ -309,6 +541,9 @@ def batch_robustness_metrics(records):
         result["batch_predictability"] = float(batch_pred_acc)
     else:
         result["batch_predictability"] = np.nan
+
+    # 批次效应量化 (Niu et al. 2022): 跨批次 MMD / 批次内 MMD 下界
+    result.update(mmd_batch_metrics(records))
 
     return result
 
@@ -736,6 +971,34 @@ def _evaluate_baseline_with_cache(model_cls, feature_mode, cache):
             "silhouette_product": float(rob.get("silhouette_product", np.nan)),
             "silhouette_batch": float(rob.get("silhouette_batch", np.nan)),
             "batch_predictability": float(rob.get("batch_predictability", np.nan)),
+            "mmd_batch_mean": float(rob.get("mmd_batch_mean", np.nan)),
+            "mmd_batch_max": float(rob.get("mmd_batch_max", np.nan)),
+            "mmd_batch_argmax": str(rob.get("mmd_batch_argmax", "")),
+            "mmd_batch_min": float(rob.get("mmd_batch_min", np.nan)),
+            "mmd_z_strat": float(rob.get("mmd_z_strat", np.nan)),
+            "mmd_p_strat": float(rob.get("mmd_p_strat", np.nan)),
+            "mmd_p_max": float(rob.get("mmd_p_max", np.nan)),
+            "mmd_null_mean": float(rob.get("mmd_null_mean", np.nan)),
+            "mmd_null_std": float(rob.get("mmd_null_std", np.nan)),
+            "mmd_null_q95": float(rob.get("mmd_null_q95", np.nan)),
+            "mmd_n_perm": int(rob.get("mmd_n_perm", 0) or 0),
+            "mmd_n_products": int(rob.get("mmd_n_products", 0) or 0),
+            "mmd_n_pairs": int(rob.get("mmd_n_pairs", 0) or 0),
+            "mmd_per_product": {
+                str(k): float(v)
+                for k, v in (rob.get("mmd_per_product") or {}).items()
+            },
+            "mmd_pairs_per_product": {
+                str(k): int(v)
+                for k, v in (rob.get("mmd_pairs_per_product") or {}).items()
+            },
+            "mmd_unevaluable_products": [
+                str(x) for x in (rob.get("mmd_unevaluable_products") or [])
+            ],
+            "mmd_kernel_sigma": {
+                str(k): float(v)
+                for k, v in (rob.get("mmd_kernel_sigma") or {}).items()
+            },
         }
 
     if cache.get("setting_b", {}).get(feature_mode):
@@ -1621,6 +1884,30 @@ def _print_single_summary(result_a, result_b, result_c, cfg,
         print(f"  Sil(product):      {rob['silhouette_product']:.4f}")
         print(f"  Sil(batch):        {rob['silhouette_batch']:.4f}")
         print(f"  Batch pred:        {rob['batch_predictability']:.4f}")
+        _mmd_mean = rob.get("mmd_batch_mean", np.nan)
+        if not np.isnan(_mmd_mean):
+            _z = rob.get("mmd_z_strat", np.nan)
+            _p = rob.get("mmd_p_strat", np.nan)
+            _pm = rob.get("mmd_p_max", np.nan)
+            print("  --- 批次效应 MMD (同产品内跨批次) ---")
+            _verdict = "存在" if (not np.isnan(_p) and _p < 0.05) else "未检出"
+            print(f"  平均批次效应:      {_mmd_mean:.4f}  "
+                  f"(无效应时应 <{rob.get('mmd_null_q95', np.nan):.4f}; "
+                  f"z={_z:.2f}, p={_p:.4f} → {_verdict})")
+            print(f"  最差产品:          {rob.get('mmd_batch_argmax', '')} "
+                  f"{rob.get('mmd_batch_max', np.nan):.4f}  (p={_pm:.4f})")
+            print(f"  最好产品:          {rob.get('mmd_batch_min', np.nan):.4f}  "
+                  f"(产品数={rob.get('mmd_n_products', 0)}, "
+                  f"批次对数={rob.get('mmd_n_pairs', 0)})")
+            _uneval = rob.get("mmd_unevaluable_products") or []
+            if _uneval:
+                print(f"  无法评估(仅 1 个批次): {', '.join(_uneval)}")
+            _pp = rob.get("mmd_per_product") or {}
+            _npairs = rob.get("mmd_pairs_per_product") or {}
+            if _pp:
+                _order = sorted(_pp, key=lambda k: -_pp[k])
+                print("  逐产品: " + "  ".join(
+                    f"{k}={_pp[k]:.3f}({_npairs.get(k, 0)}对)" for k in _order))
 
     if result_b:
         osm = result_b["open_set"]
