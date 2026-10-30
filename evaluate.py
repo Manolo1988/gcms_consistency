@@ -335,6 +335,7 @@ def mmd_batch_metrics(records, n_perm=200, seed=42, min_group=4):
         "mmd_batch_max": np.nan,
         "mmd_batch_argmax": "",
         "mmd_batch_min": np.nan,
+        "mmd_batch_argmin": "",
         "mmd_n_products": 0,
         "mmd_n_pairs": 0,
         "mmd_z_strat": np.nan,
@@ -461,12 +462,14 @@ def mmd_batch_metrics(records, n_perm=200, seed=42, min_group=4):
     stat_mean = float(obs_m2.mean())      # 检验统计量 1: 各产品 MMD² 平均
     stat_max = float(obs_m2.max())        # 检验统计量 2: 最差产品的 MMD²
     argmax = max(m2_per_product, key=lambda k: m2_per_product[k])
+    argmin = min(m2_per_product, key=lambda k: m2_per_product[k])
 
     result["mmd_per_product"] = {k: _mmd(v) for k, v in m2_per_product.items()}
     result["mmd_batch_mean"] = _mmd(stat_mean)
     result["mmd_batch_max"] = _mmd(stat_max)
     result["mmd_batch_argmax"] = str(argmax)
     result["mmd_batch_min"] = _mmd(float(obs_m2.min()))
+    result["mmd_batch_argmin"] = str(argmin)
     result["mmd_n_products"] = int(len(m2_per_product))
     result["mmd_n_pairs"] = int(sum(pairs_per_product.values()))
 
@@ -975,6 +978,7 @@ def _evaluate_baseline_with_cache(model_cls, feature_mode, cache):
             "mmd_batch_max": float(rob.get("mmd_batch_max", np.nan)),
             "mmd_batch_argmax": str(rob.get("mmd_batch_argmax", "")),
             "mmd_batch_min": float(rob.get("mmd_batch_min", np.nan)),
+            "mmd_batch_argmin": str(rob.get("mmd_batch_argmin", "")),
             "mmd_z_strat": float(rob.get("mmd_z_strat", np.nan)),
             "mmd_p_strat": float(rob.get("mmd_p_strat", np.nan)),
             "mmd_p_max": float(rob.get("mmd_p_max", np.nan)),
@@ -1896,7 +1900,8 @@ def _print_single_summary(result_a, result_b, result_c, cfg,
                   f"z={_z:.2f}, p={_p:.4f} → {_verdict})")
             print(f"  最差产品:          {rob.get('mmd_batch_argmax', '')} "
                   f"{rob.get('mmd_batch_max', np.nan):.4f}  (p={_pm:.4f})")
-            print(f"  最好产品:          {rob.get('mmd_batch_min', np.nan):.4f}  "
+            print(f"  最好产品:          {rob.get('mmd_batch_argmin', '')} "
+                  f"{rob.get('mmd_batch_min', np.nan):.4f}  "
                   f"(产品数={rob.get('mmd_n_products', 0)}, "
                   f"批次对数={rob.get('mmd_n_pairs', 0)})")
             _uneval = rob.get("mmd_unevaluable_products") or []
