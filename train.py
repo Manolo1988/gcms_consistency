@@ -1094,8 +1094,15 @@ def train_single_model(cfg: Config):
     model = _maybe_optimize_model(model, cfg, device)
     frozen_protocol = getattr(cfg, "evaluation_protocol", "standard") == "light_cnn_v1"
     if frozen_protocol:
-        for module in (model.domain_head, model.decoder):
-            module.requires_grad_(False)
+        # 只冻结"对应损失没开"的头: 权重为 0 的头不参与训练, 保证两损失配置
+        # 与历史结果逐位一致; 一旦打开该损失, 对应的头必须可训练, 否则
+        # 批次对抗等于对着一个固定随机网络, 重构等于拟合一个固定随机解码器。
+        if float(getattr(cfg, "lambda_adv", 0) or 0) <= 0:
+            model.domain_head.requires_grad_(False)
+            print("  [Frozen] domain_head (lambda_adv=0)")
+        if float(getattr(cfg, "lambda_recon", 0) or 0) <= 0:
+            model.decoder.requires_grad_(False)
+            print("  [Frozen] decoder (lambda_recon=0)")
         print(f"  模型: {cfg.main_backbone}, 每阶段 {cfg.blocks_per_stage} 个残差块, "
               f"双轴注意力={'保留' if cfg.main_backbone == 'gcms' else '移除'}")
         print(f"  损失: {cfg.lambda_supcon} × SupCon + {cfg.lambda_cls} × 分类损失")
