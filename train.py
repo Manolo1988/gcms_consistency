@@ -641,7 +641,13 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch,
         with torch.autocast(
             device_type="cuda", dtype=amp_dtype, enabled=amp_enabled
         ):
-            out = model(x)
+            out = model(
+                x,
+                batch_id=(batch_dev["batch"]
+                          if (cfg is not None
+                              and getattr(cfg, "recon_batch_conditioning", False))
+                          else None),
+            )
             losses = criterion(out, batch_dev)
             loss = losses["total"]
 

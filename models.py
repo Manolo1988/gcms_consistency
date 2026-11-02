@@ -530,10 +530,17 @@ class DomainHead(nn.Module):
 #  重建解码器 (可选正则)
 # ═══════════════════════════════════════════════════════════
 class ReconDecoder(nn.Module):
-    """轻量卷积解码器，从 feature map 重建输入。"""
+    """轻量卷积解码器，从 feature map 重建输入。
+
+    batch_conditioning (num_batches > 0) 时额外接一路批次 embedding, 以 FiLM
+    (通道级缩放) 作用在 feature map 上: 批次专属的谱底交由解码端重构, 编码器
+    就不必把它记在 z 里。缩放层零初始化, 因此初始状态与无条件解码器完全等价。
+    num_batches=0 时不创建任何新参数, 历史 checkpoint 的键名保持不变。
+    """
 
     def __init__(self, in_channels=256, out_channels=2,
-                 target_h=1024, target_w=256):
+                 target_h=1024, target_w=256,
+                 num_batches=0, cond_dim=None):
         super().__init__()
         self.target_h = target_h
         self.target_w = target_w
@@ -548,8 +555,21 @@ class ReconDecoder(nn.Module):
             nn.ReLU(inplace=True),
             nn.ConvTranspose2d(16, out_channels, 4, stride=2, padding=1),
         )
+        self.batch_embed = None
+        self.cond_scale = None
+        if int(num_batches or 0) > 0:
+            dim = int(cond_dim or in_channels)
+            self.batch_embed = nn.Embedding(int(num_batches) + 1, dim)
+            self.cond_scale = nn.Linear(dim, in_channels)
+            nn.init.zeros_(self.cond_scale.weight)
+            nn.init.zeros_(self.cond_scale.bias)
 
-    def forward(self, feat_map):
+    def forward(self, feat_map, batch_id=None):
+        if self.batch_embed is not None and batch_id is not None:
+            idx = batch_id.to(feat_map.device).long()
+            idx = idx.clamp_(0, self.batch_embed.num_embeddings - 1)
+            gate = 1.0 + self.cond_scale(self.batch_embed(idx))
+            feat_map = feat_map * gate.unsqueeze(-1).unsqueeze(-1)
         x = self.up(feat_map)
         x = F.interpolate(x, size=(self.target_h, self.target_w),
                           mode="bilinear", align_corners=False)
@@ -641,12 +661,14 @@ class GCMSConsistencyNet(nn.Module):
         self.domain_head = DomainHead(dim, num_batches)
         # CE 分类辅助头 (加速产品判别学习, 训练后丢弃)
         self.cls_head = nn.Linear(dim, num_products) if num_products else None
-        # 重建解码器 (正则项)
+        # 重建解码器 (正则项); 开启条件化时把批次 id 也接进来
         self.decoder = ReconDecoder(
-            feat_map_dim, cfg.in_channels, cfg.rt_bins, cfg.mz_bins
+            feat_map_dim, cfg.in_channels, cfg.rt_bins, cfg.mz_bins,
+            num_batches=(num_batches
+                         if getattr(cfg, "recon_batch_conditioning", False) else 0),
         )
 
-    def forward(self, x, return_feat_map=False):
+    def forward(self, x, return_feat_map=False, batch_id=None):
         enc_raw, feat_map = self.encoder(x)
         z_raw = self.embed_head(enc_raw)
 
@@ -662,7 +684,8 @@ class GCMSConsistencyNet(nn.Module):
                          if active is None or active["domain_logits"] else None)
         cls_logits = (self.cls_head(z_raw) if self.cls_head is not None
                       and (active is None or active["cls_logits"]) else None)
-        recon = self.decoder(feat_map) if active is None or active["recon"] else None
+        recon = (self.decoder(feat_map, batch_id=batch_id)
+                 if active is None or active["recon"] else None)
 
         out = {
             "z": z,

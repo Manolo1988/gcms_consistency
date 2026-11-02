@@ -439,6 +439,9 @@ def main():
                         help="启用 SWA 多 checkpoint 权重平均 (替代单点 best)")
     parser.add_argument("--swa_start_epoch", type=int, default=None,
                         help="SWA 平均起始 epoch (默认 100)")
+    parser.add_argument("--recon-batch-conditioning", action="store_true",
+                        dest="recon_batch_conditioning",
+                        help="重建解码器拼批次条件 (批次信息走解码旁路, 需同时打开 lambda_recon)")
     parser.add_argument("--early_stop_patience", type=int, default=None,
                         help="早停耐心")
     parser.add_argument("--min_epochs_before_early_stop", type=int, default=None,
@@ -653,6 +656,8 @@ def main():
         cfg.swa_enabled = True
     if args.swa_start_epoch is not None:
         cfg.swa_start_epoch = int(args.swa_start_epoch)
+    if args.recon_batch_conditioning:
+        cfg.recon_batch_conditioning = True
     if args.open_score_blend_objective is not None:
         cfg.open_score_blend_objective = args.open_score_blend_objective
     if args.stress_test_batches is not None:

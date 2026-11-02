@@ -241,6 +241,7 @@ class Config:
     lambda_adv: float = 0.25                  # λ₁ 批次对抗 (加强去批次)
     lambda_proto: float = 0.85                # λ₂ 原型紧凑 (类内紧凑)
     lambda_recon: float = 0.25                # 重建正则
+    recon_batch_conditioning: bool = False    # 重建解码器拼批次条件 (批次信息走解码旁路)
     lambda_cls: float = 0.40                  # Focal 分类辅助头权重
     lambda_hard_pair: float = 0.12            # 易混产品对边界约束 (加强)
     supcon_temperature: float = 0.07          # SupCon 温度参数
