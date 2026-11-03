@@ -875,6 +875,7 @@ def run_fold(fold_idx, train_idx, val_idx, batch_name, metadata_csv, cfg):
               f"adv={m_train.get('adv',0):.3f} "
               f"proto={m_train.get('proto',0):.3f} "
               f"hardpair={m_train.get('hardpair',0):.3f} "
+              f"recon={m_train.get('recon',0):.3f} "
               f"total={m_train.get('total',0):.3f}")
 
         epoch_num = epoch + 1
@@ -1170,6 +1171,7 @@ def train_single_model(cfg: Config):
               f"adv={m_train.get('adv',0):.3f} "
               f"proto={m_train.get('proto',0):.3f} "
               f"hardpair={m_train.get('hardpair',0):.3f} "
+              f"recon={m_train.get('recon',0):.3f} "
               f"total={m_train.get('total',0):.3f}")
 
         epoch_num = epoch + 1
