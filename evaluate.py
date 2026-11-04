@@ -1286,6 +1286,9 @@ def plot_score_distribution(records, save_path):
 #  Setting A/B/C 统一评估入口
 # ═══════════════════════════════════════════════════════════
 
+_SETTING_A_DUMP_SEQ = {"n": 0}
+
+
 def evaluate_setting_a(model, loader_train_noaug, loader_val, proto_store,
                        device, cfg, fold_name=""):
     """Setting A: 闭集跨批次 — 在已知类上评估。"""
@@ -1300,8 +1303,14 @@ def evaluate_setting_a(model, loader_train_noaug, loader_val, proto_store,
 
     pid = product_identification_metrics(val_records, train_records)
     con = consistency_scoring_metrics(val_records)
-    dump_path = (Path(cfg.output_dir) / "setting_a_embeddings.npz"
-                 if bool(getattr(cfg, "eval_dump_embeddings", False)) else None)
+    dump_path = None
+    if bool(getattr(cfg, "eval_dump_embeddings", False)):
+        # 同一次评估里 Setting A 会被调用多次 (主留出批次 + stress 批次),
+        # 序号区分, 否则后一次会把前一次的文件覆盖掉。
+        _SETTING_A_DUMP_SEQ["n"] += 1
+        seq = _SETTING_A_DUMP_SEQ["n"]
+        dump_path = Path(cfg.output_dir) / f"setting_a_embeddings_{seq:02d}.npz"
+        print(f"  [Dump] Setting A [{fold_name}] -> {dump_path.name}")
     rob = batch_robustness_metrics(val_records, dump_path=dump_path)
 
     print(f"\n── Setting A [{fold_name}] ──")
