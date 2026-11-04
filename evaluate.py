@@ -98,6 +98,26 @@ def collect_embeddings(model, loader, device):
     return records
 
 
+def _dump_records(records, path, tag=""):
+    """把嵌入和 (产品, 批次名) 落盘, 供离线分析 (时间漂移探针 / 时间校正)。"""
+    if not records:
+        return
+    try:
+        np.savez(
+            path,
+            z=np.stack([np.asarray(r["z"], dtype=np.float32) for r in records]),
+            product=np.array([
+                str(r.get("true_class", r.get("true_product"))) for r in records
+            ]),
+            batch=np.array([
+                str(r.get("batch_name", r.get("batch_label"))) for r in records
+            ]),
+        )
+        print(f"  [Dump] {tag or 'records'} -> {Path(path).name} ({len(records)} 条)")
+    except Exception as exc:  # 落盘失败不影响评估
+        print(f"  [Dump] 写出失败 ({tag}): {exc}")
+
+
 @torch.no_grad()
 def collect_predictions(model, loader, proto_store, device, reject_factor=2.0):
     """收集所有样本的预测结果 (基于原型匹配)。"""
@@ -599,22 +619,7 @@ def batch_robustness_metrics(records, dump_path=None):
     result.update(mmd_batch_metrics(records))
 
     if dump_path is not None:
-        try:
-            np.savez(
-                dump_path,
-                z=zs,
-                product=np.array([
-                    str(r.get("true_class", r.get("true_product")))
-                    for r in records
-                ]),
-                batch=np.array([
-                    str(r.get("batch_name", r.get("batch_label")))
-                    for r in records
-                ]),
-            )
-            print(f"  [Dump] 嵌入已写出: {dump_path}")
-        except Exception as exc:  # 落盘失败不影响评估
-            print(f"  [Dump] 写出失败: {exc}")
+        _dump_records(records, dump_path, tag="Setting A")
 
     return result
 
@@ -1307,6 +1312,9 @@ def evaluate_setting_a(model, loader_train_noaug, loader_val, proto_store,
     if bool(getattr(cfg, "eval_dump_embeddings", False)):
         # 同一次评估里 Setting A 会被调用多次 (主留出批次 + stress 批次),
         # 序号区分, 否则后一次会把前一次的文件覆盖掉。
+        # 训练集嵌入另存一份, 用于"训练批次拟合、测试批次应用"的时间校正验证。
+        _dump_records(train_records, Path(cfg.output_dir) / "embeddings_train.npz",
+                      tag="train")
         _SETTING_A_DUMP_SEQ["n"] += 1
         seq = _SETTING_A_DUMP_SEQ["n"]
         dump_path = Path(cfg.output_dir) / f"setting_a_embeddings_{seq:02d}.npz"
