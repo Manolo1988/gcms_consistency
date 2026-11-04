@@ -348,6 +348,8 @@ def mmd_batch_metrics(records, n_perm=200, seed=42, min_group=4):
         "mmd_per_product": {},
         "mmd_pairs_per_product": {},
         "mmd_unevaluable_products": [],
+        "dist_ratio_mean": np.nan,
+        "dist_ratio_per_product": {},
     }
     if not records:
         return result
@@ -409,6 +411,50 @@ def mmd_batch_metrics(records, n_perm=200, seed=42, min_group=4):
     result["mmd_kernel_sigma"] = {
         str(p): float(np.sqrt(0.5 / g)) for p, g in gamma_by_product.items()
     }
+
+    # ── 无核宽版本: 跨批平均距离 / 批内平均距离 (同一产品内部) ──
+    #    MMD 的核宽 sigma 是用模型自己的嵌入估的, 表征整体缩放时 sigma 跟着变,
+    #    跨模型不可比。这个比值把批内距离当尺子放在分母, 只用同一空间里的距离
+    #    相除, 因而跨模型可比: 1.0 = 两批分不开, 2.0 = 跨批距离是批内的两倍。
+    def _mean_dist(X, Y, exclude_self=False):
+        aa = (X * X).sum(axis=1)[:, None]
+        bb = (Y * Y).sum(axis=1)[None, :]
+        d = np.sqrt(np.maximum(aa + bb - 2.0 * (X @ Y.T), 0.0))
+        if exclude_self:
+            n = d.shape[0]
+            if n < 2:
+                return np.nan
+            return float(d[~np.eye(n, dtype=bool)].mean())
+        return float(d.mean())
+
+    _cap = 48
+    ratio_per_product = {}
+    for p in sorted(set(prods)):
+        pm = prods == p
+        bl = [g for g in sorted(set(groups[pm]))
+              if int((pm & (groups == g)).sum()) >= min_group]
+        if len(bl) < 2:
+            continue
+        sets = {}
+        for g in bl:
+            idx = np.where(pm & (groups == g))[0]
+            if idx.size > _cap:
+                idx = rng.choice(idx, _cap, replace=False)
+            sets[g] = zs[idx]
+        within = [_mean_dist(sets[g], sets[g], exclude_self=True) for g in bl]
+        across = [_mean_dist(sets[bl[i]], sets[bl[j]])
+                  for i in range(len(bl)) for j in range(i + 1, len(bl))]
+        within = [v for v in within if v == v]
+        across = [v for v in across if v == v]
+        if within and across and float(np.mean(within)) > 1e-12:
+            ratio_per_product[str(p)] = float(
+                np.mean(across) / np.mean(within)
+            )
+    result["dist_ratio_per_product"] = ratio_per_product
+    result["dist_ratio_mean"] = (
+        float(np.mean(list(ratio_per_product.values())))
+        if ratio_per_product else np.nan
+    )
 
     def _product_pairs(p, g_arr):
         """该产品在 g_arr 标注下的所有跨批次 MMD² (跳过样本数不足的批次)。
@@ -511,8 +557,12 @@ def mmd_batch_metrics(records, n_perm=200, seed=42, min_group=4):
     return result
 
 
-def batch_robustness_metrics(records):
-    """批次鲁棒性指标。"""
+def batch_robustness_metrics(records, dump_path=None):
+    """批次鲁棒性指标。
+
+    dump_path: 可选, 给出 .npz 路径时把嵌入和 (产品, 批次) 标签落盘,
+               供离线分析 (比如时间漂移探针) 复用, 不影响指标计算。
+    """
     zs = np.stack([r["z"] for r in records])
     product_labels = np.array([r["true_product"] for r in records])
     batch_labels = np.array([r["batch_label"] for r in records])
@@ -547,6 +597,24 @@ def batch_robustness_metrics(records):
 
     # 批次效应量化 (Niu et al. 2022): 跨批次 MMD / 批次内 MMD 下界
     result.update(mmd_batch_metrics(records))
+
+    if dump_path is not None:
+        try:
+            np.savez(
+                dump_path,
+                z=zs,
+                product=np.array([
+                    str(r.get("true_class", r.get("true_product")))
+                    for r in records
+                ]),
+                batch=np.array([
+                    str(r.get("batch_name", r.get("batch_label")))
+                    for r in records
+                ]),
+            )
+            print(f"  [Dump] 嵌入已写出: {dump_path}")
+        except Exception as exc:  # 落盘失败不影响评估
+            print(f"  [Dump] 写出失败: {exc}")
 
     return result
 
@@ -1232,7 +1300,9 @@ def evaluate_setting_a(model, loader_train_noaug, loader_val, proto_store,
 
     pid = product_identification_metrics(val_records, train_records)
     con = consistency_scoring_metrics(val_records)
-    rob = batch_robustness_metrics(val_records)
+    dump_path = (Path(cfg.output_dir) / "setting_a_embeddings.npz"
+                 if bool(getattr(cfg, "eval_dump_embeddings", False)) else None)
+    rob = batch_robustness_metrics(val_records, dump_path=dump_path)
 
     print(f"\n── Setting A [{fold_name}] ──")
     print(f"  Accuracy:       {pid['accuracy']:.4f}")
@@ -1244,6 +1314,8 @@ def evaluate_setting_a(model, loader_train_noaug, loader_val, proto_store,
     print(f"  Sil(product):   {rob['silhouette_product']:.4f}")
     print(f"  Sil(batch):     {rob['silhouette_batch']:.4f}")
     print(f"  Batch pred:     {rob['batch_predictability']:.4f}")
+    print(f"  Dist ratio:     {rob.get('dist_ratio_mean', float('nan')):.4f}"
+          "  (跨批距离/批内距离, 1.0=分不开)")
 
     return {
         "product_identification": pid,

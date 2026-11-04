@@ -574,6 +574,9 @@ def main():
     parser.add_argument("--no_save_visualizations", dest="evaluate_save_visualizations",
                         action="store_false",
                         help="评估时不保存可视化图")
+    parser.add_argument("--dump-embeddings", dest="eval_dump_embeddings",
+                        action="store_true", default=False,
+                        help="评估时把 Setting A 的嵌入落盘 (setting_a_embeddings.npz), 供离线分析")
 
     # 范围参数
     parser.add_argument("--rt_min", type=float, default=None)
@@ -721,6 +724,8 @@ def main():
     cfg.save_prepare_tables = bool(args.save_prepare_tables)
     if args.evaluate_save_visualizations is not None:
         cfg.evaluate_save_visualizations = bool(args.evaluate_save_visualizations)
+    if args.eval_dump_embeddings:
+        cfg.eval_dump_embeddings = True
 
     if (args.rt_min is not None) or (args.rt_max is not None):
         rt_min = cfg.rt_range[0] if args.rt_min is None else args.rt_min
