@@ -18,12 +18,22 @@ import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import silhouette_score
 
+from evaluate import mmd_batch_metrics
+
 
 def load(path):
     d = np.load(path, allow_pickle=True)
     return (np.asarray(d["z"], dtype=np.float64),
             np.asarray(d["product"]).astype(str),
             np.asarray(d["batch"]).astype(str))
+
+
+def batch_metrics(Z, prod, batch):
+    """复用 evaluate.mmd_batch_metrics, 得到 MMD 与 dist_ratio (均已按产品分层)。"""
+    records = [{"z": Z[i], "true_class": prod[i], "batch_name": batch[i]}
+               for i in range(len(Z))]
+    r = mmd_batch_metrics(records, n_perm=0, seed=42, min_group=4)
+    return float(r.get("mmd_batch_mean", np.nan)), float(r.get("dist_ratio_mean", np.nan))
 
 
 def batch_predictability(Z, batch):
@@ -47,13 +57,16 @@ def main():
     ap.add_argument("--label", action="append", default=None)
     args = ap.parse_args()
 
-    print("%-16s %-10s %-10s %-10s %-7s" % ("run", "可预测↓", "批轮廓↓", "产轮廓↑", "n"))
+    print("%-16s %-10s %-10s %-10s %-7s %-10s %-10s" % (
+        "run", "可预测↓", "批轮廓↓", "产轮廓↑", "n", "MMD↓", "dist_ratio↓"))
     for i, path in enumerate(args.npz):
         Z, prod, batch = load(path)
         label = args.label[i] if args.label and i < len(args.label) else path
-        print("%-16s %-10.3f %-10.3f %-10.3f %-7d" % (
+        mmd, ratio = batch_metrics(Z, prod, batch)
+        print("%-16s %-10.3f %-10.3f %-10.3f %-7d %-10.3f %-10.3f" % (
             label, batch_predictability(Z, batch),
-            safe_silhouette(Z, batch), safe_silhouette(Z, prod), len(Z)))
+            safe_silhouette(Z, batch), safe_silhouette(Z, prod), len(Z),
+            mmd, ratio))
 
 
 if __name__ == "__main__":
