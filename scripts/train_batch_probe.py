@@ -13,10 +13,15 @@
   .venv/bin/python scripts/train_batch_probe.py <a.npz> [<b.npz> ...] --label x --label y
 """
 import argparse
+import sys
+from pathlib import Path
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import silhouette_score
+
+# 让 scripts/ 下的脚本能 import 项目根目录的模块
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from evaluate import mmd_batch_metrics
 
